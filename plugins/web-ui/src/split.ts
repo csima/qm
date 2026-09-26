@@ -1003,7 +1003,8 @@ class PaneContent implements IContentRenderer {
   }
 
   private async load(): Promise<void> {
-    if (this.loaded || this.disposed) return;
+    await Promise.resolve();
+    if (this.loaded || this.disposed || !this.visible) return;
     this.loaded = true;
     this.syncDensity();
     const { sessionId, threadRef, scopeId } = this.params;
