@@ -1858,7 +1858,7 @@ export function createPostgresSessionStore(connectionString: string, opts: Store
            )
            INSERT INTO session_spend_dirty(day)
            SELECT DISTINCT floor(r.created_at::numeric / 86400000)::bigint
-             FROM session_llm_requests r JOIN affected a ON a.id = r.session_id WHERE r.usage_json IS NOT NULL
+             FROM session_llm_requests r WHERE r.session_id = ANY(ARRAY(SELECT id FROM affected)) AND r.usage_json IS NOT NULL
            ON CONFLICT DO NOTHING`,
           [changed.rows.map((r) => r.session_id)],
         );

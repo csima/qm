@@ -212,7 +212,8 @@ export function createAppHelpers(deps: AppDeps, app: App) {
           run.result ?? { status: "failed", sessionId: run.sessionId, reason: "run produced no result" },
         );
       }
-      const claimed = await deps.runs.claimForSession(run.sessionId, "inline", deps.leaseTtlMs);
+      const claimed =
+        run.status === "pending" ? await deps.runs.claimForSession(run.sessionId, "inline", deps.leaseTtlMs) : null;
       if (claimed) {
         const result = processRun(
           { runs: deps.runs, orchestrator: deps.orchestrator, leaseTtlMs: deps.leaseTtlMs },
