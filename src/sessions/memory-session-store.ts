@@ -443,6 +443,17 @@ export function createMemorySessionStore(opts: StoreOptions = {}): SessionStore 
       });
     },
 
+    async llmRequestCounts(sessionId, fromSeq) {
+      const counts = new Map<number | null, number>();
+      for (const { turnSeq } of llmRequests.get(sessionId) ?? []) {
+        if (turnSeq !== null && turnSeq < fromSeq) continue;
+        counts.set(turnSeq, (counts.get(turnSeq) ?? 0) + 1);
+      }
+      return [...counts]
+        .map(([turnSeq, count]) => ({ turnSeq, count }))
+        .sort((a, b) => (a.turnSeq ?? Infinity) - (b.turnSeq ?? Infinity));
+    },
+
     async listScreenSamples(limit) {
       const wanted = Math.max(0, Math.trunc(limit));
       if (!wanted) return [];

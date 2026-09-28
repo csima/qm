@@ -1,4 +1,5 @@
 import { assertPersonalConversationParity } from "./support/personal-conversation-parity.ts";
+import { assertLlmRequestCounts } from "./support/llm-request-counts.ts";
 import "./run-availability.ts";
 import { migrateTranscriptPage } from "../scripts/lib/transcript-tape-migration.ts";
 import { test, before } from "node:test";
@@ -71,6 +72,10 @@ test("pg session store: fork provenance survives a store restart", { skip }, asy
 
 test("pg session store: getForParticipant returns exactly the row listByParticipant returns", { skip }, async () => {
   await assertParticipantSessionParity(createPostgresSessionStore(URL!), `pg-parity-${randomUUID()}`);
+});
+
+test("pg session store: LLM request counts preserve page lower bounds and exact context keys", { skip }, async () => {
+  await assertLlmRequestCounts(createPostgresSessionStore(URL!), `pg-llm-counts-${randomUUID()}`);
 });
 
 test("pg participant activity uses the latest user entry, including overheard entries", { skip }, async () => {

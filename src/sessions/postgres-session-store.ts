@@ -1256,6 +1256,19 @@ export function createPostgresSessionStore(connectionString: string, opts: Store
       return rows.map(rowToLlmRequest);
     },
 
+    async llmRequestCounts(sessionId, fromSeq) {
+      const rows = await q(
+        `SELECT turn_seq, COUNT(*) AS count FROM session_llm_requests
+         WHERE session_id = $1 AND (turn_seq >= $2 OR turn_seq IS NULL)
+         GROUP BY turn_seq ORDER BY turn_seq NULLS LAST`,
+        [sessionId, fromSeq],
+      );
+      return rows.map((row) => ({
+        turnSeq: row.turn_seq === null ? null : Number(row.turn_seq),
+        count: Number(row.count),
+      }));
+    },
+
     async listScreenSamples(limit): Promise<ScreenSample[]> {
       const wanted = Math.max(0, Math.trunc(limit));
       const pageSize = Math.max(wanted, 100);
