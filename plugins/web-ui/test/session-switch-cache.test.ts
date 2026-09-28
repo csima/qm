@@ -123,5 +123,9 @@ test("switching keeps the old view up, shows a spinner only past 150ms, and pain
   const abandoned = openSessionInto(conv, session("sess-late"), undefined, undefined, false);
   await openSessionInto(conv, session("sess-fast"), undefined, undefined, false);
   await abandoned;
-  assert.ok(!events.includes("mount sess-late"), "clicking back to the shown conversation cancels the pending switch");
+  assert.doesNotMatch(
+    events.join(),
+    /mount sess-late/,
+    "clicking back to the shown conversation cancels the pending switch",
+  );
 });
