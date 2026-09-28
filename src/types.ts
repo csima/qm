@@ -84,7 +84,6 @@ export interface SpawnMeta {
   model?: string;
   harness?: string;
   thinkingLevel?: string;
-  defaultThinkingLevel?: string;
   fastMode?: boolean;
 }
 

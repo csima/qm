@@ -387,6 +387,7 @@ import {
   modelProviderAvailabilityFor,
   resolveModel,
   type HarnessId,
+  parseEffort,
   parseRuntimeChoice,
 } from "./model/pi-models.ts";
 import { NonRetryableTurnError } from "./core/turn-error.ts";
@@ -1430,10 +1431,16 @@ export function buildApp(
     await refreshModels();
     const requested = input.requestedRuntime;
     if (input.runtimePinned && requested?.harnessId && requested.modelId) {
-      const { fastMode, ...rest } = requested;
+      const { fastMode, defaultEffortLevel, ...rest } = requested;
       const pinned = parseRuntimeChoice(rest);
       if (!pinned.ok) throw new NonRetryableTurnError(pinned.message);
-      return { ...pinned.choice, ...(typeof fastMode === "boolean" ? { fastMode } : {}) };
+      const effortLevel =
+        pinned.choice.effortLevel ?? parseEffort(pinned.choice.harnessId, pinned.choice.modelId, defaultEffortLevel);
+      return {
+        ...pinned.choice,
+        ...(effortLevel ? { effortLevel } : {}),
+        ...(typeof fastMode === "boolean" ? { fastMode } : {}),
+      };
     }
     return resolveRuntimeChoiceDurable(
       configStore,

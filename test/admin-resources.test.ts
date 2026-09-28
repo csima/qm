@@ -723,6 +723,13 @@ test("admin runtime saves reasoning level and fast mode with the default model",
       /effort xhigh isn't available on pi\/claude-haiku-4-5; pass an effort/,
     );
     assert.equal((await srv.built.config.getRuntimeSelectionDurable("org:default-org"))?.modelId, "claude-opus-5");
+    const explicit = await fetch(`${srv.base}/v1/admin/scopes/org:default-org/base-model`, {
+      method: "PUT",
+      headers: ADMIN,
+      body: JSON.stringify({ modelId: "claude-haiku-4-5", effortLevel: "auto" }),
+    });
+    assert.equal(explicit.status, 200);
+    assert.equal((await srv.built.config.getRuntimeSelectionDurable("org:default-org"))?.effortLevel, "auto");
   } finally {
     await srv.close();
   }

@@ -33,5 +33,8 @@ export function harnessSupportsSteer(harnessId: string): boolean {
 
 export function defaultEffortForModel(model: Model<Api> | undefined): EffortLevel {
   const provider = String(model?.provider ?? model?.api ?? "").toLowerCase();
-  return provider.includes("anthropic") ? "low" : "auto";
+  const levels = (model as { effortLevelsByHarness?: Record<string, readonly string[]> } | undefined)
+    ?.effortLevelsByHarness;
+  const offersLow = !levels || Object.values(levels).some((offered) => offered.includes("low"));
+  return provider.includes("anthropic") && offersLow ? "low" : "auto";
 }

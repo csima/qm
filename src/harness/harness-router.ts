@@ -108,15 +108,9 @@ function resolvedEffort(
   requested: string | undefined,
   inherited: StoredRuntime | undefined,
 ): EffortLevel | undefined {
-  const level = requested ?? inherited?.effortLevel;
-  if (level === undefined) return undefined;
-  const sameTarget = inherited?.harnessId === target.harnessId && inherited.modelId === target.modelId;
-  if (requested === undefined && sameTarget) return storedEffort(target.harnessId, target.modelId, level);
-  const effort = parseEffort(target.harnessId, target.modelId, level);
-  if (!effort)
-    throw new NonRetryableTurnError(
-      effortNotOfferedMessage(target.harnessId, target.modelId, level, requested === undefined),
-    );
+  if (requested === undefined) return storedEffort(target.harnessId, target.modelId, inherited?.effortLevel);
+  const effort = parseEffort(target.harnessId, target.modelId, requested);
+  if (!effort) throw new NonRetryableTurnError(effortNotOfferedMessage(target.harnessId, target.modelId, requested));
   return effort;
 }
 

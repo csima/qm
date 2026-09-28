@@ -13,6 +13,7 @@ import {
   type LoadoutEntry,
 } from "../src/composer-loadout.ts";
 import { effortLabel, type ModelOption } from "../src/model-options.ts";
+import { defaultEffortForModel } from "../src/runtime-capabilities.ts";
 
 function entry(value: string, effort: LoadoutEntry["effort"] = "auto", fast = false): LoadoutEntry {
   return { value, effort, fast };
@@ -282,4 +283,11 @@ test("only the top tier each provider offers is the rainbow peak", () => {
   assert.deepEqual(peaks("opencode"), []);
   assert.equal(effortLabel("ultra"), "Ultra");
   assert.equal(effortLabel("ultracode"), "Ultracode");
+});
+
+test("the Anthropic default effort is only Low where the model offers it", () => {
+  const model = option("pi:one").model;
+  assert.equal(defaultEffortForModel(model), "low");
+  const haiku = { ...model, effortLevelsByHarness: { pi: ["auto", "default"], claude: ["auto"] } };
+  assert.equal(defaultEffortForModel(haiku), "auto");
 });

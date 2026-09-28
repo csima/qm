@@ -7,6 +7,8 @@ import { parseRuntimeChoice, resolveModel, storedEffort, thinkingLevelsForHarnes
 import { codexReasoningEffort } from "../src/harness/codex-harness.ts";
 import { resolveRuntimeChoice } from "../src/harness/harness-router.ts";
 import { createRuntimeService } from "../src/harness/runtime-control.ts";
+import { recoveredRuntime } from "../src/harness/runtime-recovery.ts";
+import type { SessionEntry } from "../src/types.ts";
 import { createMemoryConfigStore } from "../src/resolution/config-store.ts";
 import { buildApp } from "../src/wiring.ts";
 import { createInsecureTestServer } from "../src/api/server.ts";
@@ -93,7 +95,8 @@ test("the runtime tool rejects invalid efforts, including one carried over to a 
   assert.equal(config.getRuntimeSelection(SCOPE)?.effortLevel, "ultra");
 });
 
-test("turn and sessions-open overrides reject an effort the target does not offer", () => {
+test("explicit turn and sessions-open efforts are rejected; a carried one that does not fit runs unset", (t) => {
+  t.mock.method(console, "warn", () => {});
   const config = createMemoryConfigStore("default-org");
   config.setApprovedHarnesses(["pi", "claude", "codex"]);
   config.setRuntimeSelection(
@@ -105,10 +108,10 @@ test("turn and sessions-open overrides reject an effort the target does not offe
     () => resolveRuntimeChoice(config, ORG, SCOPE, fallback, { effortLevel: "ultra" }),
     /effort ultra isn't available on claude\/claude-opus-5-5 \(valid: /,
   );
-  assert.throws(
-    () => resolveRuntimeChoice(config, ORG, SCOPE, fallback, { harnessId: "codex", modelId: "gpt-6-astra" }),
-    /effort ultracode isn't available on codex\/gpt-6-astra; pass an effort/,
-  );
+  assert.deepEqual(resolveRuntimeChoice(config, ORG, SCOPE, fallback, { harnessId: "codex", modelId: "gpt-6-astra" }), {
+    harnessId: "codex",
+    modelId: "gpt-6-astra",
+  });
   assert.deepEqual(
     resolveRuntimeChoice(config, ORG, SCOPE, fallback, {
       harnessId: "codex",
@@ -124,17 +127,17 @@ test("a stored effort from before this check runs unset, warns once, and is repl
   t.mock.method(console, "warn", (message: string) => warnings.push(message));
   const config = createMemoryConfigStore("default-org");
   config.setApprovedHarnesses(["pi", "codex"]);
-  const legacy = { harnessId: "codex" as const, modelId: "gpt-6-astra", effortLevel: "ultracode" };
+  const legacy = { harnessId: "codex" as const, modelId: "gpt-5.6-luna", effortLevel: "ultra" };
   config.setRuntimeSelection(SCOPE, legacy as ReturnType<typeof runtimeChoice>);
   const fallback = { harnessId: "pi" as const, modelId: "claude-opus-5-5" };
   for (let i = 0; i < 3; i++)
     assert.deepEqual(resolveRuntimeChoice(config, ORG, SCOPE, fallback), {
       harnessId: "codex",
-      modelId: "gpt-6-astra",
+      modelId: "gpt-5.6-luna",
     });
-  assert.equal(storedEffort("codex", "gpt-6-astra", "ultracode"), undefined);
+  assert.equal(storedEffort("codex", "gpt-5.6-luna", "ultra"), undefined);
   assert.equal(warnings.length, 1);
-  assert.match(warnings[0]!, /stored effort ultracode isn't available on codex\/gpt-6-astra/);
+  assert.match(warnings[0]!, /stored effort ultra isn't available on codex\/gpt-5.6-luna/);
   const service = createRuntimeService({ config, harnessId: "pi" }, { authorizesCapabilityScope: async () => true });
   const claims = { actorId: "alice", scopeId: SCOPE, liveActor: true, exp: Date.now() + 60_000 } as const;
   const active = resolveRuntimeChoice(config, ORG, SCOPE, fallback);
@@ -186,4 +189,22 @@ test("the web picker, admin settings and cron writers reject an effort the model
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
+});
+
+test("a recovered legacy handoff keeps its harness and model and drops only the effort", (t) => {
+  t.mock.method(console, "warn", () => {});
+  const entry = {
+    type: "tool_result",
+    payload: {
+      tool: "runtime",
+      runId: "run",
+      actorId: "alice",
+      runtimeHandoff: { choice: { harnessId: "codex", modelId: "gpt-6-luna", effortLevel: "ultra", fastMode: false } },
+    },
+  } as unknown as SessionEntry;
+  assert.deepEqual(recoveredRuntime([entry], "run", "alice"), {
+    harnessId: "codex",
+    modelId: "gpt-6-luna",
+    fastMode: false,
+  });
 });

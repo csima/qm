@@ -85,16 +85,15 @@ test("runtime resolution carries reasoning and fast-mode defaults into turns", (
       fastMode: false,
     },
   );
-  assert.throws(
-    () =>
-      resolveRuntimeChoice(
-        config,
-        ORG,
-        PERSONAL,
-        { harnessId: "pi", modelId: "claude-fable-5" },
-        { harnessId: "opencode", modelId: "claude-opus-5" },
-      ),
-    { message: "effort high isn't available on opencode/claude-opus-5; pass an effort (valid: auto)" },
+  assert.deepEqual(
+    resolveRuntimeChoice(
+      config,
+      ORG,
+      PERSONAL,
+      { harnessId: "pi", modelId: "claude-fable-5" },
+      { harnessId: "opencode", modelId: "claude-opus-5" },
+    ),
+    { harnessId: "opencode", modelId: "claude-opus-5", fastMode: true },
   );
   assert.deepEqual(
     resolveRuntimeChoice(
