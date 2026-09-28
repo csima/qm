@@ -134,6 +134,21 @@ test("a reopened session keeps its runtime in the picker and sends its next turn
     composer!.adoptRuntime(carried);
     assert.equal(composer!.currentModelOption()?.value, "pi:sonnet", "a fork carries the whole runtime");
     assert.equal(composer!.state.effortLevel, "max");
+
+    ctx.chat.state.threadRef = "web:tester:unsent";
+    await composer!.refreshRuntimeSelection(null, agent);
+    composer!.state.effortLevel = "high";
+    composer!.adoptRuntime({ harnessId: "pi", modelId: "sonnet", effortLevel: "max" });
+    assert.equal(composer!.currentModelOption()?.value, "pi:opus", "an unsent pick in this tab survives a reopen");
+    assert.equal(composer!.state.effortLevel, "high");
+
+    ctx.chat.state.threadRef = "web:tester:elsewhere";
+    await composer!.refreshRuntimeSelection(null, agent);
+    composer!.adoptRuntime({ harnessId: "codex", modelId: "retired", effortLevel: "max" });
+    assert.equal(composer!.currentModelOption()?.value, "pi:opus", "a runtime this viewer cannot run is not adopted");
+    composer!.adoptRuntime({ harnessId: "pi", modelId: "sonnet", effortLevel: "bogus" });
+    assert.equal(composer!.currentModelOption()?.value, "pi:sonnet");
+    assert.equal(composer!.state.effortLevel, "low", "an effort the model no longer offers is not pinned");
   } finally {
     composer?.dispose();
     await vite.close();

@@ -208,20 +208,16 @@ export function createSessionMethods(
     });
   };
 
-  const sessionRuntime = async (session: {
-    threadRef: string;
-    forkedFrom?: { sessionId: string };
-  }): Promise<RuntimeChoice | undefined> => {
-    const request = (await deps.runs.latestForThread(session.threadRef, { excludePrivateMessages: true }))?.request;
-    if (request?.model && isHarnessId(request.harness))
-      return {
-        harnessId: request.harness,
-        modelId: request.model,
-        ...(request.thinkingLevel ? { effortLevel: request.thinkingLevel } : {}),
-        ...(typeof request.fastMode === "boolean" ? { fastMode: request.fastMode } : {}),
-      };
-    const source = session.forkedFrom ? await deps.sessions.get(session.forkedFrom.sessionId) : null;
-    return source ? sessionRuntime(source) : undefined;
+  const sessionRuntime = async (threadRef: string): Promise<RuntimeChoice | undefined> => {
+    const request = (await deps.runs.latestForThread(threadRef, { excludePrivateMessages: true, webHumanOnly: true }))
+      ?.request;
+    if (!request?.model || !isHarnessId(request.harness)) return undefined;
+    return {
+      harnessId: request.harness,
+      modelId: request.model,
+      ...(request.thinkingLevel ? { effortLevel: request.thinkingLevel } : {}),
+      ...(typeof request.fastMode === "boolean" ? { fastMode: request.fastMode } : {}),
+    };
   };
 
   return {
@@ -293,7 +289,7 @@ export function createSessionMethods(
       const earlier = w.earlier + read.earlier;
       const [pins, runtime] = await Promise.all([
         decoratedPins(pinRecords, visible, (seq) => viewerStoredEntryAt(sessionId, principalId, seq)),
-        sessionRuntime(session),
+        sessionRuntime(session.threadRef),
       ]);
       return {
         session,

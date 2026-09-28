@@ -90,6 +90,7 @@ function loadThreadPicks(): Map<string, ModelOptionValue> {
 }
 
 let threadModelPicks = loadThreadPicks();
+const unsentRuntimeThreads = new Set<string>();
 function runtimeScopeKey(scopeId: string | null): string | null {
   if (scopeId) return scopeId;
   const user = appState.me?.user;
@@ -211,6 +212,7 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
   let restoredLoadout: LoadoutEntry | undefined;
   let loadoutRestored = false;
   let modelSelectionRevision = 0;
+  let adoptedRuntime: RuntimeConfig["effective"] | undefined;
   let effortSelectionRevision = 0;
   let fastSelectionRevision = 0;
 
@@ -253,6 +255,7 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
       return levels.some((level) => level.value === effort) ? effort : levels[0]!.value;
     },
     set effortLevel(value: EffortLevel) {
+      markRuntimeUnsent();
       ++effortSelectionRevision;
       effortOverride = value;
     },
@@ -269,6 +272,7 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
       );
     },
     set fastMode(value: boolean | undefined) {
+      markRuntimeUnsent();
       ++fastSelectionRevision;
       fastModeOverride = value;
     },
@@ -352,6 +356,7 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
     const identity = `${key}:${ctx.chat.state.threadRef}`;
     const changedIdentity = identity !== runtimeIdentity;
     if (changedIdentity) {
+      adoptedRuntime = undefined;
       effortOverride = undefined;
       fastModeOverride = undefined;
       restoredLoadout = undefined;
@@ -382,6 +387,7 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
     const config = actualScope === null ? null : await loadRuntimeConfig(actualScope, refresh, options.runtimeAccount);
     if (request !== runtimeRequest) return;
     if (!config) composerState.error = "Could not load runtime settings.";
+    if (config) applyAdoptedRuntime();
     if (config && !loadoutRestored) {
       restoreLoadoutSelection();
       loadoutRestored = true;
@@ -437,14 +443,30 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
     };
   }
 
+  function markRuntimeUnsent(): void {
+    if (ctx.chat.state.threadRef) unsentRuntimeThreads.add(ctx.chat.state.threadRef);
+  }
+
   function adoptRuntime(runtime: RuntimeConfig["effective"] | undefined): void {
     const threadRef = ctx.chat.state.threadRef;
-    if (!threadRef || !runtime) return;
+    if (!threadRef || !runtime || unsentRuntimeThreads.has(threadRef)) return;
+    adoptedRuntime = runtime;
+    if (getRuntimeConfig(scopeKey())) applyAdoptedRuntime();
+  }
+
+  function applyAdoptedRuntime(): void {
+    const runtime = adoptedRuntime;
+    const threadRef = ctx.chat.state.threadRef;
+    adoptedRuntime = undefined;
+    const option = runtime && modelOptionFor(`${runtime.harnessId}:${runtime.modelId}`, scopeKey());
+    if (!runtime || !threadRef || !option) return;
     ++modelSelectionRevision;
     ++effortSelectionRevision;
     ++fastSelectionRevision;
-    rememberThreadPick(threadRef, `${runtime.harnessId}:${runtime.modelId}`);
-    effortOverride = runtime.effortLevel as EffortLevel | undefined;
+    rememberThreadPick(threadRef, option.value);
+    effortOverride = effortLevelsForHarness(option.harnessId, option.model).find(
+      (level) => level.value === runtime.effortLevel,
+    )?.value;
     fastModeOverride = runtime.fastMode;
     restoredLoadout = undefined;
     syncRuntimeSelection(ctx.chat.state.agent ?? undefined);
@@ -1543,6 +1565,7 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
           : {}),
       };
       submitting = true;
+      if (ctx.chat.state.threadRef) unsentRuntimeThreads.delete(ctx.chat.state.threadRef);
       clearActiveDraft();
       resetComposer();
       ctx.chat.drawActiveChat(agent);
@@ -1567,6 +1590,7 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
     const attachments = composerState.attachments;
     const sentFromThread = ctx.chat.state.threadRef;
     ctx.chat.notePendingSessionOnSend();
+    if (sentFromThread) unsentRuntimeThreads.delete(sentFromThread);
     clearActiveDraft();
     resetComposer();
     ctx.chat.drawActiveChat(agent);
@@ -1876,6 +1900,7 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
     const option = getModelOptions(scopeKey()).find((candidate) => candidate.value === value);
     if (!option) return;
     ++modelSelectionRevision;
+    markRuntimeUnsent();
     const previousDefaultEffort = defaultEffortForModel(currentModelOption()?.model);
     if (ctx.chat.state.threadRef) rememberThreadPick(ctx.chat.state.threadRef, option.value);
     agent.state.model = option.model;
