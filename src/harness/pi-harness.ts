@@ -888,6 +888,27 @@ export function sanitizeLlmPayload(
   return withTransport({ envelope: redacted, truncated: false });
 }
 
+export function droppedThinkingNotice(
+  message: unknown,
+): { kind: "thinking_dropped"; count: number; reasons: string[] } | undefined {
+  const diagnostics = (message as { diagnostics?: unknown } | null)?.diagnostics;
+  if (!Array.isArray(diagnostics)) return undefined;
+  const dropped = diagnostics
+    .flatMap((diagnostic: { type?: unknown; details?: { transformations?: unknown } } | null) =>
+      diagnostic?.type === "anthropic_input_transformations" && Array.isArray(diagnostic.details?.transformations)
+        ? (diagnostic.details.transformations as Array<{ type?: unknown; reason?: unknown } | null>)
+        : [],
+    )
+    .filter((transformation) => transformation?.type === "thinking_dropped");
+  if (!dropped.length) return undefined;
+  const reasons = [
+    ...new Set(
+      dropped.map((transformation) => (typeof transformation?.reason === "string" ? transformation.reason : "unknown")),
+    ),
+  ];
+  return { kind: "thinking_dropped", count: dropped.length, reasons };
+}
+
 export function thinkingBlocksFromContent(
   content: unknown,
 ): Array<{ thinking: string; redacted?: boolean; thinkingSignature?: string }> {
@@ -1107,7 +1128,7 @@ async function createIsolatedResources(prefix: string, systemPrompt: string): Pr
     ephemeralCwd = cwd;
   }
   const agentDir = mkdtempSync(join(tmpdir(), `${prefix}-agent-`));
-  const settingsManager = SettingsManager.inMemory({}, { projectTrusted: false });
+  const settingsManager = SettingsManager.inMemory({ cacheWarming: "off" }, { projectTrusted: false });
   const resourceLoader = new DefaultResourceLoader({
     cwd,
     agentDir,
@@ -1177,7 +1198,7 @@ export async function buildModelRuntime(
   const modelsPath = customModelsPath();
   const runtime = await ModelRuntime.create({ credentials, modelsPath });
   for (const [provider, apiKey] of Object.entries(apiKeys)) {
-    if (apiKey) await runtime.setRuntimeApiKey(provider, apiKey, { allowNetwork: false });
+    if (apiKey) await runtime.setRuntimeApiKey(provider, apiKey);
   }
   if (modelGateway) {
     const providers = new Set(
@@ -2007,6 +2028,15 @@ export function createPiHarness(opts?: PiHarnessOptions): Harness {
               });
               prevStepEnd = end;
               toolWallByStep.push([]);
+              const droppedThinking = droppedThinkingNotice(event.message);
+              if (droppedThinking) {
+                console.warn(
+                  `pi: earlier thinking dropped session=${turn.session.id} model=${stepModel?.id ?? effectiveModel} blocks=${droppedThinking.count} reasons=${droppedThinking.reasons.join(",")}`,
+                );
+                thinkTail = thinkTail
+                  .then(() => turn.emit({ type: "system", payload: droppedThinking, scopeLabel: turn.scopeLabel }))
+                  .catch(swallowAs("pi: dropped-thinking entry persist", undefined));
+              }
               const stepContent = (event.message as { content?: unknown }).content;
               for (const block of thinkingBlocksFromContent(stepContent)) {
                 thinkTail = thinkTail
@@ -2508,7 +2538,7 @@ export function createPiHarness(opts?: PiHarnessOptions): Harness {
         return summarizeHistory(input.history, model, (summaryModel, context, options) => {
           input.recordModelCall({
             model: compactModelId,
-            inputTokens: countTokens(context.systemPrompt ?? "") + countTokens(JSON.stringify(context.messages)),
+            inputTokens: countTokens(JSON.stringify(context.messages)),
             entryCount: input.history.length,
           });
           return runtime.streamSimple(summaryModel, context, options);

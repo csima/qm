@@ -402,7 +402,14 @@ function builtinModel(id: string): PiModel | undefined {
   for (const provider of MODEL_PROVIDERS) {
     const m = getModel(provider, id);
     if (!m) continue;
-    return m;
+    if (!m.compat) return m;
+    const {
+      allowedFallbackModels: _fallbacks,
+      supportsMidConvoSystemMessages: _systemMessages,
+      supportsMidConvoToolChanges: _toolChanges,
+      ...compat
+    } = m.compat as Record<string, unknown>;
+    return { ...m, compat: compat as PiModel["compat"] };
   }
   return undefined;
 }

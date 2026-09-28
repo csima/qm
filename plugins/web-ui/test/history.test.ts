@@ -588,6 +588,27 @@ test("a revision marker whose original message is outside the window still rende
   assert.equal((msgs[1] as { role?: string }).role, "system-note");
 });
 
+test("a thinking_dropped marker renders as a system note before the reply", () => {
+  const entries: SessionEntry[] = [
+    { type: "user", payload: { text: "continue" }, createdAt: 100 },
+    {
+      type: "system",
+      payload: { kind: "thinking_dropped", count: 2, reasons: ["organization_binding_mismatch"] },
+      createdAt: 105,
+    },
+    { type: "assistant", payload: { text: "done" }, createdAt: 110 },
+  ];
+  const msgs = entriesToMessages(entries, MODEL);
+  assert.equal(msgs.length, 3, "user + dropped-reasoning note + reply");
+  assert.deepEqual(msgs[1], {
+    role: "system-note",
+    note: "thinking_dropped",
+    reasons: ["organization_binding_mismatch"],
+    timestamp: 105,
+  });
+  assert.equal((msgs[2] as { role?: string }).role, "assistant");
+});
+
 test("other system entries (file events, context summaries) still never render", () => {
   const entries: SessionEntry[] = [
     { type: "user", payload: { text: "hi" }, createdAt: 100 },
