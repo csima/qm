@@ -149,6 +149,12 @@ test("a reopened session keeps its runtime in the picker and sends its next turn
     composer!.adoptRuntime({ harnessId: "pi", modelId: "sonnet", effortLevel: "bogus" });
     assert.equal(composer!.currentModelOption()?.value, "pi:sonnet");
     assert.equal(composer!.state.effortLevel, "low", "an effort the model no longer offers is not pinned");
+
+    ctx.chat.state.threadRef = threadRef;
+    await composer!.refreshRuntimeSelection(null, agent);
+    composer!.adoptRuntime({ harnessId: "pi", modelId: "opus", effortLevel: "high" });
+    assert.equal(composer!.currentModelOption()?.value, "pi:opus", "a later turn elsewhere wins on the next reopen");
+    assert.equal(composer!.state.effortLevel, "high");
   } finally {
     composer?.dispose();
     await vite.close();

@@ -1565,7 +1565,7 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
           : {}),
       };
       submitting = true;
-      if (ctx.chat.state.threadRef) unsentRuntimeThreads.delete(ctx.chat.state.threadRef);
+      const sentFromThread = ctx.chat.state.threadRef;
       clearActiveDraft();
       resetComposer();
       ctx.chat.drawActiveChat(agent);
@@ -1573,6 +1573,7 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
         const { uploaded, skipped } = await uploadAttachments(attachments);
         if (skipped.length) throw new Error(skipped.map((file) => file.note).join(" "));
         await submit(text, { ...selection, ...(uploaded.length ? { attachments: uploaded } : {}) });
+        if (sentFromThread) unsentRuntimeThreads.delete(sentFromThread);
       } catch (error) {
         restoreStagedOnFailure(text, attachments, errMessage(error, "Could not send message."));
         persistDraft();
@@ -1590,7 +1591,6 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
     const attachments = composerState.attachments;
     const sentFromThread = ctx.chat.state.threadRef;
     ctx.chat.notePendingSessionOnSend();
-    if (sentFromThread) unsentRuntimeThreads.delete(sentFromThread);
     clearActiveDraft();
     resetComposer();
     ctx.chat.drawActiveChat(agent);
@@ -1599,6 +1599,7 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
       if (ctx.chat.state.normalStreamFn) agent.streamFn = ctx.chat.state.normalStreamFn;
       ctx.chat.scrollToBottom();
       await agent.prompt(userSendMessage(text, attachments.length ? attachments : undefined));
+      if (sentFromThread) unsentRuntimeThreads.delete(sentFromThread);
       restoreBlockedSend(agent, sentFromThread, text, attachments);
       restoreFailedAttachments(agent, text, attachments);
     } catch (err) {
