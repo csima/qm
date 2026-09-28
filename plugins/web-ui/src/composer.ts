@@ -982,7 +982,7 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
   function normalizeLoadoutEntry(entry: LoadoutEntry, option: ModelOption): LoadoutEntry {
     return {
       value: option.value,
-      effort: resolveEffort(option.harnessId, option.model, entry.effort, defaultEffortForModel(option.model)),
+      effort: resolveEffort(option.harnessId, option.model, entry.effort),
       fast:
         entry.fast && harnessSupportsFastMode(option.harnessId) && modelSupportsFastMode(scopeKey(), option.model.id),
     };

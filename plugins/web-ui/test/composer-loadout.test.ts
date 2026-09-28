@@ -253,17 +253,14 @@ test("no effort choice is ever labelled Legacy default", () => {
   assert.equal(effortLabel("auto"), "");
 });
 
-test("a saved unset effort stays unset instead of being rewritten to a visible level", () => {
+test("an effort the selected model does not offer resets to unset instead of another level", () => {
   const model = { ...option("pi:one").model, effortLevelsByHarness: { pi: ["auto", "default", "low", "high"] } };
   assert.equal(resolveEffort("pi", model, "auto"), "auto");
   assert.equal(resolveEffort("codex", undefined, "auto"), "auto");
   assert.equal(resolveEffort("opencode", undefined, "high"), "auto");
   assert.equal(resolveEffort("pi", model, "high"), "high");
-  assert.equal(resolveEffort("pi", model, "ultracode", "low"), "high");
-  assert.equal(resolveEffort("pi", model, "xhigh"), "high");
-  const untiered = { ...model, effortLevelsByHarness: { pi: ["auto", "default"] } };
-  assert.equal(resolveEffort("pi", untiered, "max"), "auto");
-  assert.equal(resolveEffort("pi", untiered, "adaptive"), "default");
+  for (const unoffered of ["ultracode", "ultra", "xhigh", "adaptive"] as const)
+    assert.equal(resolveEffort("pi", model, unoffered), "auto");
   assert.deepEqual(parseLoadout(JSON.stringify([entry("pi:one", "auto")])), [entry("pi:one", "auto")]);
 });
 

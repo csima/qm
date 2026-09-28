@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { createPiHarness } from "../src/harness/pi-harness.ts";
-import { getRequiredModel } from "../src/model/pi-models.ts";
+import { getRequiredModel, type EffortLevel } from "../src/model/pi-models.ts";
 import type { HarnessTurnInput } from "../src/harness/harness.ts";
 
 // Exercise the real AgentSession and SDK serializer, not just the effort setter.
@@ -119,7 +119,6 @@ for (const [modelId, upper, allowed] of [
     t.after(() => harness.turns.close?.());
     // Repeat turns in the same conversation with different effort selections.
     for (const [effortLevel, expected] of [
-      ["ultracode", upper],
       ["max", upper],
       ["medium", "medium"],
       ["low", "low"],
@@ -141,7 +140,7 @@ for (const [modelId, upper, allowed] of [
           tools: { attach: async () => ({ ok: true, files: [], staged: 0 }) } as unknown as HarnessTurnInput["tools"],
           scopeLabel: "personal:test",
           orgScopeId: "org:test",
-          runtime: { effortLevel },
+          runtime: { effortLevel: effortLevel as EffortLevel },
           emit: async (entry) => ({ ...entry, seq: seq++, createdAt: Date.now() }) as never,
           recordModelCall: () => {},
           cancel: AbortSignal.timeout(10_000),

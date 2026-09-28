@@ -41,7 +41,7 @@ test("runtime selection derives compatible model, reasoning, and fast mode from 
     assert.deepEqual(JSON.parse(String(dom.window.eval('JSON.stringify(settingsUI.collect("runtime"))'))), {
       harnessId: "codex",
       modelId: "b",
-      effortLevel: "low",
+      effortLevel: "auto",
       fastMode: false,
     });
     assert.equal((dom.window.document.querySelector('[data-save="runtime"]') as HTMLButtonElement).disabled, false);
@@ -197,20 +197,26 @@ test("runtime reasoning choices follow the selected model and keep an unset leve
       false,
     );
     dom.window.eval('settingsUI.states.get("runtime").change("modelId", "b")');
-    assert.deepEqual(choices(), [["high", "High"]]);
-    assert.equal(dom.window.eval('settingsUI.collect("runtime").effortLevel'), "high");
+    assert.deepEqual(choices(), [
+      ["auto", "Not set"],
+      ["high", "High"],
+    ]);
+    assert.equal(dom.window.eval('settingsUI.collect("runtime").effortLevel'), "auto");
     dom.window.eval(
       'settingsUI.states.get("runtime").context.modelsByHarness.pi = [{id:"a",effortLevels:["auto","low","high","max"]},{id:"b",effortLevels:["auto","low","high"]}]',
     );
     dom.window.eval('settingsUI.states.get("runtime").change("modelId", "a")');
-    dom.window.eval('settingsUI.states.get("runtime").change("effortLevel", "ultracode")');
+    dom.window.eval('settingsUI.states.get("runtime").change("effortLevel", "max")');
     assert.equal(dom.window.eval('settingsUI.collect("runtime").effortLevel'), "max");
     dom.window.eval('settingsUI.states.get("runtime").change("modelId", "b")');
-    assert.equal(dom.window.eval('settingsUI.collect("runtime").effortLevel'), "high");
+    assert.equal(dom.window.eval('settingsUI.collect("runtime").effortLevel'), "auto");
     dom.window.eval(
       'settingsUI.states.get("runtime").context.modelsByHarness.pi = [{id:"b"}]; settingsUI.states.get("runtime").changed()',
     );
-    assert.deepEqual(choices(), [["high", "High"]]);
+    assert.deepEqual(choices(), [
+      ["auto", "Not set"],
+      ["high", "High"],
+    ]);
   } finally {
     dom.window.close();
   }

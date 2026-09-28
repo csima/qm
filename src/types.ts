@@ -84,6 +84,7 @@ export interface SpawnMeta {
   model?: string;
   harness?: string;
   thinkingLevel?: string;
+  defaultThinkingLevel?: string;
   fastMode?: boolean;
 }
 
@@ -271,7 +272,7 @@ export interface CronFireNote {
 }
 
 export interface Cron extends TriggerBase {
-  runtime?: import("./harness/harness.ts").RuntimeChoice | null;
+  runtime?: import("./harness/harness.ts").RuntimeChoiceInput | null;
   schedule: CronSchedule;
   nextFireAt?: number;
   lastAttemptAt?: number;
@@ -678,6 +679,7 @@ export interface TurnRequest {
   model?: string;
   harness?: string;
   thinkingLevel?: string;
+  defaultThinkingLevel?: string;
   fastMode?: boolean;
   readOnly?: boolean;
   skipMemory?: boolean;

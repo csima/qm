@@ -77,14 +77,14 @@ export function effortLevelsForHarness(
   const advertised = (model as ModelMetadata | undefined)?.effortLevelsByHarness?.[harnessId];
   return EFFORT_LEVELS.filter(({ value }) => {
     if (advertised) return advertised.includes(value);
-    if (!["pi", "claude", "codex"].includes(harnessId) || !TIER_ORDER.includes(value)) return false;
+    if (!["pi", "claude", "codex"].includes(harnessId) || !EFFORT_TIERS.includes(value)) return false;
     if (value === "ultra") return harnessId === "codex";
     if (value === "ultracode") return harnessId === "claude";
     return true;
   });
 }
 
-const TIER_ORDER: readonly EffortLevel[] = ["low", "medium", "high", "xhigh", "max", "ultra", "ultracode"];
+const EFFORT_TIERS: readonly EffortLevel[] = ["low", "medium", "high", "xhigh", "max", "ultra", "ultracode"];
 const PEAK_EFFORTS: readonly EffortLevel[] = ["max", "ultra", "ultracode"];
 
 export function isPeakEffort(harnessId: string, model: Model<Api> | undefined, level: string): boolean {
@@ -92,21 +92,10 @@ export function isPeakEffort(harnessId: string, model: Model<Api> | undefined, l
   return top === level && PEAK_EFFORTS.includes(top);
 }
 
-export function resolveEffort(
-  harnessId: string,
-  model: Model<Api> | undefined,
-  effort: EffortLevel,
-  fallback?: EffortLevel,
-): EffortLevel {
-  const levels = effortLevelsForHarness(harnessId, model);
-  if (effort === "auto" || levels.some(({ value }) => value === effort)) return effort;
-  const rank = TIER_ORDER.indexOf(effort);
-  const lower = levels
-    .filter(({ value }) => TIER_ORDER.indexOf(value) >= 0 && TIER_ORDER.indexOf(value) <= rank)
-    .at(-1);
-  if (rank >= 0) return lower?.value ?? "auto";
-  if (fallback && levels.some(({ value }) => value === fallback)) return fallback;
-  return levels[0]?.value ?? "auto";
+export function resolveEffort(harnessId: string, model: Model<Api> | undefined, effort: EffortLevel): EffortLevel {
+  return effort === "auto" || effortLevelsForHarness(harnessId, model).some(({ value }) => value === effort)
+    ? effort
+    : "auto";
 }
 
 export function compatibleHarnessOptions<T extends { harnessId: string; model: { id: string } }>(

@@ -4,6 +4,7 @@ import { getSupportedThinkingLevels, type Api, type Model } from "@earendil-work
 import { parseModelOverlay, type ModelOverlay } from "./model-overlay.ts";
 import { providerBaseUrl } from "./provider-endpoints.ts";
 import { isCustomModelId, resolveCustomModel } from "./custom-providers.ts";
+import type { RuntimeChoice } from "../harness/harness.ts";
 
 const getModel = getBuiltinModel as unknown as (provider: string, id: string) => Model<Api> | undefined;
 
@@ -38,7 +39,6 @@ export const THINKING_LEVELS = [
 ] as const;
 const EFFORT_TIERS = ["low", "medium", "high", "xhigh", "max"] as const;
 type EffortTier = (typeof EFFORT_TIERS)[number];
-export const TIER_ORDER: readonly string[] = [...EFFORT_TIERS, "ultra", "ultracode"];
 const CLIENT_TIERS: Partial<Record<HarnessId, string[]>> = { codex: ["ultra"], claude: ["ultracode"] };
 export const HARNESS_IDS = ["pi", "opencode", "codex", "claude", "mock"] as const;
 export type HarnessId = (typeof HARNESS_IDS)[number];
@@ -96,21 +96,74 @@ export function thinkingLevelsForHarness(harnessId: HarnessId, modelId?: string)
   return ["auto", ...modes, ...providerEfforts(modelId), ...(tier ? [tier] : [])];
 }
 
-export function supportedThinkingLevel(
+declare const offeredEffort: unique symbol;
+export type EffortLevel = string & { readonly [offeredEffort]: true };
+
+export function parseEffort(harnessId: HarnessId, modelId: string, level: unknown): EffortLevel | undefined {
+  return typeof level === "string" && thinkingLevelsForHarness(harnessId, modelId).includes(level)
+    ? (level as EffortLevel)
+    : undefined;
+}
+
+export function effortNotOfferedMessage(harnessId: HarnessId, modelId: string, level: string, carried = false): string {
+  const levels = thinkingLevelsForHarness(harnessId, modelId).join(", ");
+  return `effort ${level} isn't available on ${harnessId}/${modelId}${carried ? "; pass an effort" : ""} (valid: ${levels})`;
+}
+
+const droppedStoredEfforts = new Set<string>();
+
+export function storedEffort(
   harnessId: HarnessId,
-  modelId: string | undefined,
-  level: string,
-): string | undefined {
-  const levels = thinkingLevelsForHarness(harnessId, modelId);
-  if (levels.includes(level)) return level;
-  const rank = TIER_ORDER.indexOf(level);
-  if (rank < 0) return undefined;
-  return levels
-    .filter((candidate) => {
-      const candidateRank = TIER_ORDER.indexOf(candidate);
-      return candidateRank >= 0 && candidateRank <= rank;
-    })
-    .at(-1);
+  modelId: string,
+  level: string | undefined,
+): EffortLevel | undefined {
+  if (level === undefined) return undefined;
+  const effort = parseEffort(harnessId, modelId, level);
+  const key = `${harnessId}/${modelId}/${level}`;
+  if (!effort && !droppedStoredEfforts.has(key)) {
+    droppedStoredEfforts.add(key);
+    console.warn(
+      `[runtime] stored ${effortNotOfferedMessage(harnessId, modelId, level)}; running unset until next save`,
+    );
+  }
+  return effort;
+}
+
+export type ParsedRuntimeChoice = { ok: true; choice: RuntimeChoice } | { ok: false; error: string; message: string };
+
+export function parseRuntimeChoice(
+  raw: { harnessId?: unknown; modelId?: unknown; effortLevel?: unknown; fastMode?: unknown },
+  carriedEffort = false,
+): ParsedRuntimeChoice {
+  const { harnessId, modelId, effortLevel, fastMode } = raw;
+  if (!isHarnessId(harnessId))
+    return { ok: false, error: "harness_not_supported", message: `unknown harness ${String(harnessId)}` };
+  if (typeof modelId !== "string" || !modelSupportedByHarness(modelId, harnessId))
+    return { ok: false, error: "model_not_supported", message: `${String(modelId)} doesn't run on ${harnessId}` };
+  const effort = effortLevel === undefined ? undefined : parseEffort(harnessId, modelId, effortLevel);
+  if (effortLevel !== undefined && !effort)
+    return {
+      ok: false,
+      error: "effort_not_supported",
+      message: effortNotOfferedMessage(harnessId, modelId, String(effortLevel), carriedEffort),
+    };
+  if (fastMode !== undefined && typeof fastMode !== "boolean")
+    return { ok: false, error: "fast_mode_invalid", message: "fastMode must be a boolean" };
+  if (fastMode && (!harnessSupportsFastMode(harnessId) || !fastModeModelIds().includes(modelId)))
+    return {
+      ok: false,
+      error: "fast_mode_not_supported",
+      message: `fast mode isn't available on ${harnessId}/${modelId}`,
+    };
+  return {
+    ok: true,
+    choice: {
+      harnessId,
+      modelId,
+      ...(effort ? { effortLevel: effort } : {}),
+      ...(fastMode !== undefined ? { fastMode } : {}),
+    },
+  };
 }
 
 export function harnessSupportsFastMode(harnessId: HarnessId): boolean {

@@ -67,13 +67,8 @@ export class SettingsState extends SettingState {
     if (!runtimeKeys.includes(this.key)) return;
     if (!this.harnesses.includes(this.draft.harnessId)) this.draft.harnessId = this.harnesses[0];
     if (!this.models.some((m) => m.id === this.draft.modelId)) this.draft.modelId = this.models[0]?.id || "";
-    if (this.draft.effortLevel !== "auto" && !this.efforts.includes(this.draft.effortLevel)) {
-      const rank = effortTiers.indexOf(this.draft.effortLevel);
-      const lower = this.efforts.filter(
-        (level) => effortTiers.indexOf(level) >= 0 && effortTiers.indexOf(level) <= rank,
-      );
-      this.draft.effortLevel = rank >= 0 ? (lower.at(-1) ?? "auto") : (this.efforts[0] ?? "auto");
-    }
+    if (this.draft.effortLevel !== "auto" && !this.efforts.includes(this.draft.effortLevel))
+      this.draft.effortLevel = "auto";
     if (!this.fastCapable) this.draft.fastMode = false;
   }
   change(field: string, value: unknown) {
@@ -163,7 +158,6 @@ const harnessLabels: Record<string, string> = {
   codex: "Codex",
   claude: "Claude Code",
 };
-const effortTiers = ["low", "medium", "high", "xhigh", "max", "ultra", "ultracode"];
 const effortLabels: Record<string, string> = {
   adaptive: "Adaptive",
   default: "Provider default",

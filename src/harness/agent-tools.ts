@@ -205,7 +205,7 @@ function fmtCronSchedule(c: {
 }
 
 interface CronLike {
-  runtime?: import("./harness.ts").RuntimeChoice | null;
+  runtime?: import("./harness.ts").RuntimeChoiceInput | null;
   id: string;
   title?: string;
   enabled: boolean;

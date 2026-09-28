@@ -387,8 +387,9 @@ import {
   modelProviderAvailabilityFor,
   resolveModel,
   type HarnessId,
-  modelSupportedByHarness,
+  parseRuntimeChoice,
 } from "./model/pi-models.ts";
+import { NonRetryableTurnError } from "./core/turn-error.ts";
 import { createAdminService, bootAdminGrantSeed, type AdminService } from "./admin/admin-service.ts";
 import { createAdminGrantStore, createMapAdminGrantPersistence, type AdminGrant } from "./admin/admin-grant-store.ts";
 import { createPostgresAdminGrantStore } from "./admin/postgres-admin-grant-store.ts";
@@ -1427,17 +1428,19 @@ export function buildApp(
   };
   const harness = createHarnessRouter(adapters, adapters.get(fallbackHarness)!, async (input) => {
     await refreshModels();
-    if (input.runtimePinned && input.runtime?.harnessId && input.runtime.modelId) {
-      if (!modelSupportedByHarness(input.runtime.modelId, input.runtime.harnessId))
-        throw new Error(`Unsupported model: ${input.runtime.modelId}`);
-      return { ...input.runtime, harnessId: input.runtime.harnessId, modelId: input.runtime.modelId };
+    const requested = input.requestedRuntime;
+    if (input.runtimePinned && requested?.harnessId && requested.modelId) {
+      const { fastMode, ...rest } = requested;
+      const pinned = parseRuntimeChoice(rest);
+      if (!pinned.ok) throw new NonRetryableTurnError(pinned.message);
+      return { ...pinned.choice, ...(typeof fastMode === "boolean" ? { fastMode } : {}) };
     }
     return resolveRuntimeChoiceDurable(
       configStore,
       runtimeOrgScope,
       input.scopeLabel,
       fallback,
-      input.runtime,
+      requested,
       hydrateModelCatalog,
       input.runtimePurpose,
     );

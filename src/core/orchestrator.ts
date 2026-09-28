@@ -88,6 +88,7 @@ import type {
   HarnessLlmRequestRecord,
   HarnessTurnInput,
   HarnessTurnResult,
+  RequestedRuntime,
   RuntimeChoice,
 } from "../harness/harness.ts";
 import { forModelContext, forSearchView } from "../harness/context-compaction.ts";
@@ -3285,10 +3286,11 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         }
         if (input.harness && !isHarnessId(input.harness))
           throw new NonRetryableTurnError(`runtime ${input.harness} is not approved`);
-        let requestedRuntime: Partial<RuntimeChoice> = {
+        let requestedRuntime: RequestedRuntime = {
           ...(effectiveHarness && isHarnessId(effectiveHarness) ? { harnessId: effectiveHarness } : {}),
           ...(effectiveModel ? { modelId: effectiveModel } : {}),
           ...(input.thinkingLevel ? { effortLevel: input.thinkingLevel } : {}),
+          ...(input.defaultThinkingLevel ? { defaultEffortLevel: input.defaultThinkingLevel } : {}),
           ...(typeof effectiveFastMode === "boolean" ? { fastMode: effectiveFastMode } : {}),
         };
         const runtimeDefaults = requestedRuntime;
@@ -3539,7 +3541,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
             ...(extras.attachments?.length ? { attachments: extras.attachments } : {}),
             ...(extras.images?.length ? { images: extras.images } : {}),
             documents: [...documentInputs.documents],
-            ...(Object.keys(requestedRuntime).length ? { runtime: requestedRuntime } : {}),
+            ...(Object.keys(requestedRuntime).length ? { requestedRuntime } : {}),
             ...(strictReadOnly ? { readOnly: true } : {}),
             surfaceName,
             delegateWork,
