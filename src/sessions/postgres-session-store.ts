@@ -749,6 +749,31 @@ export function createPostgresSessionStore(connectionString: string, opts: Store
            ON CONFLICT DO NOTHING`,
         ],
       },
+      {
+        id: "sessions/store/0024-entries-type-seq-index",
+        statements: [
+          `CREATE INDEX CONCURRENTLY IF NOT EXISTS session_entries_type_seq ON session_entries(session_id, type, seq)`,
+        ],
+      },
+      {
+        id: "sessions/store/0025-transcript-entries-single-parse",
+        statements: [
+          `CREATE OR REPLACE VIEW session_transcript_entries AS
+           SELECT t.session_id, t.seq,
+             (j->'entry'->>'parentSeq')::int AS parent_seq,
+             j->'entry'->>'type' AS type,
+             (j->'entry'->'payload')::text AS payload,
+             t.scope_label,
+             (j->'entry'->>'at')::bigint AS created_at
+           FROM (
+             SELECT DISTINCT ON (r.session_id, r.entry_seq) r.session_id, r.entry_seq AS seq, r.payload, r.scope_label
+               FROM session_tape r
+              WHERE r.kind = 'annotation' AND safe_json(r.payload)->>'event' = 'transcript_entry'
+              ORDER BY r.session_id, r.entry_seq DESC, r.seq DESC
+           ) t
+           CROSS JOIN LATERAL (SELECT safe_json(t.payload) AS j OFFSET 0) parsed`,
+        ],
+      },
     ],
     [
       {
@@ -1067,6 +1092,19 @@ export function createPostgresSessionStore(connectionString: string, opts: Store
         [sessionId, beforeSeq],
       );
       return rows[0]?.complete === true;
+    },
+
+    async tailTurnRows(sessionId, turns, beforeSeq) {
+      const rows = await q(
+        `SELECT COALESCE(MAX(seq), -1) + 1 - COALESCE((
+           SELECT seq FROM session_entries
+            WHERE session_id = $1 AND type = 'user' AND seq < $3
+            ORDER BY seq DESC OFFSET $2 - 1 LIMIT 1
+         ), 0) AS n
+           FROM session_entries WHERE session_id = $1 AND seq < $3`,
+        [sessionId, turns, beforeSeq ?? 2 ** 31 - 1],
+      );
+      return Number(rows[0]?.n ?? 0);
     },
 
     async appendTape(lease, rec: NewTapeRecord): Promise<TapeRecord> {

@@ -2764,6 +2764,22 @@ test("pg session store: bounded participant listing is recent and optional", { s
   assert.deepEqual(await store.listByParticipant("bounded-user", { limit: 0 }), []);
 });
 
+test("pg tail turn rows count back to the requested user turn without reading payloads", { skip }, async () => {
+  const s = createPostgresSessionStore(URL!);
+  const scope = scopeId("personal", "tail-turn-rows");
+  const session = await s.getOrCreateByThread("pg-tail-turn-rows", "dm", scope);
+  const { lease } = await s.acquireLease(session.id);
+  assert.ok(lease);
+  for (const type of ["user", "assistant", "user", "tool_call", "tool_result", "user"] as const)
+    await s.append(lease, { type, scopeLabel: scope, payload: { text: type } });
+  await s.releaseLease(lease);
+  assert.equal(await s.tailTurnRows(session.id, 1), 1);
+  assert.equal(await s.tailTurnRows(session.id, 2), 4);
+  assert.equal(await s.tailTurnRows(session.id, 25), 6);
+  assert.equal(await s.tailTurnRows(session.id, 1, 5), 3);
+  assert.equal(await s.tailTurnRows("missing-session", 25), 0);
+});
+
 test(
   "pg canonical transcript annotations are exact and taint release preserves original identity",
   { skip },

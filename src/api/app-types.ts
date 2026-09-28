@@ -332,6 +332,7 @@ export interface App {
     sessionId: string,
     principalId: string,
     window?: TranscriptWindow,
+    timings?: Record<string, number>,
   ): Promise<{ session: Session; entries: TranscriptEntry[]; earlierEntries?: number; pins?: SessionPinView[] } | null>;
   canViewSessionSnapshot(
     sessionId: string,
