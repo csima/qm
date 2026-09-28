@@ -114,8 +114,10 @@ export function createSessionMethods(
   ): Promise<number | undefined> => {
     if (window?.sinceSeq !== undefined) return TRANSCRIPT_PAGE_ROWS;
     if (window?.tailTurns === undefined) return undefined;
-    const rows = await deps.sessions.tailTurnRows(sessionId, window.tailTurns, window.beforeSeq);
-    return Math.min(Math.max(rows, 1), TRANSCRIPT_PAGE_ROWS);
+    return Math.max(
+      1,
+      await deps.sessions.tailTurnRows(sessionId, window.tailTurns, TRANSCRIPT_PAGE_ROWS, window.beforeSeq),
+    );
   };
   const pinView = (
     rec: { id: string; text?: string; entrySeq?: number; addedBy: string; createdAt: number },

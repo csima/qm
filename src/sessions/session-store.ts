@@ -729,7 +729,7 @@ export interface SessionStore {
   getEntries(sessionId: string, opts?: GetEntriesOptions): Promise<SessionEntry[]>;
   getTranscriptEntries(sessionId: string, opts?: GetEntriesOptions): Promise<SessionEntry[]>;
   canReadTranscriptSuffix(sessionId: string, beforeSeq: number): Promise<boolean>;
-  tailTurnRows(sessionId: string, turns: number, beforeSeq?: number): Promise<number>;
+  tailTurnRows(sessionId: string, turns: number, maxRows: number, beforeSeq?: number): Promise<number>;
   getContextWindow(sessionId: string): Promise<ContextWindow>;
   getEntry(sessionId: string, seq: number): Promise<SessionEntry | undefined>;
   latestEntrySeq(sessionId: string): Promise<number>;

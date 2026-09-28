@@ -2773,11 +2773,13 @@ test("pg tail turn rows count back to the requested user turn without reading pa
   for (const type of ["user", "assistant", "user", "tool_call", "tool_result", "user"] as const)
     await s.append(lease, { type, scopeLabel: scope, payload: { text: type } });
   await s.releaseLease(lease);
-  assert.equal(await s.tailTurnRows(session.id, 1), 1);
-  assert.equal(await s.tailTurnRows(session.id, 2), 4);
-  assert.equal(await s.tailTurnRows(session.id, 25), 6);
-  assert.equal(await s.tailTurnRows(session.id, 1, 5), 3);
-  assert.equal(await s.tailTurnRows("missing-session", 25), 0);
+  assert.equal(await s.tailTurnRows(session.id, 1, 2000), 1);
+  assert.equal(await s.tailTurnRows(session.id, 2, 2000), 4);
+  assert.equal(await s.tailTurnRows(session.id, 25, 2000), 6);
+  assert.equal(await s.tailTurnRows(session.id, 1, 2000, 5), 3);
+  assert.equal(await s.tailTurnRows(session.id, 25, 5), 4, "a capped page still starts on a user turn");
+  assert.equal(await s.tailTurnRows(session.id, 25, 2, 5), 2, "a turn larger than the cap yields just the cap");
+  assert.equal(await s.tailTurnRows("missing-session", 25, 2000), 0);
 });
 
 test(

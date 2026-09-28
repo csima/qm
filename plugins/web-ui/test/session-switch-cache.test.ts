@@ -68,7 +68,7 @@ test("a revisit reads only the entries since the last turn and merges them into 
 
 test("switching keeps the old view up, shows a spinner only past 150ms, and paints a cached revisit at once", async () => {
   const reads: string[] = [];
-  const delays: Record<string, number> = { "sess-fast": 20, "sess-slow": 300, "sess-other": 0 };
+  const delays: Record<string, number> = { "sess-fast": 20, "sess-slow": 300, "sess-other": 0, "sess-late": 300 };
   globalThis.fetch = async (input) => {
     const url = new URL(String(input), "http://localhost");
     const id = url.pathname.split("/")[3]!;
@@ -81,7 +81,11 @@ test("switching keeps the old view up, shows a spinner only past 150ms, and pain
   const events: string[] = [];
   Object.assign(conv, {
     mountLoadingPane: () => (events.push("loading"), () => true),
-    mountContinuable: (_ref: string, id: string) => events.push(`mount ${id}`),
+    mountContinuable: (_ref: string, id: string) => {
+      events.push(`mount ${id}`);
+      conv.state.sessionId = id;
+    },
+    activePendingApprovals: () => [],
     setTranscriptWindow: () => {},
     setPins: () => {},
     onDelivery: (ref: string) => events.push(`refresh ${ref}`),
@@ -114,4 +118,10 @@ test("switching keeps the old view up, shows a spinner only past 150ms, and pain
   );
   await revisit;
   assert.equal(reads.length, readsBefore, "the revisit itself issues no full transcript read");
+
+  events.length = 0;
+  const abandoned = openSessionInto(conv, session("sess-late"), undefined, undefined, false);
+  await openSessionInto(conv, session("sess-fast"), undefined, undefined, false);
+  await abandoned;
+  assert.ok(!events.includes("mount sess-late"), "clicking back to the shown conversation cancels the pending switch");
 });

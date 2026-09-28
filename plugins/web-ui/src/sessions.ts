@@ -1731,7 +1731,15 @@ export async function openSessionInto(
     }
     return;
   }
-  if (s.id === conv.state.sessionId && !entriesPrefetch) return;
+  const generation = (openGenerations.get(conv) ?? 0) + 1;
+  openGenerations.set(conv, generation);
+  if (s.id === conv.state.sessionId && !entriesPrefetch) {
+    if (tracked && sessionsState.openingKey) {
+      sessionsState.openingKey = null;
+      renderList();
+    }
+    return;
+  }
 
   const opening = s.id;
   if (tracked) {
@@ -1739,15 +1747,12 @@ export async function openSessionInto(
     renderList();
   }
   if (!isLiveConversation(conv)) return;
-  const generation = (openGenerations.get(conv) ?? 0) + 1;
-  openGenerations.set(conv, generation);
   const shown = { threadRef: conv.state.threadRef, sessionId: conv.state.sessionId };
   let loading: (() => boolean) | null = null;
   const isCurrent = (): boolean =>
     openGenerations.get(conv) === generation &&
     (loading ? loading() : conv.state.threadRef === shown.threadRef && conv.state.sessionId === shown.sessionId);
   const continuable = isContinuable(s, appState.me?.user ?? "");
-  if (tracked) prefetchNeighbors(s.id);
 
   const cached = entriesPrefetch ? undefined : cachedTranscript(s.id);
   if (cached) {
@@ -1755,6 +1760,13 @@ export async function openSessionInto(
     mountTranscript(conv, s, cached, [], continuable);
     conv.onDelivery(s.threadRef);
     renderList();
+    if (tracked) prefetchNeighbors(s.id);
+    if (continuable)
+      void fetchSessionApprovals(s.id).then((r) => {
+        if (!r?.approvals.length || openGenerations.get(conv) !== generation || conv.state.sessionId !== s.id) return;
+        if (!conv.activePendingApprovals().length)
+          mountTranscript(conv, s, cachedTranscript(s.id) ?? cached, r.approvals, true);
+      });
     return;
   }
 
@@ -1786,6 +1798,7 @@ export async function openSessionInto(
   }
   mountTranscript(conv, s, entriesRes, approvalsRes?.approvals ?? [], continuable);
   renderList();
+  if (tracked) prefetchNeighbors(s.id);
 }
 
 function mountTranscript(

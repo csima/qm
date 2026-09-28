@@ -208,7 +208,7 @@ test("earlier pages read exactly the rows of the requested turns in one bounded 
         assert.deepEqual(page!.entries, expected.entries);
         assert.equal(page!.earlierEntries ?? 0, expected.earlier);
       }
-      const rows = Math.max(1, await built.sessions.tailTurnRows(session.id, 2, beforeSeq));
+      const rows = Math.max(1, await built.sessions.tailTurnRows(session.id, 2, 2000, beforeSeq));
       assert.equal(calls.length, 2, "one canonical read per page, no widening retries");
       assert.ok(calls.every((opts) => opts?.beforeSeq === beforeSeq && opts.limit === rows));
     }

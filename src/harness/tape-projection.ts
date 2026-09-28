@@ -442,7 +442,9 @@ export function createTranscriptSource(sessions: TranscriptStore): TranscriptSou
       }
       if (beforeSeq !== undefined) {
         const prefix = await projected(sessionId, SUFFIX_ROW_CAP_MAX);
-        return prefix ? { ...prefix, entries: prefix.entries.filter((entry) => entry.seq < beforeSeq) } : null;
+        const entries = prefix?.entries.filter((entry) => entry.seq < beforeSeq) ?? [];
+        if (!prefix || (prefix.anchored && entries.length < (limit ?? Infinity))) return null;
+        return { ...prefix, entries };
       }
       let rows: TapeRecord[];
       let anchored = false;

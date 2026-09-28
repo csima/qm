@@ -4,7 +4,12 @@ import { fetchTranscript, TAIL_TURNS, type TranscriptPage } from "./core-bridge"
 type TranscriptWindow = Parameters<typeof fetchTranscript>[1];
 
 const PREFETCH_LIMIT = 2;
-const pages = new LRUCache<string, TranscriptPage>({ max: 20 });
+const pages = new LRUCache<string, TranscriptPage>({
+  max: 20,
+  maxSize: 40_000,
+  sizeCalculation: (page) => Math.max(1, page.entries.length),
+});
+const generations = new Map<string, number>();
 const inflight = new Map<string, Promise<TranscriptPage>>();
 let prefetching = 0;
 
@@ -14,6 +19,7 @@ export function cachedTranscript(id: string): TranscriptPage | undefined {
 
 export function forgetTranscript(id: string): void {
   pages.delete(id);
+  generations.set(id, (generations.get(id) ?? 0) + 1);
 }
 
 function resumeSeq(entries: TranscriptPage["entries"]): number | undefined {
@@ -39,6 +45,7 @@ export function loadTranscript(
   const pending = inflight.get(id);
   if (pending) return extend ? pending.catch(() => undefined).then(() => loadTranscript(id, window, fetcher)) : pending;
   const from = cached ? resumeSeq(cached.entries) : undefined;
+  const generation = generations.get(id);
   const read = (
     cached && from !== undefined
       ? fetcher(id, { sinceSeq: from }).then((delta) =>
@@ -53,7 +60,7 @@ export function loadTranscript(
       : fetcher(id, { tailTurns: TAIL_TURNS })
   )
     .then((page) => {
-      pages.set(id, page);
+      if (generations.get(id) === generation) pages.set(id, page);
       return page;
     })
     .finally(() => inflight.delete(id));
