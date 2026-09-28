@@ -333,6 +333,7 @@ export interface TranscriptPage {
   entries: SessionEntry[];
   earlierEntries?: number;
   pins?: SessionPin[];
+  runtime?: RuntimeConfig["effective"];
 }
 
 export async function fetchTranscript(

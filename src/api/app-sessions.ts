@@ -10,6 +10,8 @@ import { entryWithinTenure, transcriptEntries, windowedTranscript } from "../ses
 import { createTranscriptSource } from "../harness/tape-projection.ts";
 import { appendCoverageImport } from "../harness/replay.ts";
 import { swallowAs } from "../util/errors.ts";
+import { isHarnessId } from "../model/pi-models.ts";
+import type { RuntimeChoice } from "../harness/harness.ts";
 import { SEARCH_HIT_LIMIT, entrySearchText, searchSnippet, searchTerms } from "../sessions/entry-search.ts";
 import { supportsProcessSessions } from "../sandbox/sandbox.ts";
 import { processIsGone } from "../sandbox/process-poll.ts";
@@ -206,6 +208,22 @@ export function createSessionMethods(
     });
   };
 
+  const sessionRuntime = async (session: {
+    threadRef: string;
+    forkedFrom?: { sessionId: string };
+  }): Promise<RuntimeChoice | undefined> => {
+    const request = (await deps.runs.latestForThread(session.threadRef, { excludePrivateMessages: true }))?.request;
+    if (request?.model && isHarnessId(request.harness))
+      return {
+        harnessId: request.harness,
+        modelId: request.model,
+        ...(request.thinkingLevel ? { effortLevel: request.thinkingLevel } : {}),
+        ...(typeof request.fastMode === "boolean" ? { fastMode: request.fastMode } : {}),
+      };
+    const source = session.forkedFrom ? await deps.sessions.get(session.forkedFrom.sessionId) : null;
+    return source ? sessionRuntime(source) : undefined;
+  };
+
   return {
     async getSession(sessionId, window) {
       const session = await deps.sessions.get(sessionId);
@@ -273,12 +291,16 @@ export function createSessionMethods(
       }
       const w = windowedTranscript(visible, window);
       const earlier = w.earlier + read.earlier;
-      const pins = await decoratedPins(pinRecords, visible, (seq) => viewerStoredEntryAt(sessionId, principalId, seq));
+      const [pins, runtime] = await Promise.all([
+        decoratedPins(pinRecords, visible, (seq) => viewerStoredEntryAt(sessionId, principalId, seq)),
+        sessionRuntime(session),
+      ]);
       return {
         session,
         entries: w.entries,
         ...(earlier > 0 ? { earlierEntries: earlier } : {}),
         ...(pins.length ? { pins } : {}),
+        ...(runtime ? { runtime } : {}),
       };
     },
 

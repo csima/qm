@@ -1968,7 +1968,6 @@ export function createChatSurface(
   async function forkFromMessage(index: number): Promise<void> {
     const agent = chatState.agent;
     const sessionId = chatState.sessionId;
-    const sourceThreadRef = chatState.threadRef;
     if (!agent || !sessionId) return;
     const messages = agent.state.messages as Array<{ role?: string }>;
     const target = messages[index];
@@ -1986,7 +1985,7 @@ export function createChatSurface(
       const upToSeq = forkCutSeq(entries ?? [], userOrdinal, isUser);
       const forked = await forkSession(sessionId, upToSeq);
       const split = inheritedTranscript(forked.session, forked.entries ?? []);
-      ctx.composer.carryModelPick(sourceThreadRef, forked.session.threadRef);
+      const runtime = ctx.composer.selectedRuntime();
       mountContinuable(
         forked.session.threadRef,
         forked.session.id,
@@ -1996,6 +1995,7 @@ export function createChatSurface(
         forked.session,
         entriesToMessages(split.inherited, transcriptModel()),
       );
+      ctx.composer.adoptRuntime(runtime);
       await refreshSessions({ silent: true });
       renderList();
     } catch (err) {

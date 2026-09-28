@@ -33,6 +33,7 @@ import {
   type CoreAttachment,
   type PendingApproval,
   type QueuedRun,
+  type RuntimeConfig,
 } from "./core-bridge";
 import { errMessage } from "../../chassis/src/errors";
 import { browserRenderableImage, fieldSelect, icon } from "./ui";
@@ -115,11 +116,6 @@ function forgetThreadPick(threadRef: string): void {
   threadModelPicks = loadThreadPicks();
   threadModelPicks.delete(threadRef);
   persistPreference(THREAD_PICKS_STORAGE_KEY, JSON.stringify([...threadModelPicks]));
-}
-
-export function carryModelPick(fromThreadRef: string | null, toThreadRef: string): void {
-  const pick = fromThreadRef ? threadModelPicks.get(fromThreadRef) : undefined;
-  if (pick) rememberThreadPick(toThreadRef, pick);
 }
 
 function modelOptionFor(value: ModelOptionValue, scopeKey?: string | null): ModelOption | undefined {
@@ -428,6 +424,30 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
     } else {
       restoredLoadout = normalized;
     }
+  }
+
+  function selectedRuntime(): RuntimeConfig["effective"] | undefined {
+    const selected = currentModelOption();
+    if (!selected) return undefined;
+    return {
+      harnessId: selected.harnessId,
+      modelId: selected.model.id,
+      effortLevel: composerState.effortLevel,
+      fastMode: composerState.fastMode === true,
+    };
+  }
+
+  function adoptRuntime(runtime: RuntimeConfig["effective"] | undefined): void {
+    const threadRef = ctx.chat.state.threadRef;
+    if (!threadRef || !runtime) return;
+    ++modelSelectionRevision;
+    ++effortSelectionRevision;
+    ++fastSelectionRevision;
+    rememberThreadPick(threadRef, `${runtime.harnessId}:${runtime.modelId}`);
+    effortOverride = runtime.effortLevel as EffortLevel | undefined;
+    fastModeOverride = runtime.fastMode;
+    restoredLoadout = undefined;
+    syncRuntimeSelection(ctx.chat.state.agent ?? undefined);
   }
 
   function syncRuntimeSelection(agent?: Agent): void {
@@ -2002,7 +2022,8 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
     },
     resizeComposer,
     currentModelOption,
-    carryModelPick,
+    selectedRuntime,
+    adoptRuntime,
     refreshRuntimeSelection,
     onDragEnter,
     onDragOver,
