@@ -35,9 +35,9 @@ function underlyingModel(
 ) {
   const [prefix, ...rest] = group.split("/");
   const candidates = [
-    ...Object.entries(aliases).flatMap(([id, target]) => (target === group ? [id] : [])),
     group,
     ...(rest.length > 0 && providers.includes(prefix) ? [rest.join("/")] : []),
+    ...Object.entries(aliases).flatMap(([id, target]) => (target === group ? [id] : [])),
   ];
   return candidates
     .filter((id) => !id.startsWith(GATEWAY_MODEL_PREFIX))

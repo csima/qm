@@ -355,7 +355,7 @@ test("thinking inheritance follows explicit aliases and never crosses protocols 
       group("azure/claude-opus-5-5", { providers: ["anthropic"], supports_reasoning: true }),
       group("vendor/new-model", { providers: ["anthropic"], supports_reasoning: true }),
     ],
-    { "claude-opus-5-5": "prod-opus" },
+    { "claude-opus-5-5": "prod-opus", "claude-opus-5": "claude-opus-5-5" },
   );
   await f.catalog.refresh();
   for (const id of ["gateway/prod-opus", "gateway/claude-opus-5-5"]) {
