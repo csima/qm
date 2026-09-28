@@ -7410,6 +7410,7 @@
 
       let transcriptObserver = null;
       function render(st) {
+        ++dataReq;
         governanceUI.transcript.cancel();
         if (transcriptObserver) {
           transcriptObserver.disconnect();
@@ -9328,7 +9329,7 @@
         const r = await api("GET", path);
         if (reqId !== dataReq) return;
         if (!r.ok) {
-          if (cached !== undefined) return;
+          dataCache.delete(path);
           root.textContent = "";
           const p = document.createElement("p");
           p.className = "empty";
