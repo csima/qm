@@ -632,12 +632,20 @@ export function startNewChatInCanvas(scopeId?: string, threadRef?: string): Conv
   const tile = !replace && dockApi.groups.length === 2;
   const { width, height } = target.group.element.getBoundingClientRect();
   const direction = width >= height ? "right" : "below";
-  const fresh = addPane(
-    { ...(scopeId ? { scopeId } : {}), ...(threadRef ? { threadRef } : {}) },
-    { referencePanel: target.id, direction: tile ? direction : "within" },
-  );
-  if (replace) dockApi.removePanel(target);
-  fresh.api.setActive();
+  const wasRestoring = restoringLayout;
+  restoringLayout = true;
+  let fresh: IDockviewPanel;
+  try {
+    fresh = addPane(
+      { ...(scopeId ? { scopeId } : {}), ...(threadRef ? { threadRef } : {}) },
+      { referencePanel: target.id, direction: tile ? direction : "within" },
+    );
+    if (replace) dockApi.removePanel(target);
+    fresh.api.setActive();
+  } finally {
+    restoringLayout = wasRestoring;
+  }
+  void paneContents.get(fresh.id)?.load(true);
   persist();
   return paneContents.get(fresh.id)?.conversation ?? null;
 }
@@ -1000,7 +1008,7 @@ class PaneContent implements IContentRenderer {
     for (const handler of this.redrawOnResize) handler();
   }
 
-  async load(): Promise<void> {
+  async load(newChat = false): Promise<void> {
     if (restoringLayout) return;
     if (this.loaded || this.disposed || !this.visible) return;
     this.loaded = true;
@@ -1018,7 +1026,7 @@ class PaneContent implements IContentRenderer {
     }
     const conversation = this.ensureConversation();
     let wanted = sessionId;
-    if (!wanted && threadRef) {
+    if (!wanted && threadRef && !newChat) {
       try {
         wanted = (await resolveSessionReference({ kind: "thread", value: threadRef }))?.id;
       } catch {
