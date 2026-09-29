@@ -1,32 +1,17 @@
-import {
-  sharedContextLabel,
-  type CoreContext,
-  type CoreProject,
-  type CoreSession,
-  type SessionBackgroundView,
-} from "./core-bridge.ts";
+import { type CoreSession, type SessionBackgroundView } from "./core-bridge.ts";
 import { subagentCounts } from "./subagent-activity.ts";
 import { relTime } from "./ui.ts";
 
-type ProjectAwareContext = CoreContext & { project?: CoreProject };
-
+import { type RecentProjectSeed } from "../../chassis/src/session-navigation.ts";
+export { recentProjectSeeds, type RecentProjectSeed } from "../../chassis/src/session-navigation.ts";
 type RecentGroupKind = "personal" | "project" | "channel" | "group";
-
-export interface RecentProjectSeed {
-  scopeId: string;
-  name: string | null;
-  kind?: RecentGroupKind;
-}
 
 export type RecentItem =
   | { kind: "session"; session: CoreSession }
   | { kind: "project"; scopeId: string; name: string | null; groupKind: RecentGroupKind; sessions: CoreSession[] };
 
-export function activityOf(s: CoreSession): number {
-  return s.lastActivityAt ?? s.createdAt;
-}
-
-export type ChatBrowseStatus = "active" | "waiting" | "archived";
+import { activityOf } from "../../chassis/src/session-navigation.ts";
+export { activityOf, chatBrowseStatusMatches, type ChatBrowseStatus } from "../../chassis/src/session-navigation.ts";
 
 export function sidebarSessions(sessions: readonly CoreSession[]): CoreSession[] {
   return sessions.filter((session) => !session.parentSessionId);
@@ -37,26 +22,6 @@ export function splitPinned<T extends Pick<CoreSession, "pinned">>(sessions: rea
   const rest: T[] = [];
   for (const s of sessions) (s.pinned ? pinned : rest).push(s);
   return { pinned, rest };
-}
-
-export function chatBrowseStatusMatches(
-  session: Pick<CoreSession, "archived" | "awaitingInput">,
-  status: ChatBrowseStatus,
-): boolean {
-  if (status === "archived") return Boolean(session.archived);
-  if (session.archived) return false;
-  return status === "waiting" ? Boolean(session.awaitingInput) : !session.awaitingInput;
-}
-
-export function recentProjectSeeds(contexts: readonly ProjectAwareContext[]): RecentProjectSeed[] {
-  return contexts.map((context): RecentProjectSeed => {
-    if (context.project)
-      return { scopeId: context.scopeId, name: context.project.name.trim() || null, kind: "project" };
-    if (context.kind === "personal") return { scopeId: context.scopeId, name: "Personal", kind: "personal" };
-    if (context.kind === "group")
-      return { scopeId: context.scopeId, name: sharedContextLabel(context.scopeId, context.name), kind: "group" };
-    return { scopeId: context.scopeId, name: sharedContextLabel(context.scopeId, context.name), kind: "channel" };
-  });
 }
 
 export function groupProjectSessions(

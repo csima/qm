@@ -302,7 +302,7 @@ export function createAppHelpers(deps: AppDeps, app: App) {
     return (await managedProjectMembership(session.scopeId, principalId)) === false ? null : session;
   }
 
-  async function contextsFor(principalId: string): Promise<ContextSummary[]> {
+  async function contextsFor(principalId: string, authorizedSessions?: Session[]): Promise<ContextSummary[]> {
     const personal = scopeId("personal", principalId);
     const byScope = new Map<ScopeId, ContextSummary>();
     byScope.set(personal, { scopeId: personal, kind: "personal", name: null, sessionCount: 0, lastActivityAt: null });
@@ -331,7 +331,7 @@ export function createAppHelpers(deps: AppDeps, app: App) {
       });
     }
     const checkedGroups = new Set<ScopeId>();
-    for (const s of await sessionsForViewer(principalId)) {
+    for (const s of authorizedSessions ?? (await sessionsForViewer(principalId))) {
       const { kind } = parseScopeId(s.scopeId);
       if (s.scopeId !== personal && kind !== "channel" && kind !== "group") continue;
       let ctx = byScope.get(s.scopeId);

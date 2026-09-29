@@ -1,3 +1,11 @@
+import type {
+  SessionNavigationRequest,
+  SessionNavigationResult,
+  SessionPageRequest,
+  SessionPageResult,
+  SessionReference,
+  SessionResolveResult,
+} from "../../plugins/chassis/src/session-navigation.ts";
 import type { ExternalSlackPolicies } from "../resolution/external-slack.ts";
 import type { InviteMailer } from "../admin/invite-email.ts";
 import type { DeploymentInvitation } from "../deploy/email-access.ts";
@@ -363,6 +371,21 @@ export interface App {
   listConversationPins(threadRef: string, reader: string): Promise<SessionPinView[] | null>;
   unpinConversationItem(threadRef: string, pinId: string): Promise<boolean | null>;
   listSessions(principalId: string): Promise<Session[]>;
+  sessionNavigation(
+    principalId: string,
+    request?: SessionNavigationRequest,
+    signal?: AbortSignal,
+  ): Promise<SessionNavigationResult<Session>>;
+  sessionPage(
+    principalId: string,
+    request?: SessionPageRequest,
+    signal?: AbortSignal,
+  ): Promise<SessionPageResult<Session>>;
+  resolveSessions(
+    principalId: string,
+    references: SessionReference[],
+    signal?: AbortSignal,
+  ): Promise<SessionResolveResult<Session>>;
   searchResources(
     principalId: string,
     query: string,

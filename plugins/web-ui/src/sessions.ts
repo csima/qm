@@ -1,3 +1,11 @@
+import {
+  surfaceOf,
+  channelLabel,
+  defaultSessionTitle as formatDefaultSessionTitle,
+  sessionTitle as formatSessionTitle,
+  chatMatches as matchesSessionQuery,
+} from "../../chassis/src/session-navigation.ts";
+export { surfaceOf } from "../../chassis/src/session-navigation.ts";
 import { sessionStatusMark } from "./session-status.ts";
 import { openSessionShare } from "./session-share";
 import { html, nothing, render, type TemplateResult } from "lit";
@@ -241,13 +249,6 @@ function listWhen(ms: number): string {
   return new Date(ms).toLocaleDateString([], { month: "short", day: "numeric" });
 }
 
-export function surfaceOf(s: CoreSession): string {
-  if (s.threadRef.startsWith("web:")) return "web";
-  if (s.threadRef.startsWith("dm:") || s.threadRef.startsWith("ch:")) return "slack";
-  if (s.threadRef.startsWith("agent:main:subagent:") && s.surface) return s.surface;
-  return "core";
-}
-
 export function sessionSlackUrl(s: Pick<CoreSession, "threadRef">): string | null {
   return slackThreadUrl(appState.me?.slackWorkspaceUrl ?? null, s.threadRef);
 }
@@ -265,17 +266,7 @@ function projectMenuKey(scopeId: string): string {
 }
 
 export function defaultSessionTitle(s: CoreSession): string {
-  const project = projectName(s.scopeId);
-  if (project) return project;
-  const surface = surfaceOf(s);
-  if (surface === "web") return "Web chat";
-  if (s.type === "channel") return channelLabel(s) ?? "Channel";
-  if (s.type === "group") return groupDmText(s.channelName) ?? s.channelName?.trim() ?? "Group DM";
-  return "Direct message";
-}
-
-function channelLabel(s: CoreSession): string | null {
-  return s.channelName && s.channelName.trim() ? `#${s.channelName.replace(/^#/, "")}` : null;
+  return formatDefaultSessionTitle(s, projectName(s.scopeId));
 }
 
 export function groupDmTitle(s: CoreSession): TemplateResult | string {
@@ -291,7 +282,7 @@ export function groupDmTitle(s: CoreSession): TemplateResult | string {
 }
 
 export function sessionTitle(s: CoreSession): string {
-  return s.title && s.title.trim() ? s.title : defaultSessionTitle(s);
+  return formatSessionTitle(s, projectName(s.scopeId));
 }
 
 export function slackLogo(size = 13): TemplateResult {
@@ -729,8 +720,7 @@ export function drawChatsPage(): void {
 }
 
 function chatMatches(s: CoreSession, q: string): boolean {
-  const context = sharedContextLabel(s.scopeId, s.channelName ?? null) ?? "Personal";
-  return [sessionTitle(s), s.channelName ?? "", context].join(" ").toLowerCase().includes(q);
+  return matchesSessionQuery(s, q, projectName(s.scopeId));
 }
 
 export const syncWorkingPulse = (el?: Element): void => {

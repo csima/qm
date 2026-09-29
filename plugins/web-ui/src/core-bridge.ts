@@ -11,7 +11,7 @@ import type { Api, AssistantMessage, AssistantMessageEventStream, Context, Model
 import type { Agent, AgentMessage, StreamFn } from "@earendil-works/pi-agent-core";
 import { errMessage, swallow } from "../../chassis/src/errors.ts";
 import { userFacingFailureText } from "../../chassis/src/failure-copy.ts";
-import { groupDmText } from "./group-dm-label.ts";
+export { sharedContextLabel } from "../../chassis/src/session-navigation.ts";
 import { base64ToBytes } from "./paste-text.ts";
 import { defaultEffortForModel, harnessSupportsEffort } from "./runtime-capabilities.ts";
 import { SIGNIN_REQUIRED_EVENT, signinRedirect } from "./signin-return.ts";
@@ -264,13 +264,6 @@ export function slackThreadUrl(workspaceUrl: string | null, threadRef: string): 
   const m = threadRef.match(/^(?:dm|ch):([A-Z0-9]+)(?::(\d+)\.(\d+))?$/i);
   if (!m) return null;
   return `${workspaceUrl}/archives/${m[1]}${m[2] ? `/p${m[2]}${m[3]}` : ""}`;
-}
-
-export function sharedContextLabel(scopeId: string | null, name: string | null): string | null {
-  if (!scopeId) return null;
-  if (scopeId.startsWith("channel:")) return name ? `#${name.replace(/^#/, "")}` : "Shared channel";
-  if (scopeId.startsWith("group:")) return groupDmText(name) ?? name ?? "Group";
-  return null;
 }
 
 function browserTimezone(): string {
