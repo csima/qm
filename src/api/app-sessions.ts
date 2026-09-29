@@ -177,6 +177,13 @@ export function createSessionMethods(
       cronCounts.set(c.destination.target, (cronCounts.get(c.destination.target) ?? 0) + 1);
     }
     signal?.throwIfAborted();
+    const failedChildren = await deps.runs.latestFailedThreads(
+      sessions
+        .filter((s) => s.parentSessionId && !workingThreadRefs.has(s.threadRef) && !waiting.has(s.id))
+        .map((s) => s.threadRef),
+      signal,
+    );
+    signal?.throwIfAborted();
     if (
       workingThreadRefs.size === 0 &&
       waiting.size === 0 &&
@@ -191,6 +198,7 @@ export function createSessionMethods(
         ...s,
         ...(workingThreadRefs.has(s.threadRef) ? { working: true } : {}),
         ...(waiting.has(s.id) ? { awaitingInput: true } : {}),
+        ...(failedChildren.has(s.threadRef) ? { lastTurnFailed: true } : {}),
         ...(jobCounts.has(s.threadRef) ? { backgroundJobs: jobCounts.get(s.threadRef)! } : {}),
         ...(watchCounts.has(s.threadRef) ? { watches: watchCounts.get(s.threadRef)! } : {}),
         ...(cronCounts.has(s.threadRef) ? { crons: cronCounts.get(s.threadRef)! } : {}),

@@ -164,3 +164,212 @@ test("exact title pages select only participant and current managed-project auth
     await built.runtime.stop();
   }
 });
+
+test("navigation and references preserve parent work, blocking approval and child failure from the full list", async () => {
+  const built = buildApp(testConfig());
+  try {
+    const parent = await built.sessions.getOrCreateByThread("web:U1:parent", "dm", "personal:U1");
+    const child = await built.sessions.getOrCreateByThread("web:U1:child", "dm", "personal:U1");
+    for (const s of [parent, child]) await built.sessions.addParticipant(s.id, "U1");
+    await built.sessions.updateTitle(child.id, "Child");
+    await built.sessions.setParentSession(child.id, parent.id);
+    const actor = { id: "internal:U1", type: "internal" as const };
+    const request: OrchestratorInput = {
+      actor,
+      conversation: { kind: "dm", threadRef: child.threadRef, audience: [actor] },
+      origin: { kind: "direct" },
+      text: "work",
+    };
+    const { run } = await built.runs.enqueue({ sessionId: child.threadRef, request });
+    let legacy = await built.app.listSessions("U1");
+    assert.equal(legacy.find((s) => s.id === parent.id)?.working, true);
+    assert.equal((await built.app.sessionNavigation("U1")).recent.items.find((s) => s.id === parent.id)?.working, true);
+    assert.deepEqual(
+      (await built.app.sessionPage("U1", { children: true })).items
+        .map(({ subagents: _subagents, ...row }) => row)
+        .sort((a, b) => a.id.localeCompare(b.id)),
+      legacy.sort((a, b) => a.id.localeCompare(b.id)),
+    );
+    const parked = await built.app.turn({
+      surface: "test",
+      actor: { externalId: "U1" },
+      conversation: { kind: "dm", threadRef: parent.threadRef },
+      text: `!run ${["git", "push", `--${"force"}`, "origin", "main"].join(" ")}`,
+    });
+    assert.equal(parked.status, "pending_approval");
+    const waiting = (await built.app.sessionNavigation("U1")).recent.items.find((s) => s.id === parent.id);
+    assert.equal(waiting?.awaitingInput, true);
+    assert.ok(!waiting?.working);
+    const leased = await built.runs.claimById(run.id, "worker", 5_000);
+    assert.ok(leased);
+    await built.runs.complete(run.id, leased.leaseToken!, { status: "failed", reason: "modeled failure" });
+    legacy = await built.app.listSessions("U1");
+    const failed = legacy.find((s) => s.id === child.id);
+    assert.equal(failed?.lastTurnFailed, true);
+    const reference = { kind: "id" as const, value: child.id };
+    assert.deepEqual((await built.app.resolveSessions("U1", [reference])).references[0]!.session, failed);
+    assert.deepEqual((await built.app.sessionNavigation("U1", { references: [reference] })).references[0]!.session, {
+      ...failed,
+      subagents: { running: 0, waiting: 0 },
+    });
+    assert.deepEqual(
+      (await built.app.sessionPage("U1", { children: true, parentSessionId: parent.id })).items.find(
+        (s) => s.id === child.id,
+      ),
+      { ...failed, subagents: { running: 0, waiting: 0 } },
+    );
+  } finally {
+    await built.runtime.stop();
+  }
+});
+
+test("abort during the bulk child failure lookup prevents returning a page", async (t) => {
+  const built = buildApp(testConfig());
+  try {
+    const parent = await built.sessions.getOrCreateByThread("web:U1:abort-parent", "dm", "personal:U1");
+    for (let i = 0; i < 2; i++) {
+      const child = await built.sessions.getOrCreateByThread(`web:U1:abort-child-${i}`, "dm", "personal:U1");
+      await built.sessions.addParticipant(child.id, "U1");
+      await built.sessions.updateTitle(child.id, "Child");
+      await built.sessions.setParentSession(child.id, parent.id);
+    }
+    const controller = new AbortController();
+    let reads = 0;
+    t.mock.method(built.runs, "latestFailedThreads", async (refs: readonly string[], signal?: AbortSignal) => {
+      reads++;
+      assert.equal(refs.length, 2);
+      assert.equal(signal, controller.signal);
+      controller.abort();
+      return new Set<string>();
+    });
+    await assert.rejects(built.app.sessionPage("U1", { children: true }, controller.signal), { name: "AbortError" });
+    assert.equal(reads, 1);
+  } finally {
+    await built.runtime.stop();
+  }
+});
+
+test("descendant pages use current project access and retain closed participant history", async () => {
+  const built = buildApp(testConfig());
+  try {
+    const project = await built.projects.create({ name: "Descendants", ownerId: "owner" });
+    await built.projects.addMember(project.id, "owner", "member");
+    const parent = await built.sessions.getOrCreateByThread("web:member:tree", "group", projectScopeId(project.id));
+    const child = await built.sessions.getOrCreateByThread(
+      "web:member:tree-child",
+      "group",
+      projectScopeId(project.id),
+    );
+    for (const row of [parent, child]) {
+      await built.sessions.addParticipant(row.id, "member");
+      await built.sessions.updateTitle(row.id, row.threadRef);
+    }
+    await built.sessions.setParentSession(child.id, parent.id);
+    await built.sessions.removeParticipant(child.id, "member");
+    const request = { children: true, parentSessionId: parent.id };
+    assert.deepEqual(
+      (await built.app.sessionPage("member", request)).items.map((row) => row.id),
+      [child.id],
+    );
+    assert.equal((await built.app.sessionPage("other", request)).total, 0);
+    await built.projects.removeMember(project.id, "owner", "member");
+    assert.equal((await built.app.sessionPage("member", request)).total, 0);
+    assert.equal((await built.app.sessionNavigation("member")).recent.total, 0);
+  } finally {
+    await built.runtime.stop();
+  }
+});
+
+test("deep inactive ancestors retain a failed leaf in descendant pages without claiming active work", async () => {
+  const built = buildApp(testConfig());
+  try {
+    const chain = [];
+    for (let depth = 0; depth < 7; depth++) {
+      const row = await built.sessions.getOrCreateByThread(`web:U1:deep-${depth}`, "dm", "personal:U1");
+      await built.sessions.addParticipant(row.id, "U1");
+      await built.sessions.updateTitle(row.id, `Depth ${depth}`);
+      if (depth) await built.sessions.setParentSession(row.id, chain[depth - 1]!.id);
+      chain.push(row);
+    }
+    const leaf = chain.at(-1)!;
+    const actor = { id: "internal:U1", type: "internal" as const };
+    const request: OrchestratorInput = {
+      actor,
+      conversation: { kind: "dm", threadRef: leaf.threadRef, audience: [actor] },
+      origin: { kind: "direct" },
+      text: "work",
+    };
+    const { run } = await built.runs.enqueue({ sessionId: leaf.threadRef, request });
+    const leased = await built.runs.claimById(run.id, "worker", 5_000);
+    assert.ok(leased);
+    await built.runs.complete(run.id, leased.leaseToken!, { status: "failed", reason: "deep failure" });
+    const root = chain[0]!;
+    const nav = await built.app.sessionNavigation("U1");
+    assert.deepEqual(nav.recent.items.find((row) => row.id === root.id)?.subagents, { running: 0, waiting: 0 });
+    const page = await built.app.sessionPage("U1", { children: true, parentSessionId: root.id });
+    assert.equal(page.total, 6);
+    assert.deepEqual(new Set(page.items.map((row) => row.id)), new Set(chain.slice(1).map((row) => row.id)));
+    assert.ok(page.items.every((row) => !row.working && !row.awaitingInput));
+    assert.deepEqual(
+      page.items.filter((row) => row.lastTurnFailed).map((row) => row.id),
+      [leaf.id],
+    );
+    assert.ok(page.items.every((row) => row.subagents?.running === 0 && row.subagents.waiting === 0));
+  } finally {
+    await built.runtime.stop();
+  }
+});
+
+test("all session reads share one narrow failure projection with authorized idle-child exclusions", async (t) => {
+  const built = buildApp(testConfig());
+  try {
+    const parent = await built.sessions.getOrCreateByThread("web:U1:projection-root", "dm", "personal:U1");
+    const children = [];
+    for (const name of ["idle", "active", "waiting", "foreign"]) {
+      const child = await built.sessions.getOrCreateByThread(`web:U1:projection-${name}`, "dm", "personal:U1");
+      await built.sessions.addParticipant(child.id, name === "foreign" ? "U2" : "U1");
+      await built.sessions.updateTitle(child.id, name);
+      await built.sessions.setParentSession(child.id, parent.id);
+      children.push(child);
+    }
+    await built.sessions.addParticipant(parent.id, "U1");
+    await built.sessions.updateTitle(parent.id, "Parent");
+    const [idle, active, waiting] = children;
+    const actor = { id: "internal:U1", type: "internal" as const };
+    const request: OrchestratorInput = {
+      actor,
+      conversation: { kind: "dm", threadRef: active!.threadRef, audience: [actor] },
+      origin: { kind: "direct" },
+      text: "active",
+    };
+    await built.runs.enqueue({ sessionId: active!.threadRef, request });
+    const parked = await built.app.turn({
+      surface: "test",
+      actor: { externalId: "U1" },
+      conversation: { kind: "dm", threadRef: waiting!.threadRef },
+      text: `!run ${["git", "push", `--${"force"}`, "origin", "main"].join(" ")}`,
+    });
+    assert.equal(parked.status, "pending_approval");
+    t.mock.method(built.runs, "latestForThread", async () => {
+      throw new Error("full run lookup reached from navigation");
+    });
+    let reads = 0;
+    const original = built.runs.latestFailedThreads.bind(built.runs);
+    t.mock.method(built.runs, "latestFailedThreads", async (refs: readonly string[], signal?: AbortSignal) => {
+      reads++;
+      assert.deepEqual(refs, [idle!.threadRef]);
+      return original(refs, signal);
+    });
+    await built.app.listSessions("U1");
+    await built.app.sessionNavigation("U1");
+    await built.app.sessionPage("U1", { children: true, parentSessionId: parent.id });
+    await built.app.resolveSessions("U1", [{ kind: "id", value: idle!.id }]);
+    assert.equal(reads, 4);
+    t.mock.method(built.runs, "latestFailedThreads", async () => {
+      throw new Error("failure lookup unavailable");
+    });
+    await assert.rejects(built.app.sessionPage("U1", {}), /failure lookup unavailable/);
+  } finally {
+    await built.runtime.stop();
+  }
+});
