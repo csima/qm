@@ -4,6 +4,7 @@ import { test } from "node:test";
 import { buildApp } from "../src/wiring.ts";
 import { projectScopeId } from "../src/projects/project-store.ts";
 import { testConfig } from "./support/test-config.ts";
+import type { OrchestratorInput } from "../src/core/orchestrator.ts";
 
 test("navigation reuses one authorized snapshot and preserves legacy list/context populations", async (t) => {
   const built = buildApp(testConfig());
@@ -115,12 +116,13 @@ test("finite-read aborts and query errors do not become empty successful navigat
   }
 });
 
-test("abort during live-thread lookup prevents participant enumeration for navigation and page", async (t) => {
+test("abort during live-thread lookup stops navigation and page before background reads", async (t) => {
   const built = buildApp(testConfig());
   try {
     for (const method of ["sessionNavigation", "sessionPage"] as const) {
       const controller = new AbortController();
       let participantReads = 0;
+      let backgroundReads = 0;
       t.mock.method(built.runs, "activeSessionIds", async () => {
         controller.abort();
         return [];
@@ -129,8 +131,13 @@ test("abort during live-thread lookup prevents participant enumeration for navig
         participantReads++;
         return [];
       });
+      t.mock.method(built.crons, "list", async () => {
+        backgroundReads++;
+        return [];
+      });
       await assert.rejects(built.app[method]("U1", {}, controller.signal), { name: "AbortError" });
-      assert.equal(participantReads, 0, method);
+      assert.equal(participantReads, 1, method);
+      assert.equal(backgroundReads, 0, method);
     }
   } finally {
     await built.runtime.stop();

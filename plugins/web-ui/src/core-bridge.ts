@@ -1,3 +1,4 @@
+import type { SessionSubagentCounts } from "../../chassis/src/session-navigation.ts";
 import { reportRequestTiming, stopBrowserErrors } from "./browser-errors.ts";
 import { captureMessage, stopAnalytics } from "./product-analytics.ts";
 import { streamedAnswer } from "./timeline.ts";
@@ -140,6 +141,7 @@ export interface CoreSession {
   working?: boolean;
   awaitingInput?: boolean;
   lastTurnFailed?: boolean;
+  subagents?: SessionSubagentCounts;
   backgroundJobs?: number;
   watches?: number;
   crons?: number;

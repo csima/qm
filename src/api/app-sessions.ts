@@ -142,18 +142,22 @@ export function createSessionMethods(
     selected?: Session[],
   ): Promise<{ raw: Session[]; visible: Session[] }> {
     signal?.throwIfAborted();
-    const workingThreadRefs = new Set(await deps.runs.activeSessionIds());
-    signal?.throwIfAborted();
     const all = selected ?? (await sessionsForViewer(principalId));
     signal?.throwIfAborted();
     const visibleById = new Map(all.map((session) => [session.id, session]));
     const approvalRows: PendingApprovalRecord[] = [];
-    for (const [, record] of (await deps.approvals?.entries()) ?? []) {
-      const session = visibleById.get(record.sessionId);
-      if (session && (await approvalRecordIsCurrent(record, session))) approvalRows.push(record);
-    }
+    const approvalEntries = (await deps.approvals?.entries()) ?? [];
     signal?.throwIfAborted();
+    for (const [, record] of approvalEntries) {
+      const session = visibleById.get(record.sessionId);
+      if (!session) continue;
+      const current = await approvalRecordIsCurrent(record, session);
+      signal?.throwIfAborted();
+      if (current) approvalRows.push(record);
+    }
     const waiting = new Set(approvalRows.filter((r) => r.blocksInput !== false).map((r) => r.sessionId));
+    const workingThreadRefs = await workingSessionThreadRefs(deps.sessions, deps.runs, waiting);
+    signal?.throwIfAborted();
     const sessions = all.filter(
       (s) =>
         s.hasEntries !== false || Boolean(s.title?.trim()) || workingThreadRefs.has(s.threadRef) || waiting.has(s.id),
@@ -173,8 +177,10 @@ export function createSessionMethods(
     signal?.throwIfAborted();
     const cronCounts = new Map<string, number>();
     for (const c of await deps.crons.list()) {
-      if (!c.enabled || c.archived || !c.destination) continue;
-      cronCounts.set(c.destination.target, (cronCounts.get(c.destination.target) ?? 0) + 1);
+      if (!cronIsActive(c)) continue;
+      for (const ref of new Set([c.destination?.target, c.sessionRef])) {
+        if (ref) cronCounts.set(ref, (cronCounts.get(ref) ?? 0) + 1);
+      }
     }
     signal?.throwIfAborted();
     const failedChildren = await deps.runs.latestFailedThreads(
@@ -187,6 +193,7 @@ export function createSessionMethods(
     if (
       workingThreadRefs.size === 0 &&
       waiting.size === 0 &&
+      failedChildren.size === 0 &&
       jobCounts.size === 0 &&
       watchCounts.size === 0 &&
       cronCounts.size === 0
@@ -510,7 +517,7 @@ export function createSessionMethods(
       const snapshot = await sessionSnapshot(principalId, signal);
       const contexts = await contextsFor(principalId, snapshot.raw);
       signal?.throwIfAborted();
-      return projectSessionPage(snapshot.visible, contexts, request);
+      return projectSessionPage(snapshot.visible, contexts, request, snapshot.raw);
     },
 
     async resolveSessions(principalId, references, signal) {

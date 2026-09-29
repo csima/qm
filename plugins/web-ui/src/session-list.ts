@@ -191,7 +191,7 @@ export function rowIndicators(
   list: readonly CoreSession[] = [],
 ): RowIndicators {
   const live = typeof liveThreads === "string" ? new Set([liveThreads]) : (liveThreads ?? new Set<string>());
-  const children = subagentCounts(list, s.id);
+  const children = s.subagents ?? subagentCounts(list, s.id);
   return {
     working: Boolean(s.working) || (Boolean(s.threadRef) && live.has(s.threadRef)),
     awaiting: Boolean(s.awaitingInput) || children.waiting > 0,

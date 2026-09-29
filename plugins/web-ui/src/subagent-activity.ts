@@ -11,40 +11,8 @@ export interface SubagentRow {
   endedAt: number | null;
 }
 
-type SessionLink = Pick<CoreSession, "id" | "parentSessionId" | "working" | "awaitingInput">;
-
-export function descendantsOf<T extends SessionLink>(
-  list: readonly T[],
-  rootId: string,
-): { session: T; depth: number }[] {
-  const out: { session: T; depth: number }[] = [];
-  const seen = new Set([rootId]);
-  let frontier = [rootId];
-  for (let depth = 1; frontier.length; depth++) {
-    const parents = new Set(frontier);
-    frontier = [];
-    for (const session of list) {
-      if (!session.parentSessionId || !parents.has(session.parentSessionId) || seen.has(session.id)) continue;
-      seen.add(session.id);
-      out.push({ session, depth });
-      frontier.push(session.id);
-    }
-  }
-  return out;
-}
-
-export function subagentCounts(
-  list: readonly SessionLink[],
-  rootId: string | null | undefined,
-): { running: number; waiting: number } {
-  const counts = { running: 0, waiting: 0 };
-  if (!rootId) return counts;
-  for (const { session } of descendantsOf(list, rootId)) {
-    if (session.awaitingInput) counts.waiting++;
-    else if (session.working) counts.running++;
-  }
-  return counts;
-}
+export { descendantsOf, subagentCounts } from "../../chassis/src/session-navigation.ts";
+import { descendantsOf } from "../../chassis/src/session-navigation.ts";
 
 export function subagentRows(list: readonly CoreSession[], rootId: string): SubagentRow[] {
   return descendantsOf(list, rootId).map(({ session, depth }) => subagentRow(session, depth));
