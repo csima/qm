@@ -37,7 +37,7 @@ export interface TriggerDeps {
     groupMembership?(groupId: string, principalId: string): Promise<boolean | undefined>;
     conversationMembers?: DirectoryStore["conversationMembers"];
   };
-  sessions?: { listByParticipant(principalId: string): Promise<readonly { scopeId: ScopeId }[]> };
+  sessions?: { participantHasScope(principalId: string, scope: ScopeId): Promise<boolean> };
 }
 
 export interface TriggerSpec extends Pick<TurnRequest, "model" | "harness" | "fastMode" | "attachments"> {
@@ -125,8 +125,7 @@ async function relayAttribution(deps: TriggerDeps, spec: TriggerSpec): Promise<s
 }
 
 async function participatesInScope(deps: TriggerDeps, actorId: string, scope: ScopeId): Promise<boolean> {
-  const sessions = await deps.sessions?.listByParticipant(actorId).catch(() => []);
-  return sessions?.some((s) => s.scopeId === scope) === true;
+  return (await deps.sessions?.participantHasScope(actorId, scope).catch(() => false)) === true;
 }
 
 async function actorMayReadScope(

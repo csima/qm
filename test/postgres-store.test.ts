@@ -70,9 +70,13 @@ test("pg session store: fork provenance survives a store restart", { skip }, asy
   assert.equal(loaded?.forkBoundarySeq, 4);
 });
 
-test("pg session store: getForParticipant returns exactly the row listByParticipant returns", { skip }, async () => {
-  await assertParticipantSessionParity(createPostgresSessionStore(URL!), `pg-parity-${randomUUID()}`);
-});
+test(
+  "pg session store: participant session and scope projections preserve historical membership",
+  { skip },
+  async () => {
+    await assertParticipantSessionParity(createPostgresSessionStore(URL!), `pg-parity-${randomUUID()}`);
+  },
+);
 
 test("pg session store: LLM request counts preserve page lower bounds and exact context keys", { skip }, async () => {
   await assertLlmRequestCounts(createPostgresSessionStore(URL!), `pg-llm-counts-${randomUUID()}`);
