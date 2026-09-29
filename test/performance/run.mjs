@@ -838,6 +838,7 @@ export function requiredResponsesComplete(requests, requirements) {
         ? requirement.expectedStatuses.includes(entry.status)
         : entry.status >= 200 && entry.status < 300) &&
       (!requirement.expectedError || entry.expectedErrorMatched === true) &&
+      (!requirement.captureNavigation || Boolean(entry.navigationPages)) &&
       (!requirement.captureActionable || Boolean(entry.actionablePage));
     return (
       matching.length > 0 &&
@@ -848,7 +849,6 @@ export function requiredResponsesComplete(requests, requirements) {
             requirement.navigation &&
             supersededAbort(entry, matching.slice(index + 1).filter(succeeded))),
       ) &&
-      (!requirement.captureNavigation || matching.some((entry) => succeeded(entry) && entry.navigationPages)) &&
       (!requirement.captureActionable ||
         (matching.some(succeeded) &&
           matching.findLast(succeeded).actionablePage.waiting.every(({ pathSha256 }) => {
@@ -888,13 +888,17 @@ export function observe(page, origin, requirements) {
     ...requests.flatMap((entry, index) => {
       if (
         !entry.envelopeError ||
-        (entry.navigation?.actionable === true &&
+        (entry.navigation &&
           supersededAbort(
             entry,
             requests
               .slice(index + 1)
               .filter(
-                (later) => later.completed && later.status === 200 && later.actionablePage && !later.envelopeError,
+                (later) =>
+                  later.completed &&
+                  later.status === 200 &&
+                  (later.actionablePage || later.navigationPages) &&
+                  !later.envelopeError,
               ),
           ))
       )
@@ -951,6 +955,14 @@ export function observe(page, origin, requirements) {
     entry.responseAt = Date.now();
     entry.timing = request.timing();
     entry.fromServiceWorker = response.fromServiceWorker();
+    const boundedJson = async () => {
+      const raw = await response.body();
+      if (generation !== observedGeneration) return;
+      assert.ok(raw.length > 0 && raw.length <= 4194304, "Response body exceeds the observation bound");
+      entry.responseBodyBytes = raw.length;
+      entry.responseBodySha256 = sha256(raw);
+      return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(raw));
+    };
     if (entry.sameOrigin && ["/me", "/admin/api/me"].includes(entry.path)) {
       identity = undefined;
       const observedIdentityRead = ++identityRead;
@@ -979,8 +991,7 @@ export function observe(page, origin, requirements) {
     const approval =
       entry.sameOrigin && entry.method === "GET" && /^\/api\/sessions\/[^/]+\/approvals$/.test(entry.path);
     if (actionable || approval) {
-      const job = response
-        .json()
+      const job = boundedJson()
         .then((data) => {
           if (generation !== observedGeneration) return;
           if (actionable) {
@@ -1020,15 +1031,14 @@ export function observe(page, origin, requirements) {
         requirement.followupWhenNonempty ||
         requirement.expectedError)
     ) {
-      const job = response
-        .json()
+      const job = (requirement.captureNavigation ? boundedJson() : response.json())
         .then((data) => {
           if (generation !== observedGeneration) return;
           if (requirement.captureNavigation) {
             try {
               entry.navigationPages = navigationPageEvidence(data);
             } catch {
-              errors.push({ type: "contract", path: entry.path, message: "Invalid navigation page envelope" });
+              entry.envelopeError = "Invalid navigation page envelope";
             }
           }
           if (requirement.paginated) entry.finalPage = Array.isArray(data.items) && !data.nextCursor;
@@ -1042,7 +1052,10 @@ export function observe(page, origin, requirements) {
           }
           notify();
         })
-        .catch(() => {})
+        .catch(() => {
+          if (generation === observedGeneration && requirement.captureNavigation)
+            entry.envelopeError = "Invalid navigation page envelope";
+        })
         .then(() => {
           if (generation !== observedGeneration) return;
           if (requirement.expectedError && !entry.expectedErrorMatched)

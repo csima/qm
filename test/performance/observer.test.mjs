@@ -116,38 +116,129 @@ test("navigation evidence hashes continuation identity and rejects malformed suc
     pinned: { items: [], total: 0, nextCursor: null },
     groups: { items: [{ scopeId: "private-group" }], total: 1, nextCursor: null },
   };
-  for (const malformed of [false, true]) {
+  const validBytes = Buffer.from(JSON.stringify(valid));
+  const limit = 4194304;
+  const cases = [
+    { bytes: validBytes, valid: true },
+    { bytes: Buffer.concat([validBytes, Buffer.alloc(limit - validBytes.length, 32)]), valid: true },
+    { bytes: Buffer.concat([validBytes, Buffer.alloc(limit + 1 - validBytes.length, 32)]), valid: false },
+    { bytes: Buffer.from(JSON.stringify({ ...valid, groups: { ...valid.groups, total: false } })), valid: false },
+    { bytes: Buffer.from("{"), valid: false },
+    { bytes: Buffer.alloc(0), valid: false },
+    {
+      bytes: Buffer.concat([
+        validBytes.subarray(0, -1),
+        Buffer.from(',"extra":"'),
+        Buffer.from([255]),
+        Buffer.from('"}'),
+      ]),
+      valid: false,
+    },
+  ];
+  for (const item of cases) {
     const page = new EventEmitter();
     const observer = observe(page, origin, [requirement]);
     observer.start();
-    const request = {
-      url: () => origin + path,
-      method: () => "POST",
-      postData: () => body,
-      resourceType: () => "fetch",
-      timing: () => ({}),
-      sizes: async () => ({ responseBodySize: 2 }),
+    const send = (raw) => {
+      const request = {
+        url: () => origin + path,
+        method: () => "POST",
+        postData: () => body,
+        resourceType: () => "fetch",
+        timing: () => ({}),
+        sizes: async () => ({ responseBodySize: 2 }),
+      };
+      page.emit("request", request);
+      page.emit("response", {
+        request: () => request,
+        status: () => 200,
+        fromServiceWorker: () => false,
+        allHeaders: async () => ({}),
+        body: async () => raw,
+        json: async () => JSON.parse(new TextDecoder().decode(await raw)),
+      });
+      page.emit("requestfinished", request);
     };
-    page.emit("request", request);
-    page.emit("response", {
-      request: () => request,
-      status: () => 200,
-      fromServiceWorker: () => false,
-      allHeaders: async () => ({}),
-      json: async () => (malformed ? { ...valid, groups: { ...valid.groups, total: false } } : valid),
-    });
-    page.emit("requestfinished", request);
-    if (malformed) await assert.rejects(observer.waitResponses(10), /Required page requests/);
-    else await observer.waitResponses(100);
+    send(validBytes);
+    await observer.waitResponses(100);
+    const held = Promise.withResolvers();
+    send(held.promise);
+    await assert.rejects(observer.waitResponses(10), /Required page requests/);
+    held.resolve(item.bytes);
+    if (item.valid) await observer.waitResponses(100);
+    else await assert.rejects(observer.waitResponses(10), /Required page requests/);
     const evidence = await observer.finish();
-    if (malformed)
+    if (!item.valid)
       assert.deepEqual(evidence.errors, [{ type: "contract", path, message: "Invalid navigation page envelope" }]);
     else {
       assert.deepEqual(evidence.errors, []);
-      assert.match(evidence.requests[0].navigationPages.recent.nextCursorSha256, /^[a-f0-9]{64}$/);
-      assert.equal(evidence.requests[0].navigationPages.groups.nextCursorSha256, null);
+      const entry = evidence.requests[1];
+      assert.match(entry.navigationPages.recent.nextCursorSha256, /^[a-f0-9]{64}$/);
+      assert.equal(entry.navigationPages.groups.nextCursorSha256, null);
+      assert.equal(entry.responseBodyBytes, item.bytes.length);
+      assert.equal(entry.responseBodySha256, sha256(item.bytes));
     }
     assert.equal(JSON.stringify(evidence).includes("private-"), false);
+  }
+});
+
+test("an aborted navigation body needs an identical successful successor and explicit permission to supersede", async () => {
+  const origin = "http://127.0.0.1:8129",
+    path = "/api/session-navigation";
+  const data = Buffer.from(
+    JSON.stringify(
+      Object.fromEntries(["recent", "pinned", "groups"].map((key) => [key, { items: [], total: 0, nextCursor: null }])),
+    ),
+  );
+  for (const mode of ["absent", "wrong-intent", "disallowed", "before", "after"]) {
+    const page = new EventEmitter();
+    const body = JSON.stringify({ surface: "web" });
+    const requirement = {
+      path,
+      method: "POST",
+      navigation: navigationIntent(path, body),
+      captureNavigation: true,
+      allowSupersededAbort: mode !== "disallowed",
+    };
+    const observer = observe(page, origin, [requirement]);
+    observer.start();
+    const send = (raw, postData = body, finish = true) => {
+      const request = {
+        url: () => origin + path,
+        method: () => "POST",
+        postData: () => postData,
+        resourceType: () => "fetch",
+        timing: () => ({}),
+        sizes: async () => ({}),
+        failure: () => ({ errorText: "net::ERR_ABORTED" }),
+      };
+      page.emit("request", request);
+      page.emit("response", {
+        request: () => request,
+        status: () => 200,
+        fromServiceWorker: () => false,
+        allHeaders: async () => ({}),
+        body: async () => raw,
+      });
+      if (finish) page.emit("requestfinished", request);
+      return request;
+    };
+    const held = Promise.withResolvers();
+    const aborted = send(held.promise, body, false);
+    if (mode !== "after") held.reject(new Error("Modeled aborted navigation body"));
+    await new Promise((resolve) => setImmediate(resolve));
+    page.emit("requestfailed", aborted);
+    if (mode !== "absent") send(data, mode === "wrong-intent" ? JSON.stringify({ surface: "all" }) : body);
+    if (mode === "after") {
+      await new Promise((resolve) => setImmediate(resolve));
+      held.reject(new Error("Modeled late aborted navigation body"));
+    }
+    const succeeds = ["before", "after"].includes(mode);
+    if (succeeds) await observer.waitResponses(100);
+    else await assert.rejects(observer.waitResponses(10));
+    const evidence = await observer.finish();
+    assert.equal(requiredResponsesComplete(evidence.requests, [requirement]), succeeds);
+    assert.equal(evidence.errors.length, ["absent", "wrong-intent"].includes(mode) ? 1 : 0);
   }
 });
 
@@ -645,7 +736,7 @@ function actionableObserver() {
       status: () => status,
       fromServiceWorker: () => false,
       allHeaders: async () => ({}),
-      json: json ?? (async () => data),
+      body: async () => Buffer.from(JSON.stringify(json ? await json() : data)),
     });
     if (finish) page.emit("requestfinished", request);
     return request;
@@ -682,6 +773,9 @@ test("actionable requirements follow the measured parent and visible panes witho
 
 test("actionable completion requires bounded well-formed initial parent data even for an absent empty strip", async () => {
   for (const mutate of [
+    (data) => {
+      data.extra = "x".repeat(4194304);
+    },
     (data) => {
       data.actionable.parentSessionId = "wrong";
     },
@@ -791,7 +885,12 @@ test("waiting actionable children require completed approval data and cannot bor
   old.resolve(actionablePage());
   await assert.rejects(observer.waitResponses(8));
   assert.equal((await observer.finish()).requests.length, 0);
-  for (const data of [{}, { approvals: [{}] }, { approvals: [{ requestId: "ok", command: false }] }]) {
+  for (const data of [
+    {},
+    { approvals: [{}] },
+    { approvals: [{ requestId: "ok", command: false }] },
+    { approvals: [{ requestId: "ok", command: "x".repeat(4194304) }] },
+  ]) {
     observer.start();
     send(actionablePage("private-parent", true, 1));
     send(data, { path: "/api/sessions/private-child-0/approvals" });
