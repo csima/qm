@@ -1,4 +1,5 @@
 import { api, ApiError, type CoreSession } from "./core-bridge.ts";
+import { subagentState } from "../../chassis/src/session-navigation.ts";
 import type {
   SessionNavigationRequest,
   SessionNavigationResult,
@@ -42,7 +43,7 @@ function session(value: unknown): void {
       ["dm", "channel", "group"].includes(String(row.type)),
   );
   for (const field of ["title", "channelName", "color"]) requireValue(row[field] == null || string(row[field]));
-  for (const field of ["archived", "pinned", "working", "awaitingInput", "hasEntries"])
+  for (const field of ["archived", "pinned", "working", "awaitingInput", "lastTurnFailed", "hasEntries"])
     requireValue(row[field] === undefined || typeof row[field] === "boolean");
   for (const field of ["lastActivityAt"]) requireValue(row[field] === undefined || finite(row[field]));
   for (const field of ["parentSessionId", "surface"]) requireValue(row[field] === undefined || string(row[field]));
@@ -186,6 +187,23 @@ export async function fetchSessionPage(
   page(result, session);
   contexts(result.contexts, 51);
   totals(result.statusTotals);
+  if (request.actionable) {
+    const metadata = object(result.actionable);
+    const items = result.items as CoreSession[];
+    requireValue(
+      metadata.parentSessionId === request.parentSessionId &&
+        Array.isArray(metadata.depths) &&
+        metadata.depths.length === items.length &&
+        metadata.depths.every((depth) => count(depth) && (depth as number) > 0) &&
+        items.every((row) => subagentState(row) !== "done"),
+    );
+    if (metadata.parentSubagents === null)
+      requireValue(items.length === 0 && result.total === 0 && result.nextCursor === null);
+    else {
+      const summary = object(metadata.parentSubagents);
+      requireValue(count(summary.running) && count(summary.waiting));
+    }
+  } else requireValue(result.actionable === undefined);
   return value as SessionPageResult<CoreSession>;
 }
 export async function fetchSessionReferences(

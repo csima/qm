@@ -170,6 +170,8 @@ import {
   refreshSessions,
   resolveSessionReference,
   resolveSessionTarget,
+  readSessionWindow,
+  mergeSessionPages,
   renderList,
   sessionsState,
   sessionSlackUrl,
@@ -193,11 +195,13 @@ import {
   ackKey,
   peekLines,
   subagentRows,
+  subagentRow,
   subagentSummary,
   visibleSubagents,
   type PeekLine,
   type SubagentRow,
 } from "./subagent-activity";
+import type { SessionPageResult } from "../../chassis/src/session-navigation.ts";
 import { newChatDraftKey, saveDraft, storedDraft } from "./drafts";
 import { createForkOriginController, forkOriginView } from "./fork-origin";
 import { base64ToBytes } from "./paste-text";
@@ -423,6 +427,7 @@ export function createChatSurface(
   function teardownActiveChat(): void {
     transcriptViewport.dispose();
     transcriptRefreshGeneration++;
+    resetSubagentPage();
     readOnlyView = null;
     readonlyApprove = null;
     preserveOutgoingWorkingDot(null);
@@ -2464,6 +2469,12 @@ export function createChatSurface(
 
   const SUBAGENT_ACK_KEY = "qm.subagentAck";
   const subagentUi = {
+    rootId: null as string | null,
+    snapshot: undefined as typeof sessionsState.navigation | undefined,
+    page: null as SessionPageResult<CoreSession> | null,
+    controller: null as AbortController | null,
+    legacy: false,
+    notice: "",
     expanded: false,
     peekId: null as string | null,
     peek: null as PeekLine[] | null,
@@ -2481,6 +2492,71 @@ export function createChatSurface(
       })(),
     ),
   };
+
+  function resetSubagentPage(): void {
+    subagentUi.controller?.abort();
+    subagentUi.controller = null;
+    subagentUi.rootId = null;
+    subagentUi.snapshot = undefined;
+    subagentUi.page = null;
+    subagentUi.legacy = false;
+    subagentUi.notice = "";
+    subagentUi.approvalsKey = "";
+    subagentUi.approvals.clear();
+    stopSubagentPeek();
+  }
+
+  async function loadSubagentPage(append = false): Promise<void> {
+    const rootId = chatState.sessionId;
+    if (!rootId || !ctx.visible() || (append && subagentUi.controller)) return;
+    const previous = subagentUi.page;
+    const cursor = append ? previous?.nextCursor : null;
+    if (append && !cursor) return;
+    subagentUi.controller?.abort();
+    const controller = new AbortController();
+    const seq = appState.viewRenderSeq;
+    subagentUi.controller = controller;
+    subagentUi.rootId = rootId;
+    subagentUi.snapshot = sessionsState.navigation;
+    subagentUi.notice = "";
+    const current = () =>
+      !controller.signal.aborted &&
+      subagentUi.controller === controller &&
+      chatState.sessionId === rootId &&
+      appState.viewRenderSeq === seq &&
+      ctx.visible();
+    try {
+      const page = await readSessionWindow(
+        { parentSessionId: rootId, children: true, actionable: true, ...(cursor ? { cursor } : {}) },
+        append ? 50 : (previous?.items.length ?? 50),
+        controller.signal,
+      );
+      if (!current()) return;
+      if (!page) {
+        subagentUi.legacy = true;
+        subagentUi.page = null;
+        if (sessionsState.navigation) await refreshSessions({ silent: true });
+      } else {
+        if (cursor && page.nextCursor === cursor) throw new Error("Session cursor did not advance");
+        subagentUi.page = append && previous ? mergeSessionPages(previous, page) : page;
+        renderList();
+      }
+    } catch (error) {
+      if (current()) subagentUi.notice = errMessage(error, "Couldn't load subagents.");
+    } finally {
+      if (subagentUi.controller === controller) {
+        if (!current()) subagentUi.snapshot = undefined;
+        subagentUi.controller = null;
+        if (
+          !controller.signal.aborted &&
+          chatState.sessionId === rootId &&
+          appState.viewRenderSeq === seq &&
+          ctx.visible()
+        )
+          drawActiveChat();
+      }
+    }
+  }
 
   function stopSubagentPeek(): void {
     if (subagentUi.timer) clearInterval(subagentUi.timer);
@@ -2569,6 +2645,8 @@ export function createChatSurface(
     return html`<div
       class="subagent-row ${row.state} ${peeking ? "peeking" : ""}"
       style=${`--subagent-depth:${row.depth - 1}`}
+      data-session-id=${row.session.id}
+      data-depth=${row.depth}
     >
       <button
         type="button"
@@ -2620,17 +2698,38 @@ export function createChatSurface(
   function subagentStrip(): TemplateResult | typeof nothing {
     const rootId = chatState.sessionId;
     if (!rootId) return nothing;
-    const rows = visibleSubagents(subagentRows(sessionsState.list, rootId), subagentUi.acknowledged);
+    if (subagentUi.rootId !== rootId) resetSubagentPage();
+    if (!subagentUi.legacy && (subagentUi.rootId !== rootId || subagentUi.snapshot !== sessionsState.navigation))
+      void loadSubagentPage();
+    const page = subagentUi.page;
+    const rows = visibleSubagents(
+      subagentUi.legacy
+        ? subagentRows(sessionsState.list, rootId)
+        : (page?.items.map((row, index) => subagentRow(row, page.actionable!.depths[index]!)) ?? []),
+      subagentUi.acknowledged,
+    );
+    const more = Boolean(page?.nextCursor);
+    const loading = Boolean(subagentUi.controller);
     if (subagentUi.peekId && !rows.some((row) => row.session.id === subagentUi.peekId)) stopSubagentPeek();
     syncSubagentApprovals(rows);
     subagentUi.ticking = rows.some((row) => row.state === "working" || row.state === "waiting");
     syncWorkTicker();
-    if (!rows.length) return nothing;
-    const single = rows.length === 1;
+    if (!rows.length && !more && !loading && !subagentUi.notice) return nothing;
+    const single = rows.length === 1 && !more;
     const expanded = single || subagentUi.expanded || rows.some((row) => row.state === "waiting");
     const failed = rows.some((row) => row.state === "failed");
+    const summary = subagentSummary(rows, page?.actionable?.parentSubagents ?? undefined, more);
+    let pageState = loading ? "loading" : "ready";
+    if (subagentUi.notice) pageState = "error";
     return html`
-      <section class="bg-activity subagent-activity ${expanded ? "expanded" : ""} ${failed ? "has-failed" : ""}">
+      <section
+        class="bg-activity subagent-activity ${expanded ? "expanded" : ""} ${failed ? "has-failed" : ""}"
+        data-parent-session-id=${rootId}
+        data-session-page-state=${pageState}
+        data-loaded=${page?.items.length ?? rows.length}
+        data-total=${page?.total ?? rows.length}
+        aria-busy=${String(loading)}
+      >
         ${
           single
             ? nothing
@@ -2644,11 +2743,29 @@ export function createChatSurface(
                   drawActiveChat();
                 }}
               >
-                ${icon(Bot, 13)}<span class="bg-activity-label">${subagentSummary(rows)}</span>
+                ${icon(Bot, 13)}<span class="bg-activity-label">${summary || "Subagents"}</span>
                 <span class="bg-activity-toggle">${icon(ChevronRight, 14)}</span>
               </button>`
         }
         ${expanded ? html`<div class="subagent-list ${single ? "single" : "bg-panel"}">${rows.map(subagentRowTpl)}</div>` : nothing}
+        ${loading ? html`<div class="bg-panel-note" role="status">Loading subagents…</div>` : nothing}
+        ${subagentUi.notice ? html`<div class="bg-panel-note" role="alert">${subagentUi.notice}<button type="button" class="btn" @click=${() => void loadSubagentPage()}>Retry</button></div>` : nothing}
+        ${
+          more
+            ? html`<button
+                type="button"
+                class="btn"
+                data-session-page="subagents"
+                ?disabled=${loading}
+                @click=${() => {
+                  void loadSubagentPage(true);
+                  drawActiveChat();
+                }}
+              >
+                Show more subagents
+              </button>`
+            : nothing
+        }
       </section>
     `;
   }

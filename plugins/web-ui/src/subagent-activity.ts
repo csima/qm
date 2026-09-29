@@ -1,4 +1,5 @@
 import type { CoreSession, SessionEntry } from "./core-bridge.ts";
+import { subagentState, type SessionSubagentCounts } from "../../chassis/src/session-navigation.ts";
 
 type SubagentState = "working" | "waiting" | "done" | "failed";
 
@@ -46,20 +47,19 @@ export function subagentCounts(
 }
 
 export function subagentRows(list: readonly CoreSession[], rootId: string): SubagentRow[] {
-  return descendantsOf(list, rootId).map(({ session, depth }) => {
-    let state: SubagentState = "done";
-    if (session.awaitingInput) state = "waiting";
-    else if (session.working) state = "working";
-    else if (session.lastTurnFailed) state = "failed";
-    const live = state === "working" || state === "waiting";
-    return {
-      session,
-      state,
-      depth,
-      startedAt: session.createdAt,
-      endedAt: live ? null : (session.lastActivityAt ?? session.createdAt),
-    };
-  });
+  return descendantsOf(list, rootId).map(({ session, depth }) => subagentRow(session, depth));
+}
+
+export function subagentRow(session: CoreSession, depth: number): SubagentRow {
+  const state = subagentState(session);
+  const live = state === "working" || state === "waiting";
+  return {
+    session,
+    state,
+    depth,
+    startedAt: session.createdAt,
+    endedAt: live ? null : (session.lastActivityAt ?? session.createdAt),
+  };
 }
 
 export function visibleSubagents(rows: readonly SubagentRow[], acknowledged: ReadonlySet<string>): SubagentRow[] {
@@ -70,15 +70,16 @@ export function ackKey(row: Pick<SubagentRow, "session" | "endedAt">): string {
   return `${row.session.id}@${row.endedAt ?? 0}`;
 }
 
-export function subagentSummary(rows: readonly SubagentRow[]): string {
+export function subagentSummary(rows: readonly SubagentRow[], full?: SessionSubagentCounts, partial = false): string {
   const count = (state: SubagentState) => rows.filter((row) => row.state === state).length;
   const parts: string[] = [];
-  const working = count("working");
-  const waiting = count("waiting");
+  const working = full?.running ?? count("working");
+  const waiting = full?.waiting ?? count("waiting");
   const failed = count("failed");
   if (working) parts.push(`${working} subagent${working === 1 ? "" : "s"} running`);
   if (waiting) parts.push(`${waiting} need${waiting === 1 ? "s" : ""} you`);
-  if (failed) parts.push(`${failed} failed`);
+  if (failed) parts.push(`${failed} failed${partial ? " loaded" : ""}`);
+  if (partial) parts.push("more available");
   return parts.join(", ");
 }
 

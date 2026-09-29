@@ -39,18 +39,64 @@ export interface SessionNavigationFields {
   archived?: boolean;
   pinned?: boolean;
   awaitingInput?: boolean;
+  working?: boolean;
+  lastTurnFailed?: boolean;
+}
+
+export function subagentState(session: Pick<SessionNavigationFields, "awaitingInput" | "working" | "lastTurnFailed">) {
+  if (session.awaitingInput) return "waiting";
+  if (session.working) return "working";
+  if (session.lastTurnFailed) return "failed";
+  return "done";
 }
 
 export type ChatBrowseStatus = "active" | "waiting" | "archived";
 type SessionNavigationSurface = "all" | "web" | "slack" | "core";
 export type SessionReference = { kind: "id" | "thread"; value: string };
-type SessionNavigationSection = "recent" | "pinned" | "groups" | "archived";
+export type SessionNavigationSection = "recent" | "pinned" | "groups" | "archived";
 
 export interface SessionNavigationRequest {
   surface?: "all" | "web";
   section?: SessionNavigationSection;
   cursor?: string;
   references?: SessionReference[];
+}
+
+export interface SessionSubagentCounts {
+  running: number;
+  waiting: number;
+}
+
+type SessionLink = Pick<SessionNavigationFields, "id" | "parentSessionId" | "working" | "awaitingInput">;
+
+export function descendantsOf<T extends SessionLink>(
+  list: readonly T[],
+  rootId: string,
+): { session: T; depth: number }[] {
+  const out: { session: T; depth: number }[] = [];
+  const seen = new Set([rootId]);
+  let frontier = [rootId];
+  for (let depth = 1; frontier.length; depth++) {
+    const parents = new Set(frontier);
+    frontier = [];
+    for (const session of list) {
+      if (!session.parentSessionId || !parents.has(session.parentSessionId) || seen.has(session.id)) continue;
+      seen.add(session.id);
+      out.push({ session, depth });
+      frontier.push(session.id);
+    }
+  }
+  return out;
+}
+
+export function subagentCounts(list: readonly SessionLink[], rootId: string | null | undefined): SessionSubagentCounts {
+  const counts = { running: 0, waiting: 0 };
+  if (!rootId) return counts;
+  for (const { session } of descendantsOf(list, rootId)) {
+    if (session.awaitingInput) counts.waiting++;
+    else if (session.working) counts.running++;
+  }
+  return counts;
 }
 
 export interface SessionPageRequest {
@@ -60,6 +106,8 @@ export interface SessionPageRequest {
   query?: string;
   title?: string;
   children?: boolean;
+  parentSessionId?: string;
+  actionable?: boolean;
   pinned?: boolean;
   archived?: boolean;
   cursor?: string;
@@ -98,6 +146,11 @@ export interface SessionStatusTotals {
 export interface SessionPageResult<T> extends SessionNavigationPage<T> {
   contexts: SessionNavigationContext[];
   statusTotals: SessionStatusTotals;
+  actionable?: {
+    parentSessionId: string;
+    parentSubagents: SessionSubagentCounts | null;
+    depths: number[];
+  };
 }
 
 export interface SessionResolveResult<T> {

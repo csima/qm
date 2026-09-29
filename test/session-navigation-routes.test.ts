@@ -121,6 +121,16 @@ test("navigation validates bounded inputs and filter cursors before enumeration"
       ["/resolve", { principalId: "U1", references: [{ kind: "thread", value: "x".repeat(2049) }] }],
       ["/resolve", { principalId: "U1", references: [{ kind: "id", value: "a", scopeId: "personal:U1" }] }],
       ["/page", { principalId: "U1", children: "true" }],
+      ...[null, true, "", "x".repeat(513)].map(
+        (parentSessionId) => ["/page", { principalId: "U1", children: true, parentSessionId }] as [string, unknown],
+      ),
+      ["/page", { principalId: "U1", parentSessionId: "root" }],
+      ["/page", { principalId: "U1", parentSessionId: "root", children: false }],
+      ["/page", { principalId: "U1", actionable: true }],
+      ["/page", { principalId: "U1", actionable: true, children: true }],
+      ["/page", { principalId: "U1", actionable: true, parentSessionId: "root", children: false }],
+      ["/page", { principalId: "U1", actionable: "true", parentSessionId: "root", children: true }],
+      ["/page", { principalId: "U1", actionable: true, cursor: "bad" }],
       ["/page", { principalId: "U1", pinned: 1 }],
       ["/page", { principalId: "U1", archived: "false" }],
       ["/page", { principalId: "U1", query: "x".repeat(513) }],
@@ -153,6 +163,16 @@ test("navigation validates bounded inputs and filter cursors before enumeration"
       assert.equal(response.status, 200, response.text);
     }
     assert.equal(calls, 2);
+    const descendants = await fetchCoreText({
+      origin,
+      secret: SOURCE,
+      method: "POST",
+      path: "/v1/session-navigation/page",
+      body: JSON.stringify({ principalId: "U1", parentSessionId: "missing", children: true }),
+    });
+    assert.equal(descendants.status, 200, descendants.text);
+    assert.equal(JSON.parse(descendants.text).total, 0);
+    assert.equal(calls, 3);
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     await built.runtime.stop();

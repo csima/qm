@@ -1,5 +1,8 @@
 import {
   activityOf,
+  descendantsOf,
+  subagentCounts,
+  subagentState,
   chatBrowseStatusMatches,
   chatMatches,
   recentProjectSeeds,
@@ -76,6 +79,11 @@ function page<T>(
   };
 }
 
+const withSubagents = (session: Session, all: Session[]): Session => ({
+  ...session,
+  subagents: subagentCounts(all, session.id),
+});
+
 const sessionIdentity = (session: Session) => ({ at: activityOf(session), id: session.id });
 const navigationKey = (request: SessionNavigationRequest, section: string) =>
   JSON.stringify([section, request.surface ?? "all"]);
@@ -87,8 +95,10 @@ const pageKey = (request: SessionPageRequest) =>
     (request.query ?? "").trim().toLowerCase(),
     request.title ?? null,
     request.children ?? false,
+    request.parentSessionId ?? null,
     request.pinned ?? null,
     request.archived ?? null,
+    ...(request.actionable ? ["actionable"] : []),
   ]);
 
 export function validateNavigationCursor(request: SessionNavigationRequest): void {
@@ -97,6 +107,10 @@ export function validateNavigationCursor(request: SessionNavigationRequest): voi
 }
 
 export function validateSessionPageCursor(request: SessionPageRequest): void {
+  if (request.parentSessionId !== undefined && request.children !== true)
+    throw new InvalidSessionNavigationRequest("children required with parentSessionId");
+  if (request.actionable && !request.parentSessionId)
+    throw new InvalidSessionNavigationRequest("parentSessionId required with actionable");
   cursorFor(request.cursor, pageKey(request));
 }
 
@@ -150,11 +164,22 @@ export function projectSessionPage(
   sessions: Session[],
   contexts: ContextSummary[],
   request: SessionPageRequest,
+  authorized: readonly Session[] = sessions,
 ): SessionPageResult<Session> {
+  validateSessionPageCursor(request);
+  const descendants = request.parentSessionId
+    ? new Map(
+        authorized.some((session) => session.id === request.parentSessionId)
+          ? descendantsOf(sessions, request.parentSessionId).map(({ session, depth }) => [session.id, depth])
+          : [],
+      )
+    : null;
   const projects = new Map(contexts.map((context) => [context.scopeId, context.project?.name ?? null]));
   const query = (request.query ?? "").trim().toLowerCase();
   const matching = sessions.filter(
     (session) =>
+      (!descendants || descendants.has(session.id)) &&
+      (!request.actionable || subagentState(session) !== "done") &&
       (request.children || !session.parentSessionId) &&
       (request.title === undefined || session.title === request.title) &&
       (!request.scopeId || request.scopeId === session.scopeId) &&
@@ -167,11 +192,23 @@ export function projectSessionPage(
   const result = page(matching, pageKey(request), request.cursor, sessionIdentity);
   return {
     ...result,
+    items: result.items.map((session) => withSubagents(session, sessions)),
     contexts: selectedContexts(contexts, [
       ...result.items.map((session) => session.scopeId),
       ...(request.scopeId ? [request.scopeId] : []),
     ]),
     statusTotals: statusTotals(sessions),
+    ...(request.actionable
+      ? {
+          actionable: {
+            parentSessionId: request.parentSessionId!,
+            parentSubagents: authorized.some((session) => session.id === request.parentSessionId)
+              ? subagentCounts(sessions, request.parentSessionId)
+              : null,
+            depths: result.items.map((session) => descendants!.get(session.id)!),
+          },
+        }
+      : {}),
   };
 }
 
@@ -257,22 +294,27 @@ export function projectSessionNavigation(
     ...(latest ? [latest] : []),
   ];
   return {
-    recent,
-    pinned,
+    recent: { ...recent, items: recent.items.map((session) => withSubagents(session, sessions)) },
+    pinned: { ...pinned, items: pinned.items.map((session) => withSubagents(session, sessions)) },
     groups,
-    ...(archived ? { archived } : {}),
+    ...(archived
+      ? { archived: { ...archived, items: archived.items.map((session) => withSubagents(session, sessions)) } }
+      : {}),
     archivedCount: archivedRows.length,
     contexts: selectedContexts(contexts, [
       ...selected.map((session) => session.scopeId),
       ...groups.items.map((group) => group.scopeId),
     ]),
     statusTotals: statusTotals(sessions),
-    ...resolved,
+    references: resolved.references.map((row) => ({
+      ...row,
+      session: row.session ? withSubagents(row.session, sessions) : null,
+    })),
     startup: {
       hasSessions: sessions.some((session) => session.id),
       hasNonCronSessions: sessions.some((session) => session.id && !session.threadRef.startsWith("cron:")),
       oldestPersonalThreadRef: personal[0]?.threadRef ?? null,
-      latest,
+      latest: latest ? withSubagents(latest, sessions) : null,
     },
   };
 }

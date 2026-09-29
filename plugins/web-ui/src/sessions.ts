@@ -143,8 +143,11 @@ let navigationGeneration = 0;
 let listAbort: AbortController | null = null;
 
 export function rememberSessions(rows: CoreSession[]): void {
+  const prior = new Map(sessionsState.list.map((row) => [row.id, row.subagents]));
   sessionsState.list = reconcileSessions(
-    rows,
+    rows.map((row) =>
+      row.subagents === undefined && prior.get(row.id) !== undefined ? { ...row, subagents: prior.get(row.id) } : row,
+    ),
     sessionsState.list,
     sessionsState.list.map((row) => row.id),
   );
@@ -178,6 +181,14 @@ export async function readSessionPage(
   if (result) {
     rememberSessions(result.items);
     rememberContexts(result.contexts);
+    if (result.actionable) {
+      const { parentSessionId, parentSubagents } = result.actionable;
+      if (parentSubagents === null) sessionsState.list = sessionsState.list.filter((row) => row.id !== parentSessionId);
+      else
+        sessionsState.list = sessionsState.list.map((row) =>
+          row.id === parentSessionId ? { ...row, subagents: parentSubagents } : row,
+        );
+    }
   }
   return result;
 }
@@ -193,13 +204,32 @@ export async function readSessionWindow(
     const next = await readSessionPage({ ...request, cursor }, signal);
     if (!next) throw new Error("Session navigation became unavailable");
     if (next.nextCursor === cursor) throw new Error("Session cursor did not advance");
-    result = {
-      ...next,
-      items: [...new Map([...result.items, ...next.items].map((row) => [row.id, row])).values()],
-      contexts: [...new Map([...result.contexts, ...next.contexts].map((row) => [row.scopeId, row])).values()],
-    };
+    result = mergeSessionPages(result, next);
   }
   return result;
+}
+
+export function mergeSessionPages(
+  previous: SessionPageResult<CoreSession>,
+  next: SessionPageResult<CoreSession>,
+): SessionPageResult<CoreSession> {
+  if (next.actionable?.parentSubagents === null) return next;
+  const items = [...new Map([...previous.items, ...next.items].map((row) => [row.id, row])).values()];
+  const depths = next.actionable
+    ? new Map(
+        [previous, next].flatMap((page) =>
+          page.items.map((row, index) => [row.id, page.actionable?.depths[index]] as const),
+        ),
+      )
+    : null;
+  return {
+    ...next,
+    items,
+    contexts: [...new Map([...previous.contexts, ...next.contexts].map((row) => [row.scopeId, row])).values()],
+    ...(next.actionable
+      ? { actionable: { ...next.actionable, depths: items.map((row) => depths!.get(row.id)!) } }
+      : {}),
+  };
 }
 
 export async function resolveSessionTarget(target: string): Promise<CoreSession | null> {

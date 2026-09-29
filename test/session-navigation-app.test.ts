@@ -315,6 +315,27 @@ test("deep inactive ancestors retain a failed leaf in descendant pages without c
       [leaf.id],
     );
     assert.ok(page.items.every((row) => row.subagents?.running === 0 && row.subagents.waiting === 0));
+    const actionable = await built.app.sessionPage("U1", {
+      children: true,
+      parentSessionId: root.id,
+      actionable: true,
+    });
+    assert.deepEqual(
+      actionable.items.map((row) => row.id),
+      [leaf.id],
+    );
+    assert.deepEqual(actionable.actionable, {
+      parentSessionId: root.id,
+      parentSubagents: { running: 0, waiting: 0 },
+      depths: [6],
+    });
+    const foreign = await built.app.sessionPage("other", {
+      children: true,
+      parentSessionId: root.id,
+      actionable: true,
+    });
+    assert.deepEqual(foreign.items, []);
+    assert.equal(foreign.actionable?.parentSubagents, null);
   } finally {
     await built.runtime.stop();
   }

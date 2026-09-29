@@ -99,18 +99,18 @@ test("title-only tool chips resolve on activation beyond fifty substring matches
     await h.boot();
     await waitFor(() => Boolean(chip(title)));
     assert.equal(
-      requests.some((request) => request.path.endsWith("/page")),
+      requests.some((request) => request.body.title !== undefined),
       false,
     );
     chip(title)!.dispatchEvent(new Event("pointerenter"));
     await new Promise((resolve) => setTimeout(resolve, 10));
     assert.equal(
-      requests.some((request) => request.path.endsWith("/page")),
+      requests.some((request) => request.body.title !== undefined),
       false,
     );
     chip(title)!.click();
     await waitFor(() => h.visibleConversation().state.sessionId === exact.id);
-    assert.deepEqual(requests.find((request) => request.path.endsWith("/page"))!.body, { title, children: true });
+    assert.deepEqual(requests.find((request) => request.body.title === title)!.body, { title, children: true });
     assert.equal(h.requests.includes("/api/sessions"), false);
     await h.openSession(root);
     await waitFor(() => Boolean(chip("unknown")));
@@ -185,7 +185,7 @@ for (const phase of ["title", "transcript"] as const) {
             return Response.json(projectSessionNavigation(rows, rows, [], "tester", body));
           if (path === "/api/session-navigation/page") {
             const page = projectSessionPage(rows, [], body);
-            return phase === "title" ? held(page) : Response.json(page);
+            return phase === "title" && body.title ? held(page) : Response.json(page);
           }
           if (path === "/api/session-navigation/resolve")
             return Response.json(resolveSessionReferences(rows, body.references));

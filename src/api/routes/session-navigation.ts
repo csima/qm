@@ -79,11 +79,13 @@ async function handle(ctx: ApiCtx, operation: "navigation" | "page" | "resolve")
         "query",
         "title",
         "children",
+        "parentSessionId",
+        "actionable",
         "pinned",
         "archived",
         "cursor",
       ]);
-      for (const field of ["children", "pinned", "archived"]) {
+      for (const field of ["children", "actionable", "pinned", "archived"]) {
         if (body[field] !== undefined && typeof body[field] !== "boolean")
           throw new InvalidSessionNavigationRequest(`invalid ${field}`);
       }
@@ -97,6 +99,10 @@ async function handle(ctx: ApiCtx, operation: "navigation" | "page" | "resolve")
         ...(body.query === undefined ? {} : { query: body.query as string }),
         ...(body.title === undefined ? {} : { title: text(body.title, "title", 512) }),
         ...(body.children === undefined ? {} : { children: body.children as boolean }),
+        ...(body.actionable === undefined ? {} : { actionable: body.actionable as boolean }),
+        ...(body.parentSessionId === undefined
+          ? {}
+          : { parentSessionId: text(body.parentSessionId, "parentSessionId", 512) }),
         ...(body.pinned === undefined ? {} : { pinned: body.pinned as boolean }),
         ...(body.archived === undefined ? {} : { archived: body.archived as boolean }),
       };

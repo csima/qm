@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  resolveSessionReferences,
   projectSessionNavigation,
   projectSessionPage,
   validateNavigationCursor,
@@ -33,6 +34,7 @@ const context: ContextSummary = {
   sessionCount: 0,
   lastActivityAt: null,
 };
+const undecorated = (rows: Session[]) => rows.map(({ subagents: _subagents, ...row }) => row);
 const order = (rows: Session[]) =>
   [...rows].sort((a, b) => activityOf(b) - activityOf(a) || (a.id < b.id ? -1 : Number(a.id !== b.id)));
 
@@ -70,7 +72,7 @@ test("session pages cover every matching row with deterministic ties and indepen
             (!status || chatBrowseStatusMatches(row, status)) &&
             (surface === "all" || surfaceOf(row) === surface),
         );
-        assert.deepEqual(allPages(rows, [context], request), order(expected));
+        assert.deepEqual(undecorated(allPages(rows, [context], request)), order(expected));
         const page = projectSessionPage(rows, [context], request);
         assert.equal(page.total, expected.length);
         for (const key of ["active", "waiting", "archived"] as const)
@@ -82,7 +84,7 @@ test("session pages cover every matching row with deterministic ties and indepen
   for (const archived of [false, true])
     for (const pinned of [false, true]) {
       const expected = rows.filter((row) => Boolean(row.archived) === archived && Boolean(row.pinned) === pinned);
-      assert.deepEqual(allPages(rows, [context], { children: true, archived, pinned }), order(expected));
+      assert.deepEqual(undecorated(allPages(rows, [context], { children: true, archived, pinned })), order(expected));
     }
   assert.deepEqual(allPages([], [], {}), []);
 });
@@ -119,7 +121,7 @@ test("literal query, current project labels, and actual thread surfaces use shar
   for (const query of ["Current", "[100%_]", "ada lovelace, grace hopper", "100%_", "  PERSONAL  "]) {
     const page = projectSessionPage(rows, [context, project], { query, children: true });
     assert.deepEqual(
-      page.items,
+      undecorated(page.items),
       order(
         rows.filter((row) =>
           chatMatches(row, query.trim().toLowerCase(), row.scopeId === project.scopeId ? project.project.name : null),
@@ -224,7 +226,9 @@ test("exact title pages bypass substring distractors, preserve literal case and 
   const title = " Exact [100%_] Title ";
   const target = session("exact", { title, archived: true, parentSessionId: "parent", threadRef: "agent:child" });
   const rows = [...Array.from({ length: 65 }, (_, i) => session(`distractor-${i}`, { title: `${title}${i}` })), target];
-  assert.deepEqual(projectSessionPage(rows, [], { children: true, title }).items, [target]);
+  assert.deepEqual(projectSessionPage(rows, [], { children: true, title }).items, [
+    { ...target, subagents: { running: 0, waiting: 0 } },
+  ]);
   assert.deepEqual(projectSessionPage(rows, [], { children: true, title: title.trim() }).items, []);
   assert.deepEqual(projectSessionPage(rows, [], { children: true, title: title.toLowerCase() }).items, []);
   assert.deepEqual(projectSessionPage(rows, [], { children: true, title: "unknown" }).items, []);
@@ -238,4 +242,150 @@ test("exact title pages bypass substring distractors, preserve literal case and 
     /invalid session cursor/,
   );
   assert.equal(projectSessionPage(duplicates, [], { title, cursor: first.nextCursor! }).items.length, 15);
+});
+
+test("descendant pages preserve all-depth state and full-snapshot summaries across page boundaries", () => {
+  const root = session("root", { createdAt: 1000 });
+  const children = Array.from({ length: 53 }, (_, i) =>
+    session(`child-${String(i).padStart(2, "0")}`, {
+      parentSessionId: root.id,
+      createdAt: 53 - i,
+      working: i === 52,
+    }),
+  );
+  const grandchild = session("grandchild", {
+    parentSessionId: children[52]!.id,
+    createdAt: 0,
+    awaitingInput: true,
+    working: true,
+  });
+  const failed = session("failed", { parentSessionId: grandchild.id, createdAt: -1, lastTurnFailed: true });
+  const rows = [root, ...children, grandchild, failed, session("unrelated", { working: true })];
+  const request = { children: true, parentSessionId: root.id };
+  const first = projectSessionPage(rows, [context], request);
+  assert.equal(first.items.length, 50);
+  assert.equal(first.total, 55);
+  assert.ok(first.nextCursor);
+  const second = projectSessionPage(rows, [context], { ...request, cursor: first.nextCursor });
+  assert.equal(second.items.length, 5);
+  assert.equal(second.nextCursor, null);
+  assert.deepEqual(undecorated([...first.items, ...second.items]), order([...children, grandchild, failed]));
+  assert.deepEqual(second.items.find((row) => row.id === "child-52")?.subagents, { running: 0, waiting: 1 });
+  assert.equal(second.items.find((row) => row.id === "failed")?.lastTurnFailed, true);
+  const nav = projectSessionNavigation(rows, rows, [context], "U1", { references: [{ kind: "id", value: root.id }] });
+  for (const row of [
+    nav.recent.items.find((row) => row.id === root.id),
+    nav.references[0]!.session,
+    nav.startup.latest,
+  ])
+    assert.deepEqual(row?.subagents, { running: 1, waiting: 1 });
+  assert.deepEqual(projectSessionPage(rows, [], { query: "root" }).items[0]?.subagents, { running: 1, waiting: 1 });
+  const resolved = resolveSessionReferences([root], [{ kind: "id", value: root.id }]);
+  assert.ok(!("subagents" in resolved.references[0]!.session!));
+  assert.throws(
+    () => projectSessionPage(rows, [], { ...request, parentSessionId: "unrelated", cursor: first.nextCursor! }),
+    /invalid session cursor/,
+  );
+  assert.throws(() => projectSessionPage(rows, [], { parentSessionId: root.id }), /children required/);
+  assert.throws(() => projectSessionPage(rows, [], { parentSessionId: root.id, children: false }), /children required/);
+});
+
+test("descendant filtering cannot recover unauthorized roots or missing intermediate nodes", () => {
+  const root = session("root");
+  const child = session("child", { parentSessionId: root.id });
+  const grandchild = session("grandchild", { parentSessionId: child.id });
+  const request = { children: true, parentSessionId: root.id };
+  assert.equal(projectSessionPage([child, grandchild], [], request).total, 0);
+  assert.equal(projectSessionPage([child, grandchild], [], request, [root, child, grandchild]).total, 2);
+  assert.equal(projectSessionPage([root, grandchild], [], request).total, 0);
+  assert.equal(projectSessionPage([root, child, grandchild], [], { ...request, parentSessionId: "unknown" }).total, 0);
+  assert.deepEqual(
+    projectSessionPage([root, child, grandchild], [], { ...request, query: "grandchild" }).items.map((s) => s.id),
+    [grandchild.id],
+  );
+  const cycle = [session("x", { parentSessionId: "y" }), session("y", { parentSessionId: "x" })];
+  assert.deepEqual(
+    projectSessionPage(cycle, [], { children: true, parentSessionId: "x" }).items.map((s) => s.id),
+    ["y"],
+  );
+});
+
+test("actionable pages filter before the limit and preserve depth through omitted idle ancestors", () => {
+  const root = session("root");
+  const idle = Array.from({ length: 65 }, (_, i) =>
+    session(`idle-${i}`, { parentSessionId: root.id, createdAt: 1000 + i }),
+  );
+  const chain = Array.from({ length: 6 }, (_, i) =>
+    session(`chain-${i}`, { parentSessionId: i ? `chain-${i - 1}` : root.id }),
+  );
+  const failed = session("failed", { parentSessionId: "chain-5", createdAt: -2, lastTurnFailed: true });
+  const working = session("working", {
+    parentSessionId: "chain-5",
+    createdAt: -1,
+    working: true,
+    lastTurnFailed: true,
+  });
+  const waiting = session("waiting", { parentSessionId: "chain-5", createdAt: 0, working: true, awaitingInput: true });
+  const rows = [root, ...idle, ...chain, failed, working, waiting];
+  const request = { parentSessionId: root.id, children: true, actionable: true };
+  const page = projectSessionPage(rows, [], request);
+  assert.deepEqual(
+    page.items.map((row) => row.id),
+    ["waiting", "working", "failed"],
+  );
+  assert.equal(page.total, 3);
+  assert.equal(page.nextCursor, null);
+  assert.deepEqual(page.actionable, {
+    parentSessionId: root.id,
+    parentSubagents: { running: 1, waiting: 1 },
+    depths: [7, 7, 7],
+  });
+  assert.equal(projectSessionPage(rows, [], { ...request, actionable: false }).total, 74);
+  assert.equal(projectSessionPage(rows, [], { ...request, actionable: false }).actionable, undefined);
+  const ordinary = projectSessionPage(rows, [], { ...request, actionable: false });
+  assert.equal(
+    JSON.parse(Buffer.from(ordinary.nextCursor!, "base64url").toString()).key,
+    JSON.stringify(["all", null, null, "", null, true, root.id, null, null]),
+  );
+  const failedOnly = projectSessionPage(
+    rows.filter((row) => ![working.id, waiting.id].includes(row.id)),
+    [],
+    request,
+  );
+  assert.deepEqual(failedOnly.actionable?.parentSubagents, { running: 0, waiting: 0 });
+  const hidden = rows.filter((row) => row.id !== root.id);
+  assert.deepEqual(projectSessionPage(hidden, [], request, rows).actionable, page.actionable);
+  const denied = projectSessionPage(hidden, [], request);
+  assert.deepEqual(denied.actionable, { parentSessionId: root.id, parentSubagents: null, depths: [] });
+  assert.equal(denied.total, 0);
+  const broken = projectSessionPage(
+    rows.filter((row) => row.id !== "chain-2"),
+    [],
+    request,
+  );
+  assert.deepEqual(broken.items, []);
+  assert.deepEqual(broken.actionable?.parentSubagents, { running: 0, waiting: 0 });
+});
+
+test("actionable continuation binds its selector and returns complete deterministic ties without granting roots", () => {
+  const root = session("root");
+  const rows = [
+    root,
+    ...Array.from({ length: 103 }, (_, i) =>
+      session(`child-${String(i).padStart(3, "0")}`, { parentSessionId: root.id, lastTurnFailed: true }),
+    ),
+  ];
+  const request = { parentSessionId: root.id, children: true, actionable: true };
+  const first = projectSessionPage(rows, [], request);
+  assert.equal(first.items.length, 50);
+  assert.equal(first.total, 103);
+  assert.equal(first.items[0]?.id, "child-000");
+  assert.deepEqual(first.actionable?.depths, Array(50).fill(1));
+  assert.equal(allPages(rows, [], request).length, 103);
+  for (const changed of [{ actionable: false }, { parentSessionId: "other" }, { children: false }])
+    assert.throws(() => validateSessionPageCursor({ ...request, ...changed, cursor: first.nextCursor! }));
+  assert.throws(() => validateSessionPageCursor({ actionable: true, children: true }), /parentSessionId required/);
+  const revoked = projectSessionPage(rows.slice(1), [], { ...request, cursor: first.nextCursor! });
+  assert.deepEqual(revoked.items, []);
+  assert.equal(revoked.actionable?.parentSubagents, null);
 });
