@@ -330,12 +330,21 @@ export function createAppHelpers(deps: AppDeps, app: App) {
         project,
       });
     }
+    const checkedGroups = new Set<ScopeId>();
     for (const s of await sessionsForViewer(principalId)) {
       const { kind } = parseScopeId(s.scopeId);
       if (s.scopeId !== personal && kind !== "channel" && kind !== "group") continue;
       let ctx = byScope.get(s.scopeId);
-      if (!ctx && kind === "group" && (await deps.directory.groupMember(parseScopeId(s.scopeId).ref, principalId))) {
-        ctx = { scopeId: s.scopeId, kind: "group", name: s.channelName ?? null, sessionCount: 0, lastActivityAt: null };
+      if (!ctx && kind === "group" && !checkedGroups.has(s.scopeId)) {
+        checkedGroups.add(s.scopeId);
+        if (await deps.directory.groupMember(parseScopeId(s.scopeId).ref, principalId))
+          ctx = {
+            scopeId: s.scopeId,
+            kind: "group",
+            name: s.channelName ?? null,
+            sessionCount: 0,
+            lastActivityAt: null,
+          };
       }
       if (!ctx) continue;
       if (!ctx.name && s.channelName) ctx.name = s.channelName;
