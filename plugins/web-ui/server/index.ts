@@ -1147,7 +1147,39 @@ async function serveFileContent(c: WebCtx, playground = false): Promise<unknown>
   return Readable.fromWeb(r.body as Parameters<typeof Readable.fromWeb>[0]).pipe(res);
 }
 
+async function readSessionNavigation(c: WebCtx, suffix: string): Promise<unknown> {
+  const body = await readJson<Record<string, unknown>>(c.req, c.res, false);
+  if (!body) return;
+  if (Array.isArray(body)) return json(c.res, 400, { error: "bad_request" });
+  if (c.res.destroyed || c.res.writableEnded) return;
+  const cancel = new AbortController();
+  const onClose = () => cancel.abort();
+  c.res.once("close", onClose);
+  try {
+    const portalTok = portalTokenStore.getStore();
+    const result = await fetchCoreText({
+      origin: CORE,
+      secret: CORE_SIGNING_SECRET,
+      method: "POST",
+      path: `/v1/session-navigation${suffix}`,
+      body: JSON.stringify({ ...body, principalId: c.user }),
+      headers: portalTok ? { [PORTAL_IDENTITY_HEADER]: portalTok } : undefined,
+      signal: AbortSignal.any([cancel.signal, AbortSignal.timeout(30_000)]),
+    });
+    if (!cancel.signal.aborted) return relay(c.res, result);
+  } catch (error) {
+    if (!cancel.signal.aborted) throw error;
+  } finally {
+    c.res.off("close", onClose);
+  }
+}
+
 const apiRoutes: readonly WebRoute[] = [
+  ...["", "/page", "/resolve"].map((suffix): WebRoute => ({
+    method: "POST",
+    path: `/api/session-navigation${suffix}`,
+    handle: (c) => readSessionNavigation(c, suffix),
+  })),
   {
     method: "GET",
     path: "/api/files/by-name/content",

@@ -564,3 +564,9 @@ test("cronRowMeta shows the next fire and the last result of a session's cron", 
   );
   assert.equal(cronRowMeta({ id: "c", lastFire: { firedAt: now - 1_000, status: "running" } }), "paused · running now");
 });
+
+test("proactive startup uses the complete fact instead of an empty visible page", () => {
+  const state = { started: false, sessionId: null, scopeId: null, messageCount: 0, loaded: true, sessions: [] };
+  assert.equal(shouldStartProactiveOpener({ ...state, hasNonCronSessions: true }), false);
+  assert.equal(shouldStartProactiveOpener({ ...state, hasNonCronSessions: false }), true);
+});

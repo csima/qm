@@ -71,6 +71,7 @@ import type { Conversation } from "./conv-types";
 import {
   openSession,
   openSessionInto,
+  resolveSessionReference,
   renderList,
   sessionsState,
   sessionTitle,
@@ -1016,8 +1017,20 @@ class PaneContent implements IContentRenderer {
       return;
     }
     const conversation = this.ensureConversation();
-    const wanted =
-      sessionId ?? (threadRef ? (sessionsState.list.find((s) => s.threadRef === threadRef)?.id ?? null) : null);
+    let wanted = sessionId;
+    if (!wanted && threadRef) {
+      try {
+        wanted = (await resolveSessionReference({ kind: "thread", value: threadRef }))?.id;
+      } catch {
+        if (!this.disposed)
+          conversation.mountLoadError(() => {
+            this.loaded = false;
+            void this.load();
+          });
+        return;
+      }
+      if (this.disposed) return;
+    }
     if (!wanted) {
       if (threadRef) {
         conversation.mountContinuable(threadRef, null, scopeId ?? null, []);

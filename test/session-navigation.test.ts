@@ -219,3 +219,23 @@ test("cursors reject wrong filters and malformed tuples, and do not grant access
   const navCursor = projectSessionNavigation(rows, rows, [], "U1", {}).recent.nextCursor!;
   assert.throws(() => validateNavigationCursor({ section: "pinned", cursor: navCursor }), /invalid session cursor/);
 });
+
+test("exact title pages bypass substring distractors, preserve literal case and bind continuation", () => {
+  const title = " Exact [100%_] Title ";
+  const target = session("exact", { title, archived: true, parentSessionId: "parent", threadRef: "agent:child" });
+  const rows = [...Array.from({ length: 65 }, (_, i) => session(`distractor-${i}`, { title: `${title}${i}` })), target];
+  assert.deepEqual(projectSessionPage(rows, [], { children: true, title }).items, [target]);
+  assert.deepEqual(projectSessionPage(rows, [], { children: true, title: title.trim() }).items, []);
+  assert.deepEqual(projectSessionPage(rows, [], { children: true, title: title.toLowerCase() }).items, []);
+  assert.deepEqual(projectSessionPage(rows, [], { children: true, title: "unknown" }).items, []);
+  const duplicates = Array.from({ length: 65 }, (_, i) => session(String(i).padStart(3, "0"), { title }));
+  const first = projectSessionPage(duplicates, [], { title });
+  assert.equal(first.items[0]!.id, "000");
+  assert.equal(first.total, 65);
+  assert.ok(first.nextCursor);
+  assert.throws(
+    () => validateSessionPageCursor({ title: title.trim(), cursor: first.nextCursor! }),
+    /invalid session cursor/,
+  );
+  assert.equal(projectSessionPage(duplicates, [], { title, cursor: first.nextCursor! }).items.length, 15);
+});

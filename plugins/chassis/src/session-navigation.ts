@@ -58,6 +58,7 @@ export interface SessionPageRequest {
   status?: ChatBrowseStatus;
   scopeId?: string;
   query?: string;
+  title?: string;
   children?: boolean;
   pinned?: boolean;
   archived?: boolean;

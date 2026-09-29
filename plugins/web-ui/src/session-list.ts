@@ -220,6 +220,7 @@ export function shouldStartProactiveOpener(state: {
   scopeId: string | null;
   messageCount: number;
   loaded: boolean;
+  hasNonCronSessions?: boolean;
   sessions: readonly Pick<CoreSession, "id" | "threadRef">[];
 }): boolean {
   return (
@@ -228,7 +229,9 @@ export function shouldStartProactiveOpener(state: {
     state.scopeId === null &&
     state.messageCount === 0 &&
     state.loaded &&
-    !state.sessions.some((session) => session.id && !session.threadRef.startsWith("cron:"))
+    !(
+      state.hasNonCronSessions ?? state.sessions.some((session) => session.id && !session.threadRef.startsWith("cron:"))
+    )
   );
 }
 

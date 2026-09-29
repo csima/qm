@@ -136,3 +136,31 @@ test("abort during live-thread lookup prevents participant enumeration for navig
     await built.runtime.stop();
   }
 });
+
+test("exact title pages select only participant and current managed-project authorized rows", async () => {
+  const built = buildApp(testConfig());
+  try {
+    const title = "Same exact title";
+    const own = await built.sessions.getOrCreateByThread("web:U1:exact", "dm", "personal:U1");
+    await built.sessions.addParticipant(own.id, "U1");
+    await built.sessions.updateTitle(own.id, title);
+    const foreign = await built.sessions.getOrCreateByThread("web:U2:exact", "dm", "personal:U2");
+    await built.sessions.addParticipant(foreign.id, "U2");
+    await built.sessions.updateTitle(foreign.id, title);
+    const project = await built.projects.create({ name: "Private project", ownerId: "owner" });
+    await built.projects.addMember(project.id, "owner", "U1");
+    const revoked = await built.sessions.getOrCreateByThread("web:U1:revoked", "group", projectScopeId(project.id));
+    await built.sessions.addParticipant(revoked.id, "U1");
+    await built.sessions.updateTitle(revoked.id, title);
+    await built.projects.removeMember(project.id, "owner", "U1");
+    const result = await built.app.sessionPage("U1", { title, children: true });
+    assert.deepEqual(
+      result.items.map((row) => row.id),
+      [own.id],
+    );
+    assert.equal(result.total, 1);
+    assert.equal((await built.app.sessionPage("U1", { title: "unknown", children: true })).total, 0);
+  } finally {
+    await built.runtime.stop();
+  }
+});

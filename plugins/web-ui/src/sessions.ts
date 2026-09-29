@@ -1,4 +1,18 @@
 import {
+  fetchNavigation,
+  fetchSessionPage,
+  fetchSessionReferences,
+  resetNavigationTransport,
+} from "./session-navigation.ts";
+import type {
+  SessionNavigationResult,
+  SessionNavigationContext,
+  SessionPageRequest,
+  SessionPageResult,
+  SessionReference,
+  SessionNavigationSection,
+} from "../../chassis/src/session-navigation.ts";
+import {
   surfaceOf,
   channelLabel,
   defaultSessionTitle as formatDefaultSessionTitle,
@@ -114,12 +128,248 @@ import { emptySelection, pruneSelection, selectionClick, type SessionSelection }
 export const sessionsState = {
   list: [] as CoreSession[],
   loaded: false,
+  navigation: null as SessionNavigationResult<CoreSession> | null,
   openMenuId: null as string | null,
   renamingId: null as string | null,
   openingKey: null as string | null,
   webOnly: true,
   collapsedProjectScopes: new Set<string>(),
 };
+
+const navigationContexts = new Map<string, SessionNavigationContext>();
+const groupPages = new Map<string, SessionPageResult<CoreSession>>();
+const navigationRequests = new Map<string, AbortController>();
+let navigationGeneration = 0;
+let listAbort: AbortController | null = null;
+
+export function rememberSessions(rows: CoreSession[]): void {
+  sessionsState.list = reconcileSessions(
+    rows,
+    sessionsState.list,
+    sessionsState.list.map((row) => row.id),
+  );
+}
+
+export function navigationContext(scopeId: string): SessionNavigationContext | undefined {
+  return navigationContexts.get(scopeId);
+}
+
+function rememberContexts(rows: SessionNavigationContext[]): void {
+  for (const context of rows) navigationContexts.set(context.scopeId, context);
+}
+
+function pageRows(rows: CoreSession[]): CoreSession[] {
+  const entities = new Map(sessionsState.list.map((row) => [row.id, row]));
+  return rows.flatMap((row) => {
+    const current = entities.get(row.id);
+    return current ? [current] : [];
+  });
+}
+
+export async function readSessionPage(
+  request: SessionPageRequest,
+  signal?: AbortSignal,
+): Promise<SessionPageResult<CoreSession> | null> {
+  const generation = sessionPatchGeneration;
+  const patchEpoch = sessionPatchEpoch;
+  const result = await fetchSessionPage(request, signal);
+  if (generation !== sessionPatchGeneration || patchEpoch !== sessionPatchEpoch || signal?.aborted)
+    throw new DOMException("Navigation cancelled", "AbortError");
+  if (result) {
+    rememberSessions(result.items);
+    rememberContexts(result.contexts);
+  }
+  return result;
+}
+
+export async function readSessionWindow(
+  request: SessionPageRequest,
+  loadedRows = 50,
+  signal?: AbortSignal,
+): Promise<SessionPageResult<CoreSession> | null> {
+  let result = await readSessionPage(request, signal);
+  for (let page = 1; result?.nextCursor && page < Math.ceil(loadedRows / 50); page++) {
+    const cursor = result.nextCursor;
+    const next = await readSessionPage({ ...request, cursor }, signal);
+    if (!next) throw new Error("Session navigation became unavailable");
+    if (next.nextCursor === cursor) throw new Error("Session cursor did not advance");
+    result = {
+      ...next,
+      items: [...new Map([...result.items, ...next.items].map((row) => [row.id, row])).values()],
+      contexts: [...new Map([...result.contexts, ...next.contexts].map((row) => [row.scopeId, row])).values()],
+    };
+  }
+  return result;
+}
+
+export async function resolveSessionTarget(target: string): Promise<CoreSession | null> {
+  if (!target || target.length > 512) throw new Error("Session target is too long");
+  const page = await readSessionPage({ title: target, children: true });
+  if (page?.items[0]) return page.items[0];
+  const byId = await resolveSessionReference({ kind: "id", value: target });
+  return byId ?? (page === null ? (sessionsState.list.find((row) => row.title === target) ?? null) : null);
+}
+
+export async function resolveSessionReferences(references: SessionReference[]): Promise<(CoreSession | null)[]> {
+  const generation = sessionPatchGeneration;
+  const patchEpoch = sessionPatchEpoch;
+  const result = await fetchSessionReferences(references);
+  if (generation !== sessionPatchGeneration || patchEpoch !== sessionPatchEpoch)
+    throw new DOMException("Navigation cancelled", "AbortError");
+  if (!result) {
+    const full = await api<{ sessions: CoreSession[] }>("/api/sessions");
+    if (!Array.isArray(full.sessions)) throw new Error("Invalid session list response");
+    if (generation !== sessionPatchGeneration || patchEpoch !== sessionPatchEpoch)
+      throw new DOMException("Navigation cancelled", "AbortError");
+    sessionsState.list = reconcileSessions(full.sessions, sessionsState.list, openConversationIds());
+    return references.map(
+      (ref) =>
+        full.sessions.find((row) => (ref.kind === "id" ? row.id === ref.value : row.threadRef === ref.value)) ?? null,
+    );
+  }
+  for (const row of result.references)
+    if (row.session === null)
+      sessionsState.list = sessionsState.list.filter(
+        (session) =>
+          !session.id ||
+          (row.reference.kind === "id"
+            ? session.id !== row.reference.value
+            : session.threadRef !== row.reference.value),
+      );
+  rememberSessions(result.references.flatMap((row) => (row.session ? [row.session] : [])));
+  renderList();
+  return result.references.map((row) => row.session);
+}
+
+const referenceRequests = new Map<
+  string,
+  {
+    reference: SessionReference;
+    promise: Promise<CoreSession | null>;
+    resolve: (session: CoreSession | null) => void;
+    reject: (error: unknown) => void;
+    sent: boolean;
+  }
+>();
+
+export function resolveSessionReference(reference: SessionReference): Promise<CoreSession | null> {
+  const key = JSON.stringify(reference);
+  const existing = referenceRequests.get(key);
+  if (existing) return existing.promise;
+  const pending = Promise.withResolvers<CoreSession | null>();
+  referenceRequests.set(key, { reference, ...pending, sent: false });
+  queueMicrotask(() => {
+    const batch = [...referenceRequests.entries()].filter(([, row]) => !row.sent).slice(0, 12);
+    if (!batch.length) return;
+    for (const [, row] of batch) row.sent = true;
+    void resolveSessionReferences(batch.map(([, row]) => row.reference))
+      .then(
+        (rows) => batch.forEach(([, row], i) => row.resolve(rows[i] ?? null)),
+        (error) => batch.forEach(([, row]) => row.reject(error)),
+      )
+      .finally(() => {
+        for (const [key, row] of batch) if (referenceRequests.get(key) === row) referenceRequests.delete(key);
+      });
+  });
+  return pending.promise;
+}
+
+export function latestSession(): CoreSession | null {
+  return sessionsState.navigation
+    ? sessionsState.navigation.startup.latest
+    : ([...sessionsState.list].sort((a, b) => activityOf(b) - activityOf(a))[0] ?? null);
+}
+
+function navigationReferences(): SessionReference[] {
+  const references = allConversations()
+    .filter((conv) => !splitState.active || conv !== mainConversation())
+    .flatMap((conv): SessionReference[] => {
+      if (conv.state.sessionId) return [{ kind: "id", value: conv.state.sessionId }];
+      if (conv.state.threadRef) return [{ kind: "thread", value: conv.state.threadRef }];
+      return [];
+    });
+  return [...new Map(references.map((ref) => [JSON.stringify(ref), ref])).values()].slice(0, 12);
+}
+
+async function loadNavigationSection(section: SessionNavigationSection, append = true): Promise<void> {
+  const current = sessionsState.navigation;
+  if (!current || listAbort || navigationRequests.has(section)) return;
+  const cursor = current[section]?.nextCursor;
+  if (append && !cursor) return;
+  const generation = navigationGeneration;
+  const patchEpoch = sessionPatchEpoch;
+  const controller = new AbortController();
+  navigationRequests.set(section, controller);
+  renderList();
+  try {
+    const result = await fetchNavigation(
+      { surface: sessionsState.webOnly ? "web" : "all", section, ...(append && cursor ? { cursor } : {}) },
+      controller.signal,
+    );
+    if (generation !== navigationGeneration || patchEpoch !== sessionPatchEpoch || controller.signal.aborted) return;
+    if (!result) {
+      await refreshSessions({ silent: true });
+      return;
+    }
+    const page = result[section]!;
+    if (append && page.nextCursor === cursor) throw new Error("Session cursor did not advance");
+    const prior = append ? (current[section]?.items ?? []) : [];
+    const items = [
+      ...new Map([...prior, ...page.items].map((item) => ["id" in item ? item.id : item.scopeId, item])).values(),
+    ];
+    Object.assign(current, { [section]: { ...page, items } });
+    if (section !== "groups") rememberSessions(page.items as CoreSession[]);
+    rememberContexts(result.contexts);
+    sessionsNotice = "";
+  } catch (error) {
+    if (generation === navigationGeneration && !controller.signal.aborted)
+      sessionsNotice = errMessage(error, "Failed to load conversations.");
+  } finally {
+    if (navigationRequests.get(section) === controller) navigationRequests.delete(section);
+    if (generation === navigationGeneration) renderList();
+  }
+}
+
+async function loadGroupPage(scopeId: string): Promise<void> {
+  const key = `group:${scopeId}`;
+  if (listAbort || navigationRequests.has(key)) return;
+  const prior = groupPages.get(scopeId);
+  if (prior && !prior.nextCursor) return;
+  const generation = navigationGeneration;
+  const patchEpoch = sessionPatchEpoch;
+  const controller = new AbortController();
+  navigationRequests.set(key, controller);
+  renderList();
+  try {
+    const page = await readSessionPage(
+      {
+        scopeId,
+        archived: false,
+        pinned: false,
+        surface: sessionsState.webOnly ? "web" : "all",
+        ...(prior?.nextCursor ? { cursor: prior.nextCursor } : {}),
+      },
+      controller.signal,
+    );
+    if (generation !== navigationGeneration || patchEpoch !== sessionPatchEpoch || controller.signal.aborted) return;
+    if (!page) {
+      await refreshSessions({ silent: true });
+      return;
+    }
+    if (prior?.nextCursor && page.nextCursor === prior.nextCursor) throw new Error("Session cursor did not advance");
+    groupPages.set(scopeId, {
+      ...page,
+      items: [...new Map([...(prior?.items ?? []), ...page.items].map((row) => [row.id, row])).values()],
+    });
+    sessionsNotice = "";
+  } catch (error) {
+    if (generation === navigationGeneration && !controller.signal.aborted)
+      sessionsNotice = errMessage(error, "Failed to load conversations.");
+  } finally {
+    if (navigationRequests.get(key) === controller) navigationRequests.delete(key);
+    if (generation === navigationGeneration) renderList();
+  }
+}
 
 let selection: SessionSelection = emptySelection();
 type SessionPatch = { title?: string | null; archived?: boolean; pinned?: boolean; color?: string | null };
@@ -183,16 +433,103 @@ let chatsPageQuery = "";
 let chatsPageStatus: ChatBrowseStatus = "active";
 let chatsPageSurface: "all" | "web" | "slack" = "all";
 let chatsPageHost: HTMLElement | null = null;
+let chatsPage: SessionPageResult<CoreSession> | null = null;
+let chatsPageKey = "";
+let chatsPageNotice = "";
+let chatsPageAbort: AbortController | null = null;
+let chatsPageTimer: ReturnType<typeof setTimeout> | undefined;
+
+export function cancelSessionPageRead(): void {
+  chatsPageAbort?.abort();
+  chatsPageAbort = null;
+  clearTimeout(chatsPageTimer);
+  chatsPageTimer = undefined;
+  chatsPageKey = "";
+}
+
+function changeChatsFilter(debounce = false): void {
+  cancelSessionPageRead();
+  chatsPage = null;
+  chatsPageNotice = "";
+  chatsPageLimit = SESSION_BATCH_SIZE;
+  if (debounce && sessionsState.navigation) {
+    chatsPageTimer = setTimeout(() => {
+      chatsPageTimer = undefined;
+      drawChatsPage();
+    }, 200);
+  }
+  drawChatsPage();
+}
+
+async function loadChatsPage(append = false): Promise<void> {
+  if (chatsPageAbort || !sessionsState.navigation) return;
+  const cursor = append ? chatsPage?.nextCursor : null;
+  if (append && !cursor) return;
+  const host = chatsPageHost;
+  const key = chatsPageKey;
+  const patchEpoch = sessionPatchEpoch;
+  const controller = new AbortController();
+  chatsPageAbort = controller;
+  const current = () =>
+    !controller.signal.aborted &&
+    key === chatsPageKey &&
+    appState.currentView === "chats" &&
+    host === chatsPageHost &&
+    chatsPageShowing();
+  drawChatsPage();
+  try {
+    const result = await readSessionWindow(
+      {
+        surface: chatsPageSurface,
+        status: chatsPageStatus,
+        ...(chatsPageScope ? { scopeId: chatsPageScope } : {}),
+        ...(chatsPageQuery ? { query: chatsPageQuery } : {}),
+        ...(cursor ? { cursor } : {}),
+      },
+      append ? 50 : (chatsPage?.items.length ?? 50),
+      controller.signal,
+    );
+    if (!current() || patchEpoch !== sessionPatchEpoch) return;
+    if (!result) {
+      await refreshSessions({ silent: true });
+      return;
+    }
+    if (cursor && result.nextCursor === cursor) throw new Error("Session cursor did not advance");
+    chatsPage = {
+      ...result,
+      items: [
+        ...new Map([...(append ? (chatsPage?.items ?? []) : []), ...result.items].map((row) => [row.id, row])).values(),
+      ],
+    };
+    chatsPageNotice = "";
+  } catch (error) {
+    if (current()) chatsPageNotice = errMessage(error, "Failed to load conversations.");
+  } finally {
+    if (chatsPageAbort === controller) chatsPageAbort = null;
+    if (current()) drawChatsPage();
+  }
+}
 
 export function resetSessionsState(): void {
   selection = emptySelection();
   selectColorOpen = false;
   sessionPatchGeneration++;
   sessionPatchEpoch++;
+  for (const request of referenceRequests.values())
+    request.reject(new DOMException("Navigation cancelled", "AbortError"));
+  referenceRequests.clear();
   sessionPatchTails.clear();
   sessionPatchVersions.clear();
   sessionsState.list = [];
   sessionsState.loaded = false;
+  sessionsState.navigation = null;
+  navigationGeneration++;
+  listAbort?.abort();
+  for (const controller of navigationRequests.values()) controller.abort();
+  navigationRequests.clear();
+  groupPages.clear();
+  navigationContexts.clear();
+  resetNavigationTransport();
   listRequestedAt = 0;
   sessionsRefreshRunning = false;
   queuedSessionsRefresh = null;
@@ -212,6 +549,9 @@ export function resetSessionsState(): void {
   chatsPageStatus = "active";
   chatsPageSurface = "all";
   chatsPageHost = null;
+  cancelSessionPageRead();
+  chatsPage = null;
+  chatsPageNotice = "";
   recentContextsRequest = null;
 }
 
@@ -221,6 +561,8 @@ function projectSeedsForRecents() {
 
 function recentItemActivity(item: RecentItem): number {
   if (item.kind === "session") return activityOf(item.session);
+  const group = sessionsState.navigation?.groups.items.find((group) => group.scopeId === item.scopeId);
+  if (group) return group.lastActivityAt;
   if (item.sessions[0]) return activityOf(item.sessions[0]);
   const context = contextsState.list.find((candidate) => candidate.scopeId === item.scopeId);
   return context?.lastActivityAt ?? context?.project?.createdAt ?? context?.project?.updatedAt ?? 0;
@@ -257,8 +599,12 @@ function projectName(scopeId: string): string | null {
   return projectOf(scopeId)?.name ?? null;
 }
 
-function projectOf(scopeId: string): CoreProject | null {
-  return contextsState.list.find((context) => context.scopeId === scopeId)?.project ?? null;
+function projectOf(scopeId: string): Pick<CoreProject, "id" | "name" | "ownerId"> | null {
+  return (
+    navigationContexts.get(scopeId)?.project ??
+    contextsState.list.find((context) => context.scopeId === scopeId)?.project ??
+    null
+  );
 }
 
 function projectMenuKey(scopeId: string): string {
@@ -319,10 +665,18 @@ export function renderList(): void {
   syncDocumentTitle();
   if (chatsPageShowing()) drawChatsPage();
   if (!appState.listEl) return;
+  const navigation = sessionsState.navigation;
   const visible = visibleSessions();
   const active = visible.filter((s) => !s.archived);
-  const archived = visible.filter((s) => s.archived);
-  const { pinned, rest } = splitPinned(active);
+  const archived = navigation
+    ? pageRows(navigation.archived?.items ?? []).filter((s) => s.archived)
+    : visible.filter((s) => s.archived);
+  const pinned = navigation
+    ? pageRows(navigation.pinned.items).filter((s) => s.pinned && !s.archived)
+    : splitPinned(active).pinned;
+  const rest = navigation
+    ? pageRows(navigation.recent.items).filter((s) => !s.pinned && !s.archived)
+    : splitPinned(active).rest;
   const keptIds = new Set([
     ...openConversationIds(),
     ...selection.ids,
@@ -330,14 +684,58 @@ export function renderList(): void {
     sessionsState.openMenuId,
     sessionsState.renamingId,
   ]);
+  const retained = visible.filter((session) => !session.id || keptIds.has(session.id));
+  const loadedGroupRows = [...groupPages.values()].flatMap((page) => pageRows(page.items));
   const shownThreads = new Set(
     [
-      ...rest.slice(0, recentLimit),
-      ...archived.slice(0, archivedLimit),
-      ...visible.filter((session) => !session.id || keptIds.has(session.id)),
+      ...rest.slice(0, navigation ? rest.length : recentLimit),
+      ...archived.slice(0, navigation ? archived.length : archivedLimit),
+      ...loadedGroupRows,
+      ...retained,
     ].map((session) => session.threadRef),
   );
-  const activeItems = recentItemsFor(rest);
+  let activeItems = recentItemsFor(rest);
+  if (navigation) {
+    const rows = [
+      ...new Map(
+        [...rest, ...loadedGroupRows, ...retained.filter((row) => !row.pinned && !row.archived)].map((row) => [
+          row.threadRef,
+          row,
+        ]),
+      ).values(),
+    ];
+    const groupedScopes = new Set(navigation.groups.items.map((group) => group.scopeId));
+    activeItems = [
+      ...navigation.groups.items.map((group): RecentItem => ({
+        kind: "project",
+        scopeId: group.scopeId,
+        name: group.name,
+        groupKind: group.kind,
+        sessions: rows
+          .filter((row) => row.scopeId === group.scopeId)
+          .sort((a, b) => activityOf(b) - activityOf(a) || (a.id < b.id ? -1 : Number(a.id !== b.id))),
+      })),
+      ...rows
+        .filter((row) => !groupedScopes.has(row.scopeId))
+        .map((session): RecentItem => ({ kind: "session", session })),
+    ].sort((a, b) => recentItemActivity(b) - recentItemActivity(a));
+  }
+  const reading = Boolean(listAbort && !listAbort.signal.aborted) || navigationRequests.size > 0;
+  appState.listEl.setAttribute("aria-busy", String(reading));
+  appState.listEl.dataset.sessionNavigationPending = [...navigationRequests.keys()].join(",");
+  for (const section of ["recent", "pinned", "groups"] as const) {
+    appState.listEl.dataset[`session${section[0]!.toUpperCase()}${section.slice(1)}Loaded`] = String(
+      navigation?.[section].items.length ?? 0,
+    );
+    appState.listEl.dataset[`session${section[0]!.toUpperCase()}${section.slice(1)}Total`] = String(
+      navigation?.[section].total ?? 0,
+    );
+  }
+  let navigationState = sessionsState.loaded ? "ready" : "loading";
+  if (sessionsNotice) navigationState = "error";
+  if (reading || sessionsLoading) navigationState = "loading";
+  appState.listEl.dataset.sessionNavigation = navigationState;
+  appState.listEl.dataset.sessionNavigationMode = navigation ? "bounded" : "legacy";
   const archivedItems: RecentItem[] = archived.map((session) => ({
     kind: "session",
     session,
@@ -362,9 +760,12 @@ export function renderList(): void {
             `
           : nothing
       }
+      ${navigation?.pinned.nextCursor ? navigationMore("pinned", "Show more pinned conversations") : nothing}
       ${groupedRows(activeItems, shownThreads)}
+      ${navigation?.groups.nextCursor ? navigationMore("groups", "Show more conversation groups") : nothing}
+      ${navigation?.recent.nextCursor ? navigationMore("recent", "Show more conversations") : nothing}
       ${
-        rest.some((session) => !shownThreads.has(session.threadRef))
+        !navigation && rest.some((session) => !shownThreads.has(session.threadRef))
           ? html`<button
               class="archived-toggle"
               type="button"
@@ -378,19 +779,25 @@ export function renderList(): void {
           : nothing
       }
       ${
-        archived.length
+        (navigation?.archivedCount ?? archived.length)
           ? html`
-              <button class="archived-toggle ${showArchived ? "open" : ""}" @click=${toggleShowArchived}>
+              <button
+                class="archived-toggle ${showArchived ? "open" : ""}"
+                ?disabled=${Boolean(listAbort)}
+                @click=${toggleShowArchived}
+              >
                 ${icon(showArchived ? ChevronDown : ChevronRight, 14)}
                 <span>Archived</span>
-                <span class="archived-count">${archived.length}</span>
+                <span class="archived-count">${navigation?.archivedCount ?? archived.length}</span>
               </button>
               ${
                 showArchived
                   ? html`<div class="archived-children">
                       ${groupedRows(archivedItems, shownThreads)}
+                      ${navigationRequests.has("archived") ? html`<div class="empty">Loading archived conversations…</div>` : nothing}
+                      ${navigation?.archived?.nextCursor ? navigationMore("archived", "Show more archived conversations") : nothing}
                       ${
-                        archived.some((session) => !shownThreads.has(session.threadRef))
+                        !navigation && archived.some((session) => !shownThreads.has(session.threadRef))
                           ? html`<button
                               class="archived-toggle"
                               type="button"
@@ -409,12 +816,16 @@ export function renderList(): void {
             `
           : nothing
       }
-      ${sessionsNotice ? html`<div class="empty" style="padding:16px">${sessionsNotice}</div>` : ""}
+      ${sessionsNotice ? html`<div class="empty" style="padding:16px" role="alert">${sessionsNotice}<button class="btn" @click=${() => void refreshSessions({ showLoading: true })}>Retry</button></div>` : ""}
       ${sessionsLoading ? html`<div class="empty" style="padding:16px">Loading conversations...</div>` : ""}
       ${
-        !sessionsLoading && !sessionsNotice && visible.length === 0
+        !sessionsLoading &&
+        !sessionsNotice &&
+        (navigation
+          ? navigation.recent.total + navigation.pinned.total + navigation.archivedCount === 0
+          : visible.length === 0)
           ? html`<div class="empty" style="padding:16px">
-              ${sessionsState.list.length ? "Slack conversations hidden." : "No conversations yet."}
+              ${(navigation?.startup.hasSessions ?? sessionsState.list.length > 0) ? "Slack conversations hidden." : "No conversations yet."}
             </div>`
           : ""
       }
@@ -430,6 +841,18 @@ export function renderList(): void {
   notifyPanesChanged();
 }
 
+function navigationMore(section: SessionNavigationSection, label: string): TemplateResult {
+  return html`<button
+    class="archived-toggle"
+    type="button"
+    data-session-page=${section}
+    ?disabled=${Boolean(listAbort) || navigationRequests.has(section)}
+    @click=${() => void loadNavigationSection(section)}
+  >
+    ${navigationRequests.has(section) ? "Loading conversations…" : label}
+  </button>`;
+}
+
 const NEW_CHAT_TOOLTIP = "Start a new chat";
 const PROJECT_OPTIONS_TOOLTIP = "Project options";
 const CHAT_OPTIONS_TOOLTIP = "Chat options";
@@ -441,6 +864,10 @@ function newChatHint(name: string): string {
 function recentItem(item: RecentItem, shownThreads: ReadonlySet<string>): TemplateResult {
   if (item.kind === "session") return sessionRow(item.session);
   const collapsed = sessionsState.collapsedProjectScopes.has(item.scopeId);
+  const group = sessionsState.navigation?.groups.items.find((group) => group.scopeId === item.scopeId);
+  const loadedPage = groupPages.get(item.scopeId);
+  const hasMore =
+    group && (loadedPage ? Boolean(loadedPage.nextCursor) : group.count > item.sessions.filter((row) => row.id).length);
   let glyph: IconNode | null = Folder;
   if (item.groupKind === "personal") glyph = null;
   else if (item.groupKind === "channel") glyph = Hash;
@@ -453,7 +880,11 @@ function recentItem(item: RecentItem, shownThreads: ReadonlySet<string>): Templa
   const menuKey = projectMenuKey(item.scopeId);
   const menuOpen = sessionsState.openMenuId === menuKey;
   return html`
-    <section class="recent-project ${item.sessions.some(isActiveRow) ? "active" : ""}" aria-label=${`${name} project`}>
+    <section
+      class="recent-project ${item.sessions.some(isActiveRow) ? "active" : ""}"
+      data-scope-id=${item.scopeId}
+      aria-label=${`${name} project`}
+    >
       ${
         sessionsState.renamingId === menuKey
           ? projectRenameRow(item)
@@ -472,7 +903,7 @@ function recentItem(item: RecentItem, shownThreads: ReadonlySet<string>): Templa
                 <span class="recent-project-name" dir="auto">${name.replace(/^#/, "")}</span>
               </button>
               <div class="session-menu recent-project-menu ${menuOpen ? "menu-open" : ""}">
-                <span class="recent-project-count">${item.sessions.length}</span>
+                <span class="recent-project-count">${group?.count ?? item.sessions.length}</span>
                 <button
                   class="session-menu-btn"
                   data-menu-id=${menuKey}
@@ -499,6 +930,7 @@ function recentItem(item: RecentItem, shownThreads: ReadonlySet<string>): Templa
             </div>`
       }
       <div class="recent-project-children" id=${childrenId} ?hidden=${collapsed}>
+        ${!collapsed && hasMore ? html`<button class="archived-toggle" type="button" data-session-page="group" data-scope-id=${item.scopeId} ?disabled=${Boolean(listAbort) || navigationRequests.has(`group:${item.scopeId}`)} @click=${() => void loadGroupPage(item.scopeId)}>${navigationRequests.has(`group:${item.scopeId}`) ? "Loading conversations…" : `Show more in ${name}`}</button>` : nothing}
         ${
           collapsed
             ? nothing
@@ -594,6 +1026,7 @@ async function commitProjectRename(item: Extract<RecentItem, { kind: "project" }
   const project = projectOf(item.scopeId);
   if (!project || !next || next === project.name) return;
   await renameProject(project, next);
+  await refreshSessions({ silent: true, refreshContexts: true });
   renderList();
 }
 
@@ -621,23 +1054,43 @@ export function drawChatsPage(): void {
     chatsPageHost.className = "pane chats-page";
     appState.mainEl.replaceChildren(chatsPageHost);
   }
+  const navigation = sessionsState.navigation;
+  const key = JSON.stringify([navigationGeneration, chatsPageScope, chatsPageQuery, chatsPageStatus, chatsPageSurface]);
+  if (navigation && chatsPageKey !== key && !chatsPageTimer) {
+    cancelSessionPageRead();
+    chatsPageKey = key;
+    chatsPageNotice = "";
+    void loadChatsPage();
+  }
+  chatsPageHost.dataset.sessionPage = "chats";
+  let pageState = navigation && !chatsPage ? "loading" : "ready";
+  if (chatsPageNotice || sessionsNotice) pageState = "error";
+  if (!sessionsState.loaded || chatsPageAbort || chatsPageTimer) pageState = "loading";
+  chatsPageHost.dataset.sessionPageState = pageState;
   const q = chatsPageQuery.trim().toLowerCase();
-  const matches = sidebarSessions(sessionsState.list)
-    .filter((s) => chatBrowseStatusMatches(s, chatsPageStatus))
-    .filter((s) => chatsPageSurface === "all" || surfaceOf(s) === chatsPageSurface)
-    .filter((s) => (chatsPageScope ? s.scopeId === chatsPageScope : true))
-    .filter((s) => !q || chatMatches(s, q))
-    .sort((a, b) => activityOf(b) - activityOf(a));
-  const rows = matches.slice(0, chatsPageLimit).map((s) => chatPageRow(s));
-  if (matches.length > chatsPageLimit)
+  const matches = navigation
+    ? pageRows(chatsPage?.items ?? [])
+    : sidebarSessions(sessionsState.list)
+        .filter((s) => chatBrowseStatusMatches(s, chatsPageStatus))
+        .filter((s) => chatsPageSurface === "all" || surfaceOf(s) === chatsPageSurface)
+        .filter((s) => (chatsPageScope ? s.scopeId === chatsPageScope : true))
+        .filter((s) => !q || chatMatches(s, q))
+        .sort((a, b) => activityOf(b) - activityOf(a));
+  const rows = matches.slice(0, navigation ? matches.length : chatsPageLimit).map((s) => chatPageRow(s));
+  if (navigation ? chatsPage?.nextCursor : matches.length > chatsPageLimit)
     rows.push(
       html`<div class="list-footer">
         <button
           class="btn"
           type="button"
+          data-session-page="chats"
+          ?disabled=${Boolean(chatsPageAbort)}
           @click=${() => {
-            chatsPageLimit += SESSION_BATCH_SIZE;
-            drawChatsPage();
+            if (navigation) void loadChatsPage(true);
+            else {
+              chatsPageLimit += SESSION_BATCH_SIZE;
+              drawChatsPage();
+            }
           }}
         >
           Show more conversations
@@ -649,14 +1102,28 @@ export function drawChatsPage(): void {
   else if (chatsPageScope || q || chatsPageStatus !== "active" || chatsPageSurface !== "all") {
     empty = "No conversations match.";
   }
+  if (chatsPageAbort || chatsPageTimer) rows.push(html`<div class="empty">Loading conversations…</div>`);
+  if (chatsPageNotice || sessionsNotice)
+    rows.push(
+      html`<div class="empty" role="alert">
+        ${chatsPageNotice || sessionsNotice}<button
+          class="btn"
+          @click=${() => {
+            if (navigation) changeChatsFilter();
+            else void refreshSessions({ showLoading: true });
+          }}
+        >
+          Retry
+        </button>
+      </div>`,
+    );
   render(
     listPageTpl({
       title: "Chats",
       scope: chatsPageScope,
       onScope: (s) => {
         chatsPageScope = s;
-        chatsPageLimit = SESSION_BATCH_SIZE;
-        drawChatsPage();
+        changeChatsFilter();
       },
       action: { label: "New chat", onClick: () => startNewChat() },
       search: {
@@ -664,54 +1131,52 @@ export function drawChatsPage(): void {
         placeholder: "Search chats…",
         onInput: (v) => {
           chatsPageQuery = v;
-          chatsPageLimit = SESSION_BATCH_SIZE;
-          drawChatsPage();
+          changeChatsFilter(true);
         },
       },
-      filters: html`<div class="chat-filters">
-        <div class="resource-tabs" role="tablist" aria-label="Conversation status">
-          ${(
-            [
-              ["active", "Active"],
-              ["waiting", "Waiting"],
-              ["archived", "Archived"],
-            ] as const
-          ).map(
-            ([value, label]) =>
-              html`<button
-                role="tab"
-                type="button"
-                aria-selected=${chatsPageStatus === value}
-                class=${chatsPageStatus === value ? "active" : ""}
-                @click=${() => {
-                  chatsPageStatus = value;
-                  chatsPageLimit = SESSION_BATCH_SIZE;
-                  drawChatsPage();
-                }}
-              >
-                ${label}<span
-                  >${sidebarSessions(sessionsState.list).filter((session) => chatBrowseStatusMatches(session, value)).length}</span
+      filters: html`${navigation && chatsPage ? html`<span data-session-page-total=${chatsPage.total}>${chatsPage.total} conversations</span>` : nothing}
+        <div class="chat-filters">
+          <div class="resource-tabs" role="tablist" aria-label="Conversation status">
+            ${(
+              [
+                ["active", "Active"],
+                ["waiting", "Waiting"],
+                ["archived", "Archived"],
+              ] as const
+            ).map(
+              ([value, label]) =>
+                html`<button
+                  role="tab"
+                  type="button"
+                  aria-selected=${chatsPageStatus === value}
+                  class=${chatsPageStatus === value ? "active" : ""}
+                  @click=${() => {
+                    chatsPageStatus = value;
+                    changeChatsFilter();
+                  }}
                 >
-              </button>`,
-          )}
-        </div>
-        <div class="list-select">
-          ${menuSelect({
-            value: chatsPageSurface,
-            ariaLabel: "Filter by surface",
-            onSelect: (value) => {
-              chatsPageSurface = (value ?? "all") as typeof chatsPageSurface;
-              chatsPageLimit = SESSION_BATCH_SIZE;
-              drawChatsPage();
-            },
-            options: [
-              { value: "all", label: "All surfaces" },
-              { value: "web", label: "Web" },
-              { value: "slack", label: "Slack" },
-            ],
-          })}
-        </div>
-      </div>`,
+                  ${label}<span
+                    >${navigation ? (chatsPage?.statusTotals ?? navigation.statusTotals)[value] : sidebarSessions(sessionsState.list).filter((session) => chatBrowseStatusMatches(session, value)).length}</span
+                  >
+                </button>`,
+            )}
+          </div>
+          <div class="list-select">
+            ${menuSelect({
+              value: chatsPageSurface,
+              ariaLabel: "Filter by surface",
+              onSelect: (value) => {
+                chatsPageSurface = (value ?? "all") as typeof chatsPageSurface;
+                changeChatsFilter();
+              },
+              options: [
+                { value: "all", label: "All surfaces" },
+                { value: "web", label: "Web" },
+                { value: "slack", label: "Slack" },
+              ],
+            })}
+          </div>
+        </div>`,
       rows,
       empty,
     }),
@@ -1277,15 +1742,26 @@ function renameInput(menuKey: string, ariaLabel: string, commit: () => Promise<v
 
 function toggleShowArchived(): void {
   showArchived = !showArchived;
+  if (showArchived && sessionsState.navigation && !sessionsState.navigation.archived)
+    void loadNavigationSection("archived", false);
   renderList();
 }
 
 export function setWebOnly(webOnly: boolean): void {
+  const changed = sessionsState.webOnly !== webOnly;
   sessionsState.webOnly = webOnly;
   try {
     localStorage.setItem(WEB_ONLY_KEY, webOnly ? "1" : "0");
   } catch {
     void 0;
+  }
+  if (changed && (sessionsState.navigation || sessionsRefreshRunning)) {
+    navigationGeneration++;
+    listAbort?.abort();
+    for (const request of navigationRequests.values()) request.abort();
+    navigationRequests.clear();
+    groupPages.clear();
+    void refreshSessions({ showLoading: true, resetPages: true });
   }
   renderList();
 }
@@ -1488,7 +1964,10 @@ async function bulkPatch(patch: SessionPatch): Promise<void> {
   redrawSelection();
   const patches = ids.map((id) => queueSessionPatch(id, patch));
   const results = await Promise.allSettled(patches);
-  if (sessionPatchGeneration === generation && results.some((r) => r.status === "rejected"))
+  if (
+    sessionPatchGeneration === generation &&
+    (sessionsState.navigation || results.some((r) => r.status === "rejected"))
+  )
     await refreshSessions({ silent: true, patchEpoch: sessionPatchEpoch });
   redrawSelection();
 }
@@ -1560,6 +2039,8 @@ async function persistSessionPatch(id: string, patch: SessionPatch): Promise<voi
   const request = queueSessionPatch(id, patch);
   try {
     await request;
+    if (sessionsState.navigation && sessionPatchGeneration === generation)
+      await refreshSessions({ silent: true, patchEpoch: sessionPatchEpoch });
     renderList();
   } catch {
     if (sessionPatchGeneration === generation) await refreshSessions({ silent: true, patchEpoch: sessionPatchEpoch });
@@ -1614,6 +2095,7 @@ type SessionsRefreshOptions = {
   showLoading?: boolean;
   silent?: boolean;
   refreshContexts?: boolean;
+  resetPages?: boolean;
   patchEpoch?: number;
 };
 let latestSessionsRefresh: Promise<boolean> | null = null;
@@ -1646,6 +2128,7 @@ export function refreshSessions(opts: SessionsRefreshOptions = {}): Promise<bool
       ...opts,
       showLoading: queuedSessionsRefresh?.showLoading || opts.showLoading,
       refreshContexts: queuedSessionsRefresh?.refreshContexts || opts.refreshContexts,
+      resetPages: queuedSessionsRefresh?.resetPages || opts.resetPages,
       silent: queuedSessionsRefresh ? queuedSessionsRefresh.silent && opts.silent : opts.silent,
     };
     sessionRefreshSeq++;
@@ -1675,23 +2158,114 @@ async function runSessionsRefresh(
   opts: SessionsRefreshOptions,
   newerRun: () => Promise<boolean> | null,
 ): Promise<boolean> {
-  loadRecentContexts(opts.refreshContexts === true);
   const seq = ++sessionRefreshSeq;
+  listAbort?.abort();
+  const controller = new AbortController();
+  listAbort = controller;
   const patchEpoch = opts.patchEpoch ?? sessionPatchEpoch;
+  const previous = opts.resetPages ? null : sessionsState.navigation;
+  const previousGroups = opts.resetPages ? new Map<string, SessionPageResult<CoreSession>>() : new Map(groupPages);
+  const refreshedGroups = new Map<string, SessionPageResult<CoreSession>>();
+  for (const request of navigationRequests.values()) request.abort();
+  navigationRequests.clear();
+  const current = () => {
+    controller.signal.throwIfAborted();
+    if (seq !== sessionRefreshSeq || patchEpoch !== sessionPatchEpoch)
+      throw new DOMException("Navigation cancelled", "AbortError");
+  };
   if (opts.showLoading) {
     sessionsLoading = true;
     sessionsNotice = "";
     renderList();
   }
   listRequestedAt = Date.now();
+  renderList();
   try {
-    const r = await api<{ sessions: CoreSession[] }>("/api/sessions");
+    const navigation = await fetchNavigation(
+      {
+        surface: sessionsState.webOnly ? "web" : "all",
+        references: navigationReferences(),
+        ...(showArchived ? { section: "archived" as const } : {}),
+      },
+      controller.signal,
+    );
+    if (navigation) {
+      for (const section of ["recent", "pinned", "groups", "archived"] as const) {
+        const pages = Math.ceil((previous?.[section]?.items.length ?? 0) / 50);
+        for (let i = 1; navigation[section]?.nextCursor && i < pages; i++) {
+          current();
+          const prior = navigation[section]!;
+          const result = await fetchNavigation(
+            { surface: sessionsState.webOnly ? "web" : "all", section, cursor: prior.nextCursor! },
+            controller.signal,
+          );
+          current();
+          if (!result) throw new Error("Session navigation became unavailable");
+          const page = result[section]!;
+          if (page.nextCursor === prior.nextCursor) throw new Error("Session cursor did not advance");
+          Object.assign(navigation, {
+            [section]: {
+              ...page,
+              items: [
+                ...new Map(
+                  [...prior.items, ...page.items].map((row) => ["id" in row ? row.id : row.scopeId, row]),
+                ).values(),
+              ],
+            },
+          });
+          navigation.contexts.push(...result.contexts);
+        }
+      }
+      for (const [scopeId, prior] of previousGroups) {
+        current();
+        const page = await readSessionWindow(
+          { scopeId, archived: false, pinned: false, surface: sessionsState.webOnly ? "web" : "all" },
+          prior.items.length,
+          controller.signal,
+        );
+        current();
+        if (!page) throw new Error("Session navigation became unavailable");
+        refreshedGroups.set(scopeId, page);
+      }
+    }
+    if (!navigation) loadRecentContexts(opts.refreshContexts === true);
+    const r = navigation
+      ? null
+      : await api<{ sessions: CoreSession[] }>("/api/sessions", { signal: controller.signal });
     if (seq !== sessionRefreshSeq) return sessionsState.loaded || ((await newerRun()) ?? false);
     if (patchEpoch !== sessionPatchEpoch) {
       listDiscards++;
       return false;
     }
-    sessionsState.list = reconcileSessions(r.sessions ?? [], sessionsState.list, openConversationIds());
+    if (navigation) {
+      navigationGeneration++;
+      for (const request of navigationRequests.values()) request.abort();
+      navigationRequests.clear();
+      groupPages.clear();
+      for (const [scopeId, page] of refreshedGroups) groupPages.set(scopeId, page);
+      sessionsState.navigation = navigation;
+      rememberContexts(navigation.contexts);
+      rememberSessions([
+        ...navigation.recent.items,
+        ...navigation.pinned.items,
+        ...(navigation.archived?.items ?? []),
+        ...navigation.references.flatMap((ref) => (ref.session ? [ref.session] : [])),
+        ...(navigation.startup.latest ? [navigation.startup.latest] : []),
+      ]);
+      for (const row of navigation.references)
+        if (row.session === null)
+          sessionsState.list = sessionsState.list.filter(
+            (session) =>
+              !session.id ||
+              (row.reference.kind === "id"
+                ? session.id !== row.reference.value
+                : session.threadRef !== row.reference.value),
+          );
+    } else {
+      if (!r || !Array.isArray(r.sessions)) throw new Error("Invalid session list response");
+      sessionsState.navigation = null;
+      sessionsState.list = reconcileSessions(r.sessions, sessionsState.list, openConversationIds());
+    }
     sessionsState.loaded = true;
     sessionsNotice = "";
     return true;
@@ -1701,6 +2275,7 @@ async function runSessionsRefresh(
     return false;
   } finally {
     if (seq === sessionRefreshSeq) {
+      if (listAbort === controller) listAbort = null;
       listSettled?.();
       listSettled = null;
       sessionsLoading = false;
@@ -1723,6 +2298,8 @@ export async function openSession(
     if (splitState.active) drawCanvas();
     syncUrlFromState(s.id || null);
   }
+  cancelSessionPageRead();
+  chatsPageHost = null;
   mountRestoredCanvas();
   const pane = splitInterceptsOpen(s);
   closeSidebarOnNarrowView();
@@ -1812,6 +2389,14 @@ export async function openSessionInto(
     return;
   }
 
+  rememberSessions([s]);
+  if (s.parentSessionId && !sessionsState.list.some((row) => row.id === s.parentSessionId)) {
+    void resolveSessionReference({ kind: "id", value: s.parentSessionId })
+      .then(() => {
+        if (isLiveConversation(conv)) conv.redraw();
+      })
+      .catch(() => undefined);
+  }
   const split = inheritedTranscript(s, entriesRes.entries ?? []);
   const messages = entriesToMessages(split.current, transcriptModel());
   const inheritedMessages = entriesToMessages(split.inherited, transcriptModel());

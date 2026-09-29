@@ -71,7 +71,18 @@ async function handle(ctx: ApiCtx, operation: "navigation" | "page" | "resolve")
       validateNavigationCursor(request);
       result = await ctx.app.sessionNavigation(principal, request, controller.signal);
     } else {
-      keys(body, ["principalId", "surface", "status", "scopeId", "query", "children", "pinned", "archived", "cursor"]);
+      keys(body, [
+        "principalId",
+        "surface",
+        "status",
+        "scopeId",
+        "query",
+        "title",
+        "children",
+        "pinned",
+        "archived",
+        "cursor",
+      ]);
       for (const field of ["children", "pinned", "archived"]) {
         if (body[field] !== undefined && typeof body[field] !== "boolean")
           throw new InvalidSessionNavigationRequest(`invalid ${field}`);
@@ -84,6 +95,7 @@ async function handle(ctx: ApiCtx, operation: "navigation" | "page" | "resolve")
         ...(body.scopeId === undefined ? {} : { scopeId: text(body.scopeId, "scopeId", 512) }),
         ...(body.cursor === undefined ? {} : { cursor: text(body.cursor, "cursor", 4096) }),
         ...(body.query === undefined ? {} : { query: body.query as string }),
+        ...(body.title === undefined ? {} : { title: text(body.title, "title", 512) }),
         ...(body.children === undefined ? {} : { children: body.children as boolean }),
         ...(body.pinned === undefined ? {} : { pinned: body.pinned as boolean }),
         ...(body.archived === undefined ? {} : { archived: body.archived as boolean }),

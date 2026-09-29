@@ -85,6 +85,7 @@ const pageKey = (request: SessionPageRequest) =>
     request.status ?? null,
     request.scopeId ?? null,
     (request.query ?? "").trim().toLowerCase(),
+    request.title ?? null,
     request.children ?? false,
     request.pinned ?? null,
     request.archived ?? null,
@@ -155,6 +156,7 @@ export function projectSessionPage(
   const matching = sessions.filter(
     (session) =>
       (request.children || !session.parentSessionId) &&
+      (request.title === undefined || session.title === request.title) &&
       (!request.scopeId || request.scopeId === session.scopeId) &&
       (!request.surface || request.surface === "all" || surfaceOf(session) === request.surface) &&
       (!request.status || chatBrowseStatusMatches(session, request.status)) &&
