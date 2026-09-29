@@ -10,7 +10,7 @@ import {
   multiviewState,
   secondaryRequests,
 } from "./catalog.mjs";
-import { deriveViewFixtures } from "./fixture-views.mjs";
+import { deriveSidebarReadiness, deriveViewFixtures } from "./fixture-views.mjs";
 import {
   establishSplitState,
   requiredResponsesComplete,
@@ -207,7 +207,7 @@ test("web surface readiness requires populated observed rows and follows account
   for (const view of WEB_VIEWS) {
     assert.ok(derived.views[`web.${view}`], `Missing ${view}`);
     const scenario = buildCatalog(derived).find((row) => row.id === `web.${view}`);
-    assert.deepEqual(scenario.missing, []);
+    assert.deepEqual(scenario.missing, ["browser.sidebarReadiness"]);
     assert.doesNotThrow(() => validateReadySpec(scenario.ready));
   }
   assert.equal(derived.views["web.files"].rows.minimum, 2);
@@ -220,7 +220,7 @@ test("web surface readiness requires populated observed rows and follows account
   assert.equal(derived.views["web.memory"].rows, undefined);
   assert.equal(derived.views["web.memory.facts"].rows.minimum, 2);
   const factsScenario = buildCatalog(derived).find((row) => row.id === "web.memory.facts");
-  assert.deepEqual(factsScenario.missing, []);
+  assert.deepEqual(factsScenario.missing, ["browser.sidebarReadiness"]);
   assert.deepEqual(factsScenario.modes, ["warm"]);
   assert.equal(factsScenario.prepareReady.editable, "textarea.memory-text");
   assert.doesNotThrow(() => validateReadySpec(factsScenario.ready));
@@ -305,7 +305,7 @@ test("mixed earlier-page readiness proves a nonempty crossing after bounded prep
   assert.equal(result.browser.mixedEarlierPage.entrySeq, 140);
   assert.ok(result.browser.mixedEarlierPage.boundaryReady[0].root.includes('"150"'));
   const scenario = buildCatalog(result).find((row) => row.id === "web.chat.mixed-earlier");
-  assert.deepEqual(scenario.missing, []);
+  assert.deepEqual(scenario.missing, ["browser.sidebarReadiness"]);
   assert.equal(scenario.preparePages.length, 1);
   const bad = structuredClone(evidence);
   bad.rows.at(-1).data.entries = [user(140, "Canonical only, no crossing")];
@@ -789,4 +789,315 @@ test("UI setup writes and verifies only the authenticated fixture principal thro
     /another principal/,
   );
   assert.equal(writes, 1);
+});
+
+function sidebarOracleFixture() {
+  const people = ["actor-a", "actor-b", "actor-c", "actor-extra"];
+  const sessions = Object.fromEntries(
+    people.map((actor) => [
+      actor,
+      [
+        ...Array.from({ length: 112 }, (_, i) => ({
+          id: `${actor}-${String(i).padStart(3, "0")}`,
+          threadRef: `web:${actor}:${i}`,
+          scopeId: i < 60 ? `group:${actor}-${i}` : `personal:${actor}`,
+          type: "dm",
+          title: `Conversation ${actor} ${i}`,
+          createdAt: i + 1,
+          lastActivityAt: 1000 - i,
+        })),
+        ...Array.from({ length: 55 }, (_, i) => ({
+          id: `${actor}-pin-${i}`,
+          threadRef: `web:${actor}:pin-${i}`,
+          scopeId: `personal:${actor}`,
+          type: "dm",
+          title: `Pin ${i}`,
+          createdAt: 1,
+          lastActivityAt: 2000 - i,
+          pinned: true,
+        })),
+        {
+          id: `${actor}-archive`,
+          threadRef: `web:${actor}:archive`,
+          scopeId: `personal:${actor}`,
+          type: "dm",
+          createdAt: 1,
+          archived: true,
+        },
+        {
+          id: `${actor}-child`,
+          threadRef: `web:${actor}:child`,
+          scopeId: `personal:${actor}`,
+          type: "dm",
+          createdAt: 9999,
+          parentSessionId: `${actor}-000`,
+        },
+        {
+          id: `${actor}-slack`,
+          threadRef: `dm:${actor}:slack`,
+          scopeId: `personal:${actor}`,
+          type: "dm",
+          createdAt: 9999,
+        },
+      ],
+    ]),
+  );
+  const contexts = Object.fromEntries(
+    people.map((actor) => [
+      actor,
+      [
+        { scopeId: `personal:${actor}`, kind: "personal", name: null, lastActivityAt: 9999 },
+        ...Array.from({ length: 60 }, (_, i) => ({
+          scopeId: `group:${actor}-${i}`,
+          kind: "group",
+          name: `Group ${i}`,
+          lastActivityAt: 9999,
+        })),
+      ],
+    ]),
+  );
+  const item = (actor, suffix = "000") => ({
+    principalId: actor,
+    sessionId: `${actor}-${suffix}`,
+    expectedVisibleText: `Sentinel ${actor}`,
+  });
+  const fixture = {
+    fixtureId: "sidebar-oracle",
+    adminPrincipalId: "actor-a",
+    orgScopeId: "org:fixture",
+    cohorts: Object.fromEntries(
+      ["median", "p95", "max"].map((name, i) => [name, { principalId: people[i], rootCase: item(people[i]) }]),
+    ),
+    cases: {
+      short: item("actor-a"),
+      long: item("actor-a", "109"),
+      dense: item("actor-b"),
+      slack: item("actor-a", "slack"),
+      legacy: item("actor-a", "101"),
+      mixed: item("actor-a", "102"),
+    },
+    multiview: Array.from({ length: 12 }, (_, i) => item("actor-extra", String(i + 90).padStart(3, "0"))),
+    sidebarPagination: item("actor-a", "050"),
+  };
+  const observations = {
+    fixtureId: fixture.fixtureId,
+    rows: people.flatMap((principalId) => [
+      { path: "/me", principalId, status: 200, data: { user: principalId } },
+      { path: "/api/sessions", principalId, status: 200, data: { sessions: sessions[principalId] } },
+      { path: "/api/contexts", principalId, status: 200, data: { contexts: contexts[principalId] } },
+    ]),
+  };
+  return { fixture, observations, sessions, contexts };
+}
+const sidebarProfile = (transport) => ({ transport, sourceRevision: "a".repeat(40) });
+
+test("sidebar oracle derives all actors, full recent prefixes, profile-specific groups/pins and exact continuations", () => {
+  const { fixture, observations } = sidebarOracleFixture();
+  for (const transport of ["legacy-get", "navigation-post"]) {
+    const output = deriveSidebarReadiness(fixture, observations, sidebarProfile(transport));
+    assert.deepEqual(Object.keys(output.actors), ["actor-a", "actor-b", "actor-c", "actor-extra"]);
+    const actor = output.actors["actor-a"];
+    assert.equal(actor.recent.total, 112);
+    for (const [rows, start] of [
+      [actor.recent.firstRows, 0],
+      [actor.recent.secondRows, 50],
+    ])
+      assert.deepEqual(
+        rows.map((r) => r.id),
+        Array.from({ length: 50 }, (_, i) => `actor-a-${String(i + start).padStart(3, "0")}`),
+      );
+    assert.equal(actor.recent.allRows.at(-1).title, "Conversation actor-a 111");
+    assert.equal(actor.recent.firstHasMore, true);
+    assert.equal(actor.recent.secondHasMore, true);
+    assert.equal(actor.pinned.total, 55);
+    assert.equal(actor.pinned.rows.length, transport === "legacy-get" ? 55 : 50);
+    assert.equal(actor.pinned.hasMore, transport === "navigation-post");
+    assert.equal(actor.groups.total, 61);
+    assert.equal(actor.groups.items.length, transport === "legacy-get" ? 61 : 50);
+    assert.equal(actor.groups.firstItems.length, 50);
+    assert.equal(actor.groups.secondItems.length, transport === "legacy-get" ? 61 : 50);
+    assert.equal(actor.groups.items[0].lastActivityAtAtPreparation, 1000);
+    assert.deepEqual(actor.groups.dynamicOrderScopes, []);
+    assert.equal(actor.archivedCount, 1);
+    assert.equal(actor.startup.hasNonCronSessions, true);
+    assert.ok(actor.allowedOffPageRows.some((row) => row.id === "actor-a-109"));
+    assert.equal(output.actors["actor-extra"].allowedOffPageRows.length, 12);
+    for (const row of Object.values(actor.evidence)) assert.match(row.sha256, /^[a-f0-9]{64}$/);
+    const catalog = buildCatalog({ ...fixture, browser: { sidebarReadiness: output } });
+    assert.equal(catalog.length, 60);
+    assert.equal(cellsFor(catalog, "normal").length, 109);
+    for (const row of catalog.filter((row) => !row.admin)) {
+      assert.equal(row.sidebarReadiness.transport, transport);
+      assert.equal(row.sidebarReadiness.actors, undefined);
+    }
+    assert.ok(
+      catalog
+        .find((row) => row.id === "web.chat.slack")
+        .missing.includes("browser.sidebarReadiness: dynamic all-surface oracle unresolved"),
+    );
+    assert.ok(catalog.filter((row) => row.admin).every((row) => row.sidebarReadiness === undefined));
+  }
+});
+
+test("sidebar oracle preserves legacy stable ties and explicit candidate identity ties with DOM title rules", () => {
+  const { fixture, observations, sessions, contexts } = sidebarOracleFixture();
+  const rows = sessions["actor-a"];
+  [rows[0], rows[1]] = [rows[1], rows[0]];
+  rows[0].lastActivityAt = rows[1].lastActivityAt = 1000;
+  rows[0].title = null;
+  rows[0].type = "group";
+  rows[0].channelName = "mpdm-alice-smith--bob-jones-1";
+  rows[112].title = null;
+  rows[112].type = "group";
+  rows[112].channelName = "Alice, Bob";
+  contexts["actor-a"].find((row) => row.scopeId === "group:actor-a-1").name = "mpdm-alice-smith--bob-jones-1";
+  const baseline = deriveSidebarReadiness(fixture, observations, sidebarProfile("legacy-get")).actors["actor-a"];
+  const candidate = deriveSidebarReadiness(fixture, observations, sidebarProfile("navigation-post")).actors["actor-a"];
+  assert.deepEqual(
+    baseline.recent.firstRows.slice(0, 2).map((row) => row.id),
+    ["actor-a-001", "actor-a-000"],
+  );
+  assert.deepEqual(
+    candidate.recent.firstRows.slice(0, 2).map((row) => row.id),
+    ["actor-a-000", "actor-a-001"],
+  );
+  assert.equal(baseline.recent.firstRows[0].title, "2 alice smith, bob jones");
+  assert.equal(baseline.recent.firstRows[0].groupedTitle, "Web chat");
+  assert.equal(baseline.pinned.rows[0].title, "2 Alice, Bob");
+  assert.equal(candidate.recent.firstRows[1].title, "2 alice smith, bob jones");
+  assert.equal(candidate.pinned.rows[0].title, "2 Alice, Bob");
+  assert.equal(baseline.groups.items[0].name, "alice smith, bob jones");
+  assert.equal(candidate.groups.items[0].scopeId, "group:actor-a-0");
+  rows[112].channelName = "Alice\u00a0Smith, Bob";
+  for (const transport of ["legacy-get", "navigation-post"]) {
+    const actor = deriveSidebarReadiness(fixture, observations, sidebarProfile(transport)).actors["actor-a"];
+    assert.equal(actor.pinned.rows[0].title, "2 Alice\u00a0Smith, Bob");
+    assert.notEqual(actor.pinned.rows[0].title, "2 Alice Smith, Bob");
+  }
+});
+
+test("sidebar oracle rejects ambiguous/foreign evidence, missing actors and undeclared transport", () => {
+  const { fixture, observations } = sidebarOracleFixture();
+  for (const profile of [
+    undefined,
+    { transport: "auto", sourceRevision: "a".repeat(40) },
+    { ...sidebarProfile("navigation-post"), fallback: true },
+    { transport: "legacy-get", sourceRevision: "HEAD" },
+  ])
+    assert.throws(() => deriveSidebarReadiness(fixture, observations, profile));
+  for (const mutate of [
+    (value) => value.rows.pop(),
+    (value) => value.rows.push(value.rows[0]),
+    (value) => {
+      value.rows[0].data.user = "foreign";
+    },
+    (value) => {
+      value.rows[1].status = 403;
+    },
+    (value) => {
+      value.rows[1].data.sessions.push(value.rows[1].data.sessions[0]);
+    },
+    (value) => {
+      value.rows[1].data.sessions.find((row) => row.id === "actor-a-109").id = "another";
+    },
+    (value) => {
+      value.rows[2].data.contexts[0].lastActivityAt = "now";
+    },
+  ]) {
+    const copy = structuredClone(observations);
+    mutate(copy);
+    assert.throws(() => deriveSidebarReadiness(fixture, copy, sidebarProfile("navigation-post")));
+  }
+});
+
+test("empty personal/project ordering is unresolved and empty channel/group contexts are omitted", () => {
+  const { fixture, observations, contexts } = sidebarOracleFixture();
+  contexts["actor-a"].unshift(
+    {
+      scopeId: "group:empty-project",
+      kind: "group",
+      name: "unused",
+      project: { name: "Empty project", createdAt: 1, updatedAt: 2 },
+      lastActivityAt: 99999,
+    },
+    { scopeId: "channel:empty", kind: "channel", name: "empty", lastActivityAt: 999999 },
+    { scopeId: "group:empty", kind: "group", name: "empty", lastActivityAt: 999999 },
+  );
+  for (const transport of ["legacy-get", "navigation-post"]) {
+    const output = deriveSidebarReadiness(fixture, observations, sidebarProfile(transport));
+    const groups = output.actors["actor-a"].groups;
+    assert.equal(groups.items[0].scopeId, "group:empty-project");
+    assert.equal(groups.firstItems[0].count, 0);
+    assert.deepEqual(groups.dynamicOrderScopes, ["group:empty-project"]);
+    assert.ok(!groups.items.some((row) => row.scopeId === "channel:empty" || row.scopeId === "group:empty"));
+    const catalog = buildCatalog({ ...fixture, browser: { sidebarReadiness: output } });
+    assert.ok(
+      catalog
+        .find((row) => row.id === "web.chat.short")
+        .missing.includes("browser.sidebarReadiness.dynamicOrderScopes"),
+    );
+  }
+});
+
+test("view derivation binds the explicit profile and never reuses a cloned or partially observed sidebar oracle", () => {
+  const { fixture, observations } = sidebarOracleFixture();
+  observations.rows.push(
+    {
+      path: "/admin/api/me",
+      principalId: "actor-a",
+      status: 200,
+      data: { principal: "actor-a", scopeId: fixture.orgScopeId, isAdmin: true },
+    },
+    {
+      path: "/admin/api/scopes",
+      principalId: "actor-a",
+      status: 200,
+      data: { scopeId: fixture.orgScopeId, scopes: [] },
+    },
+  );
+  const options = { sidebarProfile: sidebarProfile("navigation-post") };
+  const derived = deriveViewFixtures(fixture, observations, options);
+  assert.equal(derived.browser.sidebarReadiness.sourceRevision, options.sidebarProfile.sourceRevision);
+  assert.equal(derived.sidebarPagination.sessionId, "actor-a-050");
+  assert.deepEqual(derived.browser.sidebarReadiness.actors["actor-a"].recent.firstRows[0], {
+    id: "actor-a-000",
+    title: "Conversation actor-a 0",
+    groupedTitle: "Conversation actor-a 0",
+    scopeId: "group:actor-a-0",
+  });
+  for (const [evidence, profile] of [
+    [observations, undefined],
+    [
+      { ...observations, rows: observations.rows.filter((row) => row.principalId !== "actor-extra") },
+      options.sidebarProfile,
+    ],
+  ]) {
+    const rejected = deriveViewFixtures(derived, evidence, { sidebarProfile: profile });
+    assert.equal(rejected.browser.sidebarReadiness, undefined);
+    assert.ok(rejected.viewReadinessEvidence.gaps.some((row) => row.scenario === "web.sidebarReadiness"));
+    assert.ok(
+      buildCatalog(rejected)
+        .filter((row) => !row.admin)
+        .every((row) => row.missing.includes("browser.sidebarReadiness")),
+    );
+  }
+});
+
+test("independent recent page boundaries retain exact 50/51/100/101 membership and continuation", () => {
+  for (const total of [50, 51, 100, 101]) {
+    const { fixture, observations } = sidebarOracleFixture();
+    fixture.cases = { short: fixture.cases.short };
+    fixture.multiview = [];
+    for (const row of observations.rows.filter((row) => row.path === "/api/sessions"))
+      row.data.sessions = row.data.sessions.slice(0, total);
+    for (const transport of ["legacy-get", "navigation-post"]) {
+      const recent = deriveSidebarReadiness(fixture, observations, sidebarProfile(transport)).actors["actor-a"].recent;
+      assert.equal(recent.total, total);
+      assert.equal(recent.firstRows.length, 50);
+      assert.equal(recent.secondRows.length, Math.min(50, total - 50));
+      assert.equal(recent.firstHasMore, total > 50);
+      assert.equal(recent.secondHasMore, total > 100);
+      assert.deepEqual([...recent.firstRows, ...recent.secondRows], recent.allRows.slice(0, 100));
+    }
+  }
 });

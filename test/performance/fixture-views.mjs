@@ -5,10 +5,219 @@ import { fileURLToPath } from "node:url";
 import { buildCatalog, CALENDAR_EXCLUSION } from "./catalog.mjs";
 import { sha256 } from "./verify.mjs";
 
-export function deriveViewFixtures(fixture, observations) {
+const compareIdentity = (a, b) => (a < b ? -1 : Number(a !== b));
+
+export function deriveSidebarReadiness(fixture, observations, profile) {
+  assert.deepEqual(Object.keys(profile ?? {}).sort(), ["sourceRevision", "transport"]);
+  assert.ok(["legacy-get", "navigation-post"].includes(profile.transport));
+  assert.match(profile.sourceRevision, /^[a-f0-9]{40}$/);
+  assert.equal(observations.fixtureId, fixture.fixtureId);
+  const catalog = buildCatalog(fixture).filter((row) => !row.admin);
+  const actors = Object.create(null);
+  for (const principalId of new Set(catalog.map((row) => row.principalId).filter(Boolean))) {
+    const evidence = {};
+    const read = (path, name) => {
+      const rows = (observations.rows ?? []).filter(
+        (row) =>
+          row.path === path &&
+          (row.principalId ?? fixture.adminPrincipalId ?? fixture.browser?.adminPrincipalId) === principalId,
+      );
+      assert.equal(rows.length, 1, `One sidebar observation required: ${principalId} ${path}`);
+      const row = rows[0];
+      assert.equal(row.status, 200);
+      evidence[name] = { path, principalId, status: 200, sha256: sha256(JSON.stringify(row.data)) };
+      return row.data;
+    };
+    assert.equal(read("/me", "me").user, principalId);
+    const sessions = read("/api/sessions", "sessions").sessions;
+    const contexts = read("/api/contexts", "contexts").contexts;
+    assert.ok(Array.isArray(sessions) && Array.isArray(contexts));
+    for (const row of sessions) {
+      for (const field of ["id", "threadRef", "scopeId"]) assert.ok(typeof row[field] === "string" && row[field]);
+      assert.ok(
+        Number.isFinite(row.createdAt) && (row.lastActivityAt === undefined || Number.isFinite(row.lastActivityAt)),
+      );
+      assert.ok(row.title == null || typeof row.title === "string");
+      for (const field of ["archived", "pinned"])
+        assert.ok(row[field] === undefined || typeof row[field] === "boolean");
+    }
+    assert.equal(new Set(sessions.map((row) => row.id)).size, sessions.length);
+    assert.equal(new Set(sessions.map((row) => row.threadRef)).size, sessions.length);
+    assert.equal(new Set(contexts.map((row) => row.scopeId)).size, contexts.length);
+    for (const row of contexts) {
+      assert.ok(typeof row.scopeId === "string" && row.scopeId);
+      assert.ok(["personal", "channel", "group"].includes(row.kind));
+      assert.ok(row.name == null || typeof row.name === "string");
+      assert.ok(row.lastActivityAt == null || Number.isFinite(row.lastActivityAt));
+      if (row.project) {
+        assert.equal(typeof row.project.name, "string");
+        assert.ok(Number.isFinite(row.project.createdAt) && Number.isFinite(row.project.updatedAt));
+      }
+    }
+    const activity = (row) => row.lastActivityAt ?? row.createdAt;
+    const ordered = (rows, identity = (row) => row.id, at = activity) =>
+      [...rows].sort(
+        (a, b) =>
+          at(b) - at(a) || (profile.transport === "navigation-post" ? compareIdentity(identity(a), identity(b)) : 0),
+      );
+    const isWeb = (row) =>
+      row.threadRef.startsWith("web:") || (row.threadRef.startsWith("agent:main:subagent:") && row.surface === "web");
+    const roots = ordered(sessions.filter((row) => !row.parentSessionId && isWeb(row)));
+    const recent = roots.filter((row) => !row.archived && !row.pinned);
+    const pinned = roots.filter((row) => !row.archived && row.pinned);
+    const byScope = new Map(contexts.map((row) => [row.scopeId, row]));
+    const projectName = (row) => byScope.get(row.scopeId)?.project?.name;
+    const dmNames = (value) => {
+      const raw = (value ?? "").trim().replace(/^#/, "");
+      return raw.startsWith("mpdm-")
+        ? raw
+            .slice(5)
+            .split("--")
+            .map((part) => part.trim().replace(/-\d+$/u, "").replace(/-/g, " ").trim())
+            .filter(Boolean)
+        : raw
+            .split(",")
+            .map((part) => part.trim())
+            .filter(Boolean);
+    };
+    const labeled = (row) => {
+      const names = dmNames(row.channelName);
+      let fallback = "Direct message";
+      if (projectName(row)) fallback = projectName(row);
+      else if (isWeb(row)) fallback = "Web chat";
+      else if (row.type === "channel")
+        fallback = row.channelName?.trim() ? `#${row.channelName.replace(/^#/, "")}` : "Channel";
+      else if (row.type === "group")
+        fallback = names.length ? names.join(", ") : (row.channelName?.trim() ?? "Group DM");
+      let title = fallback;
+      if (row.title?.trim()) title = row.title;
+      else if (!projectName(row) && row.type === "group" && names.length) title = `${names.length} ${names.join(", ")}`;
+      const groupedFallback = isWeb(row) ? "Web chat" : "New chat";
+      return {
+        id: row.id,
+        title,
+        groupedTitle: row.title?.trim() ? row.title : groupedFallback,
+        scopeId: row.scopeId,
+      };
+    };
+    const groupName = (context) => {
+      if (context.project) return context.project.name.trim() || null;
+      if (context.kind === "personal") return "Personal";
+      if (context.scopeId.startsWith("channel:"))
+        return context.name ? `#${context.name.replace(/^#/, "")}` : "Shared channel";
+      if (context.scopeId.startsWith("group:")) {
+        const names = dmNames(context.name);
+        return names.length ? names.join(", ") : (context.name ?? "Group");
+      }
+      return null;
+    };
+    const scopeOrder = [...new Set([...recent.map((row) => row.scopeId), ...contexts.map((row) => row.scopeId)])];
+    const groups = ordered(
+      scopeOrder.flatMap((scopeId) => {
+        const context = byScope.get(scopeId);
+        if (!context) return [];
+        const rows = recent.filter((row) => row.scopeId === scopeId);
+        const kind = context.project ? "project" : context.kind;
+        if (!rows.length && ["channel", "group"].includes(kind)) return [];
+        return [
+          {
+            scopeId,
+            name: groupName(context),
+            kind,
+            count: rows.length,
+            lastActivityAtAtPreparation: rows.length
+              ? activity(rows[0])
+              : (context.lastActivityAt ?? context.project?.createdAt ?? context.project?.updatedAt ?? 0),
+          },
+        ];
+      }),
+      (row) => row.scopeId,
+      (row) => row.lastActivityAtAtPreparation,
+    );
+    const items = profile.transport === "navigation-post" ? groups.slice(0, 50) : groups;
+    const renderedGroups = (count) =>
+      profile.transport === "navigation-post"
+        ? items
+        : items.filter(
+            (group) => group.count === 0 || recent.slice(0, count).some((row) => row.scopeId === group.scopeId),
+          );
+    const selected = catalog.filter((row) => row.principalId === principalId);
+    const retainedIds = new Set(
+      selected
+        .flatMap((row) => [
+          row.session?.sessionId,
+          ...(row.sessions ?? []).map((session) => session.sessionId),
+          ...(row.kind === "sidebar-switch" ? [fixture.cases?.long?.sessionId] : []),
+        ])
+        .filter(Boolean),
+    );
+    const retained = sessions.filter((row) => retainedIds.has(row.id));
+    assert.equal(retained.length, retainedIds.size, "Every retained sidebar identity needs authorized observation");
+    const personal = sessions.filter(
+      (row) =>
+        row.scopeId === `personal:${principalId}` &&
+        row.threadRef.startsWith(`web:${principalId}:`) &&
+        !row.threadRef.startsWith(`web:${principalId}:ideas:`),
+    );
+    personal.sort(
+      (a, b) =>
+        a.createdAt - b.createdAt ||
+        (profile.transport === "navigation-post" ? compareIdentity(a.threadRef, b.threadRef) : 0),
+    );
+    actors[principalId] = {
+      surface: "web",
+      evidence,
+      recent: {
+        total: recent.length,
+        allRows: recent.map(labeled),
+        firstRows: recent.slice(0, 50).map(labeled),
+        secondRows: recent.slice(50, 100).map(labeled),
+        firstHasMore: recent.length > 50,
+        secondHasMore: recent.length > 100,
+      },
+      pinned: {
+        total: pinned.length,
+        rows: (profile.transport === "navigation-post" ? pinned.slice(0, 50) : pinned).map(labeled),
+        hasMore: profile.transport === "navigation-post" && pinned.length > 50,
+      },
+      groups: {
+        total: groups.length,
+        items,
+        firstItems: renderedGroups(50),
+        secondItems: renderedGroups(100),
+        hasMore: profile.transport === "navigation-post" && groups.length > 50,
+        dynamicOrderScopes: groups.filter((row) => row.count === 0).map((row) => row.scopeId),
+      },
+      archivedCount: roots.filter((row) => row.archived).length,
+      startup: {
+        hasSessions: sessions.some((row) => row.id),
+        hasNonCronSessions: sessions.some((row) => row.id && !row.threadRef.startsWith("cron:")),
+        oldestPersonalThreadRef: personal[0]?.threadRef ?? null,
+        latestIdAtPreparation: ordered(sessions)[0]?.id ?? null,
+      },
+      allowedOffPageRows: retained.map((row) => {
+        let surface = "core";
+        if (isWeb(row)) surface = "web";
+        else if (row.threadRef.startsWith("dm:") || row.threadRef.startsWith("ch:")) surface = "slack";
+        return {
+          ...labeled(row),
+          threadRef: row.threadRef,
+          archived: Boolean(row.archived),
+          pinned: Boolean(row.pinned),
+          parentSessionId: row.parentSessionId ?? null,
+          surface,
+        };
+      }),
+    };
+  }
+  return { schemaVersion: 1, ...profile, actors };
+}
+
+export function deriveViewFixtures(fixture, observations, options = {}) {
   assert.equal(observations.fixtureId, fixture.fixtureId, "View evidence belongs to another fixture");
   const output = structuredClone(fixture);
   output.browser ??= {};
+  delete output.browser.sidebarReadiness;
   const views = (output.views = {});
   const gaps = [];
   const evidence = [];
@@ -528,7 +737,11 @@ export function deriveViewFixtures(fixture, observations) {
           (row.threadRef.startsWith("web:") ||
             (row.threadRef.startsWith("agent:main:subagent:") && row.surface === "web")),
       )
-      .sort((a, b) => (b.lastActivityAt ?? b.createdAt) - (a.lastActivityAt ?? a.createdAt));
+      .sort(
+        (a, b) =>
+          (b.lastActivityAt ?? b.createdAt) - (a.lastActivityAt ?? a.createdAt) ||
+          (options.sidebarProfile?.transport === "navigation-post" ? compareIdentity(a.id, b.id) : 0),
+      );
   };
   for (const name of ["median", "p95", "max"])
     attempt(`web.root.${name}`, () => {
@@ -655,6 +868,9 @@ export function deriveViewFixtures(fixture, observations) {
         renderedOrdinal: selected,
       });
   });
+  attempt("web.sidebarReadiness", () => {
+    output.browser.sidebarReadiness = deriveSidebarReadiness(output, observations, options.sidebarProfile);
+  });
   output.viewReadinessEvidence = {
     fixtureId: fixture.fixtureId,
     observedAt: observations.at,
@@ -669,12 +885,16 @@ export function deriveViewFixtures(fixture, observations) {
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const [fixturePath, observationsPath, outputPath] = process.argv.slice(2);
-  assert.ok(fixturePath && observationsPath && outputPath, "Usage: fixture-views.mjs FIXTURE OBSERVATIONS OUTPUT");
+  const [fixturePath, observationsPath, outputPath, profilePath] = process.argv.slice(2);
+  assert.ok(
+    fixturePath && observationsPath && outputPath,
+    "Usage: fixture-views.mjs FIXTURE OBSERVATIONS OUTPUT [SIDEBAR_PROFILE]",
+  );
   assert.notEqual(resolve(fixturePath), resolve(outputPath), "Preserve the original fixture manifest");
   const output = deriveViewFixtures(
     JSON.parse(readFileSync(fixturePath, "utf8")),
     JSON.parse(readFileSync(observationsPath, "utf8")),
+    profilePath ? { sidebarProfile: JSON.parse(readFileSync(profilePath, "utf8")) } : {},
   );
   writeFileSync(outputPath, JSON.stringify(output, null, 2) + "\n", { flag: "wx" });
   console.log(

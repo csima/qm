@@ -112,6 +112,132 @@ export async function waitReady(page, specs) {
   );
 }
 
+export async function waitSidebarReady(page, spec, { limit = 50, retainedIds = [] } = {}) {
+  assert.equal(spec.schemaVersion, 1);
+  assert.equal(spec.surface, "web", "A dynamic all-surface sidebar needs a separate admitted oracle");
+  assert.ok(["legacy-get", "navigation-post"].includes(spec.transport));
+  assert.match(spec.sourceRevision, /^[a-f0-9]{40}$/);
+  assert.ok(Number.isSafeInteger(limit) && limit >= 50 && limit <= 5000 && limit % 50 === 0);
+  const allowed = new Set(spec.allowedOffPageRows.map((row) => row.id));
+  assert.ok(
+    retainedIds.every((id) => allowed.has(id)),
+    "Unobserved retained sidebar identity",
+  );
+  const kept = new Set(retainedIds);
+  const recent = spec.recent.allRows.filter((row, index) => index < limit || kept.has(row.id));
+  const groups = spec.groups.items.filter(
+    (group) =>
+      spec.transport === "navigation-post" || group.count === 0 || recent.some((row) => row.scopeId === group.scopeId),
+  );
+  const groupedScopes = new Set(groups.map((group) => group.scopeId));
+  const label = (value) => value.replace(/[\t\n\f\r ]+/g, " ").replace(/^ | $/g, "");
+  const expected = {
+    transport: spec.transport,
+    recent: recent.map((row) => ({
+      id: row.id,
+      group: groupedScopes.has(row.scopeId) ? row.scopeId : "",
+      title: label(groupedScopes.has(row.scopeId) ? row.groupedTitle : row.title),
+    })),
+    pinned: spec.pinned.rows.map((row) => ({ id: row.id, title: label(row.title) })),
+    groups: groups.map((group) => ({
+      scopeId: group.scopeId,
+      name: label((group.name ?? { channel: "Channel", group: "Group DM" }[group.kind] ?? "Project").replace(/^#/, "")),
+      count: group.count,
+    })),
+    totals: { recent: spec.recent.total, pinned: spec.pinned.total, groups: spec.groups.total },
+    loaded: {
+      recent: Math.min(limit, spec.recent.total),
+      pinned: spec.pinned.rows.length,
+      groups: spec.groups.items.length,
+    },
+    more: {
+      recent:
+        spec.transport === "navigation-post"
+          ? spec.recent.total > limit
+          : spec.recent.allRows.some((row, index) => index >= limit && !kept.has(row.id)),
+      pinned: spec.pinned.hasMore,
+      groups: spec.groups.hasMore,
+    },
+    archivedCount: spec.archivedCount,
+  };
+  const result = await page.waitForFunction((expected) => {
+    const root = globalThis.document.querySelector("#sidebar-body");
+    if (!root || !root.getClientRects().length) return false;
+    const visible = (element) => Boolean(element?.getClientRects().length);
+    const label = (value) => value?.replace(/[\t\n\f\r ]+/g, " ").replace(/^ | $/g, "");
+    const same = (left, right) => JSON.stringify(left) === JSON.stringify(right);
+    const bounded = expected.transport === "navigation-post";
+    if (bounded) {
+      if (
+        root.dataset.sessionNavigation !== "ready" ||
+        root.dataset.sessionNavigationMode !== "bounded" ||
+        root.getAttribute("aria-busy") !== "false" ||
+        root.dataset.sessionNavigationPending !== ""
+      )
+        return false;
+      for (const section of ["recent", "pinned", "groups"]) {
+        const name = section[0].toUpperCase() + section.slice(1);
+        if (
+          root.dataset[`session${name}Loaded`] !== String(expected.loaded[section]) ||
+          root.dataset[`session${name}Total`] !== String(expected.totals[section])
+        )
+          return false;
+      }
+    }
+    const scope = (element) => {
+      if (!element) return "";
+      if (bounded) return element.dataset.scopeId;
+      const key = element.querySelector(".recent-project-menu [data-menu-id]")?.getAttribute("data-menu-id");
+      return key?.startsWith("project:") ? key.slice(8) : undefined;
+    };
+    const rows = [...root.querySelectorAll(".session-row[data-session-id]")].filter(visible);
+    if (new Set(rows.map((row) => row.dataset.sessionId)).size !== rows.length) return false;
+    const pinned = [],
+      recent = [];
+    for (const row of rows) {
+      if (row.closest(".archived-children")) return false;
+      const link = row.querySelector("a.session");
+      if (!visible(link) || link.getAttribute("aria-busy") === "true") return false;
+      const item = { id: row.dataset.sessionId, title: label(row.querySelector(".tl")?.textContent) };
+      if (row.closest(".pinned-children")) pinned.push(item);
+      else recent.push({ ...item, group: scope(row.closest("section.recent-project")) });
+    }
+    if (!same(pinned, expected.pinned) || recent.length !== expected.recent.length) return false;
+    for (const group of new Set(["", ...expected.groups.map((row) => row.scopeId)])) {
+      const project = (rows) => rows.filter((row) => row.group === group).map(({ id, title }) => ({ id, title }));
+      if (!same(project(recent), project(expected.recent))) return false;
+    }
+    const headers = [...root.querySelectorAll("section.recent-project")].filter(visible).map((element) => ({
+      scopeId: scope(element),
+      name: label(element.querySelector(".recent-project-name")?.textContent),
+      count: Number(element.querySelector(".recent-project-count")?.textContent),
+    }));
+    if (!same(headers, expected.groups)) return false;
+    for (const section of ["recent", "pinned", "groups"]) {
+      const controls = bounded
+        ? [...root.querySelectorAll(`[data-session-page="${section}"]`)].filter(visible)
+        : [...root.querySelectorAll("button")].filter(
+            (button) =>
+              visible(button) && section === "recent" && button.textContent.trim() === "Show more conversations",
+          );
+      if (
+        controls.length !== Number(expected.more[section]) ||
+        controls.some((button) => button.disabled || button.getAttribute("aria-disabled") === "true")
+      )
+        return false;
+    }
+    const archived = [...root.querySelectorAll(".archived-count")].filter(visible);
+    if (
+      archived.length !== Number(expected.archivedCount > 0) ||
+      (archived.length && archived[0].textContent.trim() !== String(expected.archivedCount))
+    )
+      return false;
+    if ([...root.querySelectorAll('[role="alert"]')].some(visible)) return false;
+    return { recent, pinned, groups: headers, archivedCount: expected.archivedCount };
+  }, expected);
+  return result.jsonValue();
+}
+
 export function validateConfig(config) {
   const url = new URL(config.baseUrl);
   assert.ok(
@@ -207,8 +333,11 @@ export async function establishSplitState(request, baseUrl, principalId, value) 
 
 async function prepare(page, scenario, cache, baseUrl) {
   const interact = INTERACTIVE_KINDS.has(scenario.kind);
-  if (cache === "cold" && !interact) return;
+  let limit = 50;
+  if (cache === "cold" && !interact) return { limit, prepared: false };
   await navigate(page, baseUrl, scenario.path);
+  if (scenario.sidebarReadiness)
+    await waitSidebarReady(page, scenario.sidebarReadiness, { retainedIds: sidebarRetainedIds(scenario, true) });
   if (scenario.kind === "earlier") {
     await waitReady(page, scenario.prepareReady);
     for (const ready of scenario.preparePages ?? []) {
@@ -225,12 +354,12 @@ async function prepare(page, scenario, cache, baseUrl) {
     await waitReady(page, scenario.prepareReady);
     for (let attempts = 0; !(await sessionLink(page, scenario.session).count()); attempts++) {
       assert.ok(attempts < 100, "Sidebar target is absent after 100 pages");
-      const before = await page.locator("[data-session-id] a.session").count();
       await page.getByRole("button", { name: "Show more conversations", exact: true }).click();
-      await page.waitForFunction(
-        (count) => globalThis.document.querySelectorAll("[data-session-id] a.session").length > count,
-        before,
-      );
+      limit += 50;
+      await waitSidebarReady(page, scenario.sidebarReadiness, {
+        limit,
+        retainedIds: sidebarRetainedIds(scenario, true),
+      });
     }
     await sessionLink(page, scenario.session).waitFor({ state: "visible" });
   } else if (scenario.kind === "sidebar-more") {
@@ -265,6 +394,85 @@ async function prepare(page, scenario, cache, baseUrl) {
   } else {
     await waitReady(page, scenario.prepareReady ?? scenario.ready);
   }
+  return { limit, prepared: true };
+}
+
+function sidebarRetainedIds(scenario, preparation = false) {
+  if (["multiview", "hidden-tab"].includes(scenario.kind)) return scenario.sessions.map((session) => session.sessionId);
+  if (preparation && scenario.kind === "sidebar-switch") return [decodeURIComponent(scenario.path.slice(3))];
+  return scenario.session ? [scenario.session.sessionId] : [];
+}
+
+export function sidebarRequirements(spec, { optional = false, cursorSha256 } = {}) {
+  if (spec.transport === "legacy-get") return ["/api/sessions", "/api/contexts"].map((path) => ({ path, optional }));
+  assert.equal(spec.transport, "navigation-post");
+  const common = {
+    path: "/api/session-navigation",
+    method: "POST",
+    navigation: { surface: spec.surface },
+    captureNavigation: true,
+    allowSupersededAbort: true,
+    optional,
+  };
+  return [
+    {
+      ...common,
+      navigation: {
+        ...common.navigation,
+        section: cursorSha256 ? "recent" : null,
+        cursorSha256: cursorSha256 ?? null,
+      },
+      optional: cursorSha256 ? false : optional,
+    },
+    common,
+  ];
+}
+
+export function validateSidebarEvidence(evidence, spec, previousRequests = []) {
+  assert.deepEqual(evidence.errors, [], "Browser/request errors occurred before sidebar completion");
+  if (spec.transport === "legacy-get") return;
+  assert.equal(
+    evidence.requests.some((entry) => entry.sameOrigin && entry.path === "/api/sessions"),
+    false,
+    "Bounded navigation fell back to the full session list",
+  );
+  const cursors = new Map([[null, 0]]);
+  const allowed = new Set(
+    spec.allowedOffPageRows.flatMap((row) => [`id:${sha256(row.id)}`, `thread:${sha256(row.threadRef)}`]),
+  );
+  for (const entry of [...previousRequests, ...evidence.requests]) {
+    if (entry.path !== "/api/session-navigation" || !entry.completed || entry.status !== 200) continue;
+    assert.ok(entry.sameOrigin && entry.method === "POST");
+    assert.ok(entry.navigationPages, "Missing completed navigation page evidence");
+    const intent = entry.navigation;
+    assert.equal(intent.surface, spec.surface);
+    assert.ok([null, "recent"].includes(intent.section), "Unexpected sidebar pagination section");
+    for (const ref of intent.references)
+      assert.ok(allowed.has(`${ref.kind}:${ref.valueSha256}`), "Navigation referenced an unobserved session");
+    const offset = cursors.get(intent.cursorSha256);
+    assert.notEqual(offset, undefined, "Navigation cursor has no verified predecessor");
+    assert.equal(intent.section === null, intent.cursorSha256 === null);
+    const expected = {
+      recent: { rows: spec.recent.allRows.slice(offset, offset + 50), total: spec.recent.total },
+      pinned: { rows: spec.pinned.rows, total: spec.pinned.total },
+      groups: { rows: spec.groups.items, total: spec.groups.total },
+    };
+    for (const [section, { rows, total }] of Object.entries(expected)) {
+      const actual = entry.navigationPages[section];
+      assert.equal(
+        actual.idsSha256,
+        sha256(JSON.stringify(rows.map((row) => row[section === "groups" ? "scopeId" : "id"]))),
+      );
+      assert.equal(actual.count, rows.length);
+      assert.equal(actual.total, total);
+      assert.equal(Boolean(actual.nextCursorSha256), total > (section === "recent" ? offset : 0) + rows.length);
+    }
+    const next = entry.navigationPages.recent.nextCursorSha256;
+    if (next) {
+      assert.ok(!cursors.has(next) || cursors.get(next) === offset + 50, "Navigation cursor did not advance");
+      cursors.set(next, offset + 50);
+    }
+  }
 }
 
 async function action(page, scenario, cache, baseUrl) {
@@ -295,21 +503,138 @@ async function action(page, scenario, cache, baseUrl) {
   else await navigate(page, baseUrl, scenario.path);
 }
 
+export function navigationIntent(path, raw) {
+  const fields = {
+    "/api/session-navigation": ["surface", "section", "cursor", "references"],
+    "/api/session-navigation/page": [
+      "surface",
+      "status",
+      "scopeId",
+      "parentSessionId",
+      "query",
+      "title",
+      "children",
+      "actionable",
+      "pinned",
+      "archived",
+      "cursor",
+    ],
+    "/api/session-navigation/resolve": ["references"],
+  }[path];
+  if (!fields) return undefined;
+  assert.ok(typeof raw === "string" && Buffer.byteLength(raw) <= 65536, "Invalid navigation request body");
+  const body = JSON.parse(raw);
+  assert.ok(body && typeof body === "object" && !Array.isArray(body), "Invalid navigation request body");
+  assert.ok(
+    Object.keys(body).every((key) => fields.includes(key)),
+    "Unknown navigation request field",
+  );
+  const intent = {};
+  for (const field of fields) {
+    const value = body[field];
+    if (field === "references") {
+      assert.ok(value === undefined || (Array.isArray(value) && value.length <= 12), "Invalid navigation references");
+      intent.references = (value ?? []).map((ref) => {
+        assert.ok(
+          ref && typeof ref === "object" && Object.keys(ref).sort().join() === "kind,value",
+          "Invalid navigation reference",
+        );
+        assert.ok(
+          ["id", "thread"].includes(ref.kind) &&
+            typeof ref.value === "string" &&
+            ref.value.length > 0 &&
+            ref.value.length <= (ref.kind === "id" ? 512 : 2048),
+          "Invalid navigation reference",
+        );
+        return { kind: ref.kind, valueSha256: sha256(ref.value) };
+      });
+    } else if (["children", "actionable", "pinned", "archived"].includes(field)) {
+      assert.ok(value === undefined || typeof value === "boolean", "Invalid navigation boolean");
+      intent[field] = value ?? null;
+    } else if (["surface", "section", "status"].includes(field)) {
+      const allowed = {
+        surface: ["all", "web", "slack", "core"],
+        section: ["recent", "pinned", "groups", "archived"],
+        status: ["active", "waiting", "archived"],
+      }[field];
+      assert.ok(value === undefined || allowed.includes(value), "Invalid navigation selection");
+      intent[field] = value ?? null;
+    } else {
+      assert.ok(
+        value === undefined || (typeof value === "string" && value.length <= (field === "cursor" ? 4096 : 512)),
+        "Invalid navigation text",
+      );
+      intent[`${field}Sha256`] = value === undefined ? null : sha256(value);
+    }
+  }
+  return intent;
+}
+
+function matchesRequest(entry, requirement) {
+  return (
+    entry.sameOrigin !== false &&
+    entry.path === requirement.path &&
+    entry.method === (requirement.method ?? "GET") &&
+    (!requirement.navigation ||
+      (entry.navigation &&
+        Object.entries(requirement.navigation).every(
+          ([key, value]) =>
+            Object.hasOwn(entry.navigation, key) && JSON.stringify(entry.navigation[key]) === JSON.stringify(value),
+        )))
+  );
+}
+
+function navigationPageEvidence(data) {
+  const pages = {};
+  for (const section of ["recent", "pinned", "groups"]) {
+    const page = data?.[section];
+    assert.ok(page && Array.isArray(page.items) && page.items.length <= 50);
+    assert.ok(Number.isSafeInteger(page.total) && page.total >= page.items.length);
+    assert.ok(
+      page.nextCursor === null ||
+        (typeof page.nextCursor === "string" && page.nextCursor.length > 0 && page.nextCursor.length <= 4096),
+    );
+    const ids = page.items.map((item) => item?.[section === "groups" ? "scopeId" : "id"]);
+    assert.ok(ids.every((id) => typeof id === "string" && id.length > 0 && id.length <= 512));
+    assert.equal(new Set(ids).size, ids.length);
+    pages[section] = {
+      idsSha256: sha256(JSON.stringify(ids)),
+      count: ids.length,
+      total: page.total,
+      nextCursorSha256: page.nextCursor === null ? null : sha256(page.nextCursor),
+    };
+  }
+  return pages;
+}
+
 export function requiredResponsesComplete(requests, requirements) {
   return requirements.every((requirement) => {
-    const matching = requests.filter(
-      (entry) => entry.sameOrigin !== false && entry.path === requirement.path && entry.method === "GET",
-    );
+    const matching = requests.filter((entry) => matchesRequest(entry, requirement));
+    if (requirement.optional === true && matching.length === 0) return true;
+    const succeeded = (entry) =>
+      entry.completed &&
+      (requirement.expectedStatuses
+        ? requirement.expectedStatuses.includes(entry.status)
+        : entry.status >= 200 && entry.status < 300) &&
+      (!requirement.expectedError || entry.expectedErrorMatched === true);
     return (
       matching.length > 0 &&
       matching.every(
-        (entry) =>
-          entry.completed &&
-          (requirement.expectedStatuses
-            ? requirement.expectedStatuses.includes(entry.status)
-            : entry.status >= 200 && entry.status < 300) &&
-          (!requirement.expectedError || entry.expectedErrorMatched === true),
+        (entry, index) =>
+          succeeded(entry) ||
+          (requirement.allowSupersededAbort === true &&
+            requirement.navigation &&
+            entry.navigation &&
+            entry.phase === "failed" &&
+            entry.failure === "net::ERR_ABORTED" &&
+            (entry.status === undefined || (entry.status >= 200 && entry.status < 300)) &&
+            matching
+              .slice(index + 1)
+              .some(
+                (later) => JSON.stringify(later.navigation) === JSON.stringify(entry.navigation) && succeeded(later),
+              )),
       ) &&
+      (!requirement.captureNavigation || matching.some((entry) => succeeded(entry) && entry.navigationPages)) &&
       (!requirement.paginated || matching.some((entry) => entry.finalPage === true)) &&
       (!requirement.settledField || matching.some((entry) => entry.settled === true)) &&
       (!requirement.followupWhenNonempty ||
@@ -330,6 +655,7 @@ export function observe(page, origin, requirements) {
     for (const listener of changed) listener();
   };
   let identity;
+  let identityRead = 0;
   let active = false;
   let generation = 0;
   page.on("pageerror", (error) => {
@@ -349,6 +675,13 @@ export function observe(page, origin, requirements) {
       completed: false,
       phase: "started",
     };
+    if (entry.sameOrigin && entry.method === "POST" && entry.path.startsWith("/api/session-navigation")) {
+      try {
+        entry.navigation = navigationIntent(entry.path, request.postData());
+      } catch {
+        errors.push({ type: "contract", path: entry.path, message: "Invalid navigation request intent" });
+      }
+    }
     byRequest.set(request, entry);
     requests.push(entry);
     notify();
@@ -374,21 +707,32 @@ export function observe(page, origin, requirements) {
     entry.responseAt = Date.now();
     entry.timing = request.timing();
     entry.fromServiceWorker = response.fromServiceWorker();
-    if (entry.sameOrigin && ["/me", "/admin/api/me"].includes(entry.path) && entry.status === 200) {
-      const job = response
-        .json()
-        .then((data) => {
-          if (generation === observedGeneration) identity = data.principal ?? data.user;
-        })
-        .catch(() => {});
-      pending.add(job);
-      void job.finally(() => pending.delete(job));
+    if (entry.sameOrigin && ["/me", "/admin/api/me"].includes(entry.path)) {
+      identity = undefined;
+      const observedIdentityRead = ++identityRead;
+      if (entry.status === 200) {
+        const job = response
+          .json()
+          .then((data) => {
+            if (generation !== observedGeneration) return;
+            const principal = data?.principal ?? data?.user;
+            if (typeof principal !== "string" || !principal.trim()) throw new Error("Invalid identity");
+            if (identityRead === observedIdentityRead) identity = principal;
+          })
+          .catch(() => {
+            if (generation === observedGeneration)
+              errors.push({ type: "contract", path: entry.path, message: "Invalid identity response" });
+          });
+        pending.add(job);
+        void job.finally(() => pending.delete(job));
+      }
     }
-    const requirement = requirements.find((item) => item.path === entry.path);
+    const requirement = requirements.find((item) => matchesRequest(entry, item));
     if (
       entry.sameOrigin &&
       requirement &&
       (requirement.paginated ||
+        requirement.captureNavigation ||
         requirement.settledField ||
         requirement.followupWhenNonempty ||
         requirement.expectedError)
@@ -397,6 +741,13 @@ export function observe(page, origin, requirements) {
         .json()
         .then((data) => {
           if (generation !== observedGeneration) return;
+          if (requirement.captureNavigation) {
+            try {
+              entry.navigationPages = navigationPageEvidence(data);
+            } catch {
+              errors.push({ type: "contract", path: entry.path, message: "Invalid navigation page envelope" });
+            }
+          }
           if (requirement.paginated) entry.finalPage = Array.isArray(data.items) && !data.nextCursor;
           if (requirement.settledField) entry.settled = !data[requirement.settledField];
           if (requirement.followupWhenNonempty)
@@ -479,7 +830,10 @@ export function observe(page, origin, requirements) {
         done();
       });
     },
-    start() {
+    start(nextRequirements = requirements, { reuseIdentity = false } = {}) {
+      if (reuseIdentity) assert.ok(typeof identity === "string" && identity, "No verified identity to reuse");
+      else identity = undefined;
+      requirements = nextRequirements;
       generation++;
       byRequest.clear();
       pending.clear();
@@ -493,7 +847,7 @@ export function observe(page, origin, requirements) {
       const now = Date.now();
       for (const entry of requests)
         if (!entry.completed && entry.phase !== "failed") entry.pendingForMs = now - entry.startedAt;
-      return { requests, errors, identity };
+      return structuredClone({ requests, errors, identity });
     },
   };
 }
@@ -520,6 +874,15 @@ async function sample(browser, config, scenario, cell, iteration, output) {
       throw new Error(`Fixture prerequisites missing: ${scenario.missing.join(", ")}`);
     }
     for (const spec of [scenario.ready, scenario.prepareReady].flat().filter(Boolean)) validateReadySpec(spec);
+    const sidebar = scenario.sidebarReadiness;
+    if (!scenario.admin) {
+      assert.ok(sidebar, "Missing independent sidebar readiness");
+      assert.equal(sidebar.sourceRevision, config.sourceRevision, "Sidebar oracle belongs to different source");
+      assert.deepEqual(config.sidebarProfile, {
+        transport: sidebar.transport,
+        sourceRevision: config.sourceRevision,
+      });
+    }
     const storageState =
       config.authStates?.[scenario.principalId] ?? (scenario.admin ? config.adminAuthState : undefined);
     assert.ok(
@@ -571,22 +934,56 @@ async function sample(browser, config, scenario, cell, iteration, output) {
       },
       { origin: config.baseUrl, state },
     );
-    observer = observe(page, config.baseUrl, scenario.requiredResponses);
+    const common = sidebar ? [{ path: "/me" }, ...sidebarRequirements(sidebar)] : [];
+    const preparationRequirements = [...(scenario.kind === "web-overlay" ? [] : scenario.requiredResponses), ...common];
+    observer = observe(page, config.baseUrl, preparationRequirements);
     observer.start();
-    await prepare(page, scenario, cell.cache, config.baseUrl);
-    if (cell.cache === "warm" && scenario.kind !== "web-overlay")
+    const preparation = await prepare(page, scenario, cell.cache, config.baseUrl);
+    if (preparation.prepared) {
       await observer.waitResponses(config.timeoutMs ?? 15_000);
-    if (INTERACTIVE_KINDS.has(scenario.kind))
+      const sidebarState = sidebar
+        ? await waitSidebarReady(page, sidebar, {
+            limit: preparation.limit,
+            retainedIds: sidebarRetainedIds(scenario, true),
+          })
+        : undefined;
+      result.preparation = { ...(await observer.finish()), sidebar: sidebarState };
+      assert.equal(result.preparation.identity, scenario.principalId, "Preparation authenticated the wrong principal");
+      assert.deepEqual(result.preparation.errors, [], "Browser/request errors occurred during preparation");
+      if (sidebar) validateSidebarEvidence(result.preparation, sidebar);
+    }
+    const interactive = INTERACTIVE_KINDS.has(scenario.kind);
+    let cursorSha256;
+    if (scenario.kind === "sidebar-more" && sidebar.transport === "navigation-post") {
+      cursorSha256 = result.preparation.requests.findLast(
+        (entry) => entry.completed && entry.navigation?.section === null && entry.navigationPages,
+      )?.navigationPages.recent.nextCursorSha256;
+      assert.match(cursorSha256 ?? "", /^[a-f0-9]{64}$/, "Sidebar page two has no verified continuation");
+    }
+    const interactiveSidebarRequirements = sidebar
+      ? sidebarRequirements(sidebar, { optional: true, cursorSha256 })
+      : [];
+    const measuredRequirements = [
+      ...scenario.requiredResponses,
+      ...(interactive ? interactiveSidebarRequirements : common),
+    ];
+    if (interactive)
       await page.evaluate(() => {
         performance.clearResourceTimings();
         globalThis.__qmPerformance.longTasks = [];
       });
     result.startedAt = Date.now();
     measurementStart = performance.now();
-    observer.start();
+    observer.start(measuredRequirements, { reuseIdentity: interactive });
     await action(page, scenario, cell.cache, config.baseUrl);
     await observer.waitResponses(config.timeoutMs ?? 15_000);
     await waitReady(page, scenario.ready);
+    if (sidebar)
+      result.sidebar = await waitSidebarReady(page, sidebar, {
+        limit: interactive ? preparation.limit + (scenario.kind === "sidebar-more" ? 50 : 0) : 50,
+        retainedIds: sidebarRetainedIds(scenario),
+      });
+    await observer.waitResponses(config.timeoutMs ?? 15_000);
     result.durationMs = performance.now() - measurementStart;
     result.finishedAt = Date.now();
     result.readiness = { passed: true, completedAt: result.finishedAt, assertions: scenario.ready };
@@ -610,8 +1007,10 @@ async function sample(browser, config, scenario, cell, iteration, output) {
     for (const navigation of result.browser.navigation) delete navigation.name;
     const evidence = await observer.finish();
     Object.assign(result, evidence);
+    result.requiredResponses = measuredRequirements;
     assert.equal(evidence.identity, scenario.principalId, "Browser is authenticated as the wrong fixture principal");
     assert.deepEqual(evidence.errors, [], "Browser/request errors occurred during measurement");
+    if (sidebar) validateSidebarEvidence(evidence, sidebar, interactive ? result.preparation.requests : []);
     result.status = "pass";
   } catch (error) {
     result.error = plainError(error);

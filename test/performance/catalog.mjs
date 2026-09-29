@@ -429,18 +429,44 @@ export function buildCatalog(fixture) {
       kind: "view",
       ready: readyView(`spend.${range}`),
     });
-  return scenarios.map((scenario) => ({
-    ...scenario,
-    requiredResponses: secondaryRequests(scenario.id, orgScope, features),
-    missing: [
-      ...scenario.missing,
-      ...[scenario.ready, scenario.prepareReady]
-        .flat()
-        .filter(Boolean)
-        .flatMap((ready) => ready.missing ?? []),
-      ...(!scenario.principalId ? ["principalId"] : []),
-    ],
-  }));
+  return scenarios.map((scenario) => {
+    const sidebar = browser.sidebarReadiness;
+    const actor = sidebar?.actors?.[scenario.principalId];
+    const sidebarReady =
+      sidebar?.schemaVersion === 1 &&
+      ["legacy-get", "navigation-post"].includes(sidebar.transport) &&
+      /^[a-f0-9]{40}$/.test(sidebar.sourceRevision) &&
+      actor?.surface === "web";
+    return {
+      ...scenario,
+      ...(!scenario.admin && sidebarReady
+        ? {
+            sidebarReadiness: {
+              schemaVersion: sidebar.schemaVersion,
+              transport: sidebar.transport,
+              sourceRevision: sidebar.sourceRevision,
+              ...actor,
+            },
+          }
+        : {}),
+      requiredResponses: secondaryRequests(scenario.id, orgScope, features),
+      missing: [
+        ...scenario.missing,
+        ...[scenario.ready, scenario.prepareReady]
+          .flat()
+          .filter(Boolean)
+          .flatMap((ready) => ready.missing ?? []),
+        ...(!scenario.principalId ? ["principalId"] : []),
+        ...(!scenario.admin && !sidebarReady ? ["browser.sidebarReadiness"] : []),
+        ...(!scenario.admin && sidebarReady && actor.groups.dynamicOrderScopes.length
+          ? ["browser.sidebarReadiness.dynamicOrderScopes"]
+          : []),
+        ...(scenario.id === "web.chat.slack"
+          ? ["browser.sidebarReadiness: dynamic all-surface oracle unresolved"]
+          : []),
+      ],
+    };
+  });
 }
 
 export function cellsFor(catalog, condition) {
