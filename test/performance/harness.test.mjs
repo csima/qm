@@ -10,7 +10,7 @@ import {
   multiviewState,
   secondaryRequests,
 } from "./catalog.mjs";
-import { deriveSidebarReadiness, deriveViewFixtures } from "./fixture-views.mjs";
+import { deriveDynamicSidebarAdmission, deriveSidebarReadiness, deriveViewFixtures } from "./fixture-views.mjs";
 import {
   establishSplitState,
   requiredResponsesComplete,
@@ -19,6 +19,7 @@ import {
   waitReady,
 } from "./run.mjs";
 import {
+  sha256 as sha256ForTest,
   medianUpperBound,
   quantile,
   summarizeCell,
@@ -970,7 +971,32 @@ test("one campaign fixture selects exact source expectations without changing da
   const catalogs = profiles.map((profile) => buildCatalog(common, profile.sourceRevision));
   for (const [index, profile] of profiles.entries()) {
     const single = deriveViewFixtures(fixture, observations, { sidebarProfile: profile });
-    assert.deepEqual(catalogs[index], buildCatalog(single));
+    const expectedCatalog = buildCatalog(single).map((scenario) => ({
+      ...scenario,
+      ...(scenario.sidebarReadiness
+        ? {
+            sidebarReadiness: {
+              ...scenario.sidebarReadiness,
+              dynamic: true,
+              surface: scenario.id === "web.chat.slack" ? "all" : "web",
+            },
+          }
+        : {}),
+      missing: scenario.missing.filter(
+        (reason) =>
+          ![
+            "browser.sidebarReadiness.dynamicOrderScopes",
+            "browser.sidebarReadiness: dynamic all-surface oracle unresolved",
+          ].includes(reason),
+      ),
+    }));
+    assert.deepEqual(catalogs[index], expectedCatalog);
+    assert.ok(
+      validateQualification(
+        { ...run, sourceRevision: profile.sourceRevision, sidebarProfile: profile, catalog: catalogs[index] },
+        common,
+      ).includes("Dynamic sidebar identities require admitted native history reconciliation"),
+    );
     assert.equal(catalogs[index].length, 60);
     assert.equal(cellsFor(catalogs[index], "normal").length, 109);
     assert.ok(
@@ -1262,4 +1288,671 @@ test("independent recent page boundaries retain exact 50/51/100/101 membership a
       assert.deepEqual([...recent.firstRows, ...recent.secondRows], recent.allRows.slice(0, 100));
     }
   }
+});
+
+function dynamicSidebarFixture() {
+  const model = sidebarOracleFixture();
+  const { fixture, observations, contexts } = model;
+  fixture.profileSha256 = "c".repeat(64);
+  fixture.payloadRepair = { planSha256: "d".repeat(64) };
+  observations.at = 150;
+  observations.rows.push(
+    {
+      path: "/admin/api/me",
+      principalId: "actor-a",
+      status: 200,
+      data: {
+        principal: "actor-a",
+        scopeId: fixture.orgScopeId,
+        isAdmin: true,
+      },
+    },
+    {
+      path: "/admin/api/scopes",
+      principalId: "actor-a",
+      status: 200,
+      data: { scopeId: fixture.orgScopeId, scopes: [] },
+    },
+  );
+  contexts["actor-a"].push(
+    {
+      scopeId: "group:empty-written",
+      kind: "group",
+      name: "Written",
+      project: { id: "written", name: "Written", createdAt: 1, updatedAt: 2 },
+    },
+    {
+      scopeId: "group:empty-static",
+      kind: "group",
+      name: "Static",
+      project: { id: "static", name: "Static", createdAt: 1, updatedAt: 2 },
+    },
+  );
+  const profiles = [sidebarProfile("legacy-get"), { transport: "navigation-post", sourceRevision: "b".repeat(40) }];
+  const principals = [
+    "actor-a",
+    "actor-b",
+    "actor-c",
+    "actor-extra",
+    ...Array.from({ length: 209 }, (_, i) => `owner-${i}`),
+  ];
+  const slots = {
+    fixtureId: fixture.fixtureId,
+    profileSha256: fixture.profileSha256,
+    definitions: [],
+    loops: [],
+  };
+  const preparation = {
+    pressureAt: 140000,
+    prepared: { crons: [], loops: [] },
+    policies: [],
+    cadences: [],
+  };
+  const snapshot = {
+    fixtureId: fixture.fixtureId,
+    profileSha256: fixture.profileSha256,
+    payloadRepairPlanSha256: fixture.payloadRepair.planSha256,
+    readOnly: true,
+    directoryMembers: principals.map((principal_id) => ({
+      principal_id,
+      type: "internal",
+    })),
+    tables: { crons: [], loops: [] },
+    shared: {
+      group: {
+        records: [{ group_id: "empty-written", roster_known: true }],
+        roster: ["owner-0", "actor-a"].map((principal_id) => ({
+          group_id: "empty-written",
+          principal_id,
+        })),
+      },
+      channel: { records: [], roster: [] },
+    },
+  };
+  for (let i = 0; i < 116; i++) {
+    const loop = i >= 111;
+    const owner = [1, 111].includes(i) ? "actor-a" : `owner-${i}`;
+    const scopeId = i === 0 ? "group:empty-written" : `personal:${owner}`;
+    const members = (i === 0 ? ["owner-0", "actor-a"] : [owner]).map((id) => ({ id, type: "internal" }));
+    const cron = {
+      id: `cron-${i}`,
+      owner,
+      ownerScopeId: scopeId,
+      enabled: false,
+      archived: false,
+      runAs: i === 0 ? "scopeShared" : "owner",
+      members,
+      ...(loop ? { loopId: `loop-${i}` } : {}),
+    };
+    const slot = {
+      fixtureCronId: cron.id,
+      fixturePrincipalId: cron.owner,
+      fixtureScopeId: scopeId,
+      ...(loop ? { fixtureLoopId: cron.loopId } : {}),
+    };
+    (loop ? slots.loops : slots.definitions).push(slot);
+    preparation.prepared.crons.push({ id: cron.id, json: cron });
+    preparation.policies.push({
+      cronId: cron.id,
+      principalId: cron.owner,
+      effectiveActorId: cron.owner,
+      scopeId,
+      runAs: cron.runAs,
+      currentMembers: members,
+      liveNativeRoutingVerified: false,
+    });
+    preparation.cadences.push({ cronId: cron.id, conditionActive: true });
+    if (loop)
+      preparation.prepared.loops.push({
+        id: cron.loopId,
+        json: {
+          id: cron.loopId,
+          cronId: cron.id,
+          owner: cron.owner,
+          ownerScopeId: scopeId,
+          runAs: cron.runAs,
+          members,
+          enabled: false,
+          state: "paused",
+        },
+      });
+  }
+  snapshot.tables = structuredClone(preparation.prepared);
+  const historyRow = (id, thread_ref, scope_id, principal_id) => ({
+    session: { id, thread_ref, scope_id, parent_session_id: null },
+    participants: [{ principal_id, valid_to: null }],
+    entries: [],
+    tape: [],
+  });
+  const sessionRows = [
+    historyRow("direct-web", "web:owner-120:direct", "personal:owner-120", "owner-120"),
+    historyRow("actor-a-slack", "dm:actor-a:slack", "personal:actor-a", "actor-a"),
+    historyRow("ask-origin", "cron:cron-1:fire:0123456789ab", "personal:actor-a", "actor-a"),
+  ];
+  const artifact = (name, value) => {
+    const raw = Buffer.from(JSON.stringify(value) + "\n");
+    return {
+      raw,
+      descriptor: {
+        path: `/work/${name}.json`,
+        bytes: raw.length,
+        sha256: sha256ForTest(raw),
+      },
+    };
+  };
+  const common = {
+    preparation: artifact("preparation", preparation),
+    snapshot: artifact("snapshot", snapshot),
+    slots: artifact("slots", slots),
+    observations: artifact("observations", observations),
+  };
+  const inputs = profiles.map((profile) => {
+    const definitions = preparation.prepared.crons.map(({ json: cron }, i) => ({
+      id: `definition-${i}`,
+      source: i >= 111 ? "loop" : "cron",
+      principalId: cron.owner,
+      effectiveActorId: cron.owner,
+      scopeId: cron.ownerScopeId,
+      runAs: cron.runAs,
+      currentMembers: cron.members,
+      preparationReceiptSha256: common.preparation.descriptor.sha256,
+      definition: {
+        cron,
+        ...(i >= 111 ? { loop: preparation.prepared.loops[i - 111].json } : {}),
+      },
+      maxFires: 1,
+      occurrences: [
+        {
+          id: `occurrence-${i}`,
+          index: 0,
+          stages: [{ shape: "parent" }],
+          children: i === 0 ? [{ parentStageIndex: 0, operationIndex: 0, shape: "child" }] : [],
+        },
+      ],
+      ...(i === 1
+        ? {
+            mechanism: "approved-keychain-ask",
+            approvedAsk: {
+              preparation: {
+                origins: [
+                  {
+                    sessionId: "ask-origin",
+                    threadRef: sessionRows[2].session.thread_ref,
+                    runId: "ask-run",
+                    participants: sessionRows[2].participants,
+                    participantsSha256: sha256ForTest(JSON.stringify(sessionRows[2].participants)),
+                  },
+                ],
+              },
+            },
+          }
+        : {}),
+    }));
+    const native = {
+      fixture: structuredClone(fixture),
+      campaignId: "modeled-dynamic",
+      sourceProfile: profile.transport === "legacy-get" ? "baseline-observer" : "candidate",
+      schedule: {
+        fixtureId: fixture.fixtureId,
+        profileSha256: fixture.profileSha256,
+        condition: "peak",
+        turns: [
+          { id: "direct-web", source: "web", principalId: "owner-120" },
+          { id: "direct-slack", source: "slack", principalId: "actor-a" },
+        ],
+      },
+      bindings: {
+        turns: {
+          "direct-web": {
+            history: {
+              sessionId: "direct-web",
+              threadRef: "web:owner-120:direct",
+            },
+          },
+          "direct-slack": { slack: { channelId: "actor-a:slack" } },
+        },
+      },
+      sourceBindings: ["preparation", "snapshot", "slots"].map((name) => common[name].descriptor),
+      recurrence: {
+        epochAt: 20000,
+        receiptSourceBindings: {
+          publicRevision: profile.sourceRevision,
+          helperSourceSha256: "e".repeat(64),
+          verifierSha256: "f".repeat(64),
+        },
+        definitions,
+      },
+      companion: {
+        nativeShapes: [
+          {
+            name: "parent",
+            operations: [
+              {
+                kind: "session-open",
+                name: "Child",
+                shape: "child",
+                model: "synthetic",
+              },
+            ],
+          },
+        ],
+      },
+    };
+    const nativeConfig = artifact(`native-${profile.transport}`, native);
+    const histories = artifact(`histories-${profile.transport}`, {
+      phase: "before",
+      readOnly: true,
+      campaignId: native.campaignId,
+      sourceProfile: native.sourceProfile,
+      nativeConfigSha256: nativeConfig.descriptor.sha256,
+      fixtureManifestSha256: sha256ForTest(JSON.stringify(native.fixture)),
+      startedAt: 90,
+      finishedAt: 100,
+      sessions: sessionRows,
+      runs: [{ id: "ask-run", session_id: sessionRows[2].session.thread_ref }],
+    });
+    return {
+      profile,
+      sourceProfiles: profiles,
+      artifacts: { ...common, nativeConfig, histories },
+    };
+  });
+  return { ...model, profiles, inputs, artifact };
+}
+
+function alterDynamicInput(input, name, mutate, artifact) {
+  const copy = { ...input, artifacts: { ...input.artifacts } };
+  const value = JSON.parse(copy.artifacts[name].raw);
+  mutate(value);
+  copy.artifacts[name] = artifact(name, value);
+  if (["preparation", "snapshot", "slots"].includes(name)) {
+    const native = JSON.parse(copy.artifacts.nativeConfig.raw);
+    native.sourceBindings = native.sourceBindings.map((row) =>
+      row.sha256 === input.artifacts[name].descriptor.sha256 ? copy.artifacts[name].descriptor : row,
+    );
+    if (name === "preparation")
+      native.recurrence.definitions.forEach(
+        (row) => (row.preparationReceiptSha256 = copy.artifacts[name].descriptor.sha256),
+      );
+    copy.artifacts.nativeConfig = artifact("native", native);
+  }
+  if (["preparation", "snapshot", "slots", "nativeConfig"].includes(name)) {
+    const histories = JSON.parse(copy.artifacts.histories.raw);
+    histories.nativeConfigSha256 = copy.artifacts.nativeConfig.descriptor.sha256;
+    copy.artifacts.histories = artifact("histories", histories);
+  }
+  return copy;
+}
+
+test("separate dynamic admission retains native validation and leaves common fixture gates unchanged", () => {
+  const { fixture, observations, profiles, inputs, artifact } = dynamicSidebarFixture();
+  const common = deriveViewFixtures(fixture, observations, { sidebarProfiles: profiles });
+  const commonFixture = artifact("common-fixture", common);
+  const originalBytes = Buffer.from(commonFixture.raw);
+  for (const [i, profile] of profiles.entries()) {
+    const result = deriveDynamicSidebarAdmission({ commonFixture, ...inputs[i] });
+    const actor = common.viewReadinessBySource[i].browser.sidebarReadiness.actors["actor-a"];
+    const dynamic = result.actors["actor-a"];
+    assert.equal(actor.preparedWeb.length, 169);
+    assert.equal(actor.preparedWeb.filter((row) => row.pinned).length, 55);
+    assert.equal(actor.preparedWeb.filter((row) => row.archived).length, 1);
+    assert.equal(actor.preparedWeb.find((row) => row.id === "actor-a-child").parentSessionId, "actor-a-000");
+    assert.equal(
+      actor.recent.allRows.some((row) => row.id === "actor-a-child"),
+      false,
+    );
+    assert.deepEqual(
+      actor.preparedWeb.find((row) => row.id === "actor-a-000"),
+      {
+        id: "actor-a-000",
+        title: "Conversation actor-a 0",
+        groupedTitle: "Conversation actor-a 0",
+        scopeId: "group:actor-a-0",
+        threadRef: "web:actor-a:0",
+        createdAt: 1,
+        at: 1000,
+        legacyRank: 0,
+        archived: false,
+        pinned: false,
+        parentSessionId: null,
+        type: "dm",
+        channelName: null,
+        surface: "web",
+      },
+    );
+    assert.deepEqual(dynamic.preparedNonWeb.find((row) => row.id === "actor-a-slack").mutableFields, [
+      "at",
+      "title",
+      "groupedTitle",
+    ]);
+    const untouched = {
+      id: "old-unwritten",
+      threadRef: "dm:actor-a:old-unwritten",
+      scopeId: "personal:actor-a",
+      type: "dm",
+      title: "Stable old conversation",
+      createdAt: 1,
+      lastActivityAt: 2,
+    };
+    const historicalChild = {
+      ...untouched,
+      id: "old-child",
+      threadRef: "agent:main:subagent:old-child",
+      surface: "slack",
+      parentSessionId: "actor-a-slack",
+    };
+    const withUnwritten = alterDynamicInput(
+      inputs[i],
+      "observations",
+      (value) =>
+        value.rows
+          .find((row) => row.path === "/api/sessions" && row.principalId === "actor-a")
+          .data.sessions.push(untouched, historicalChild),
+      artifact,
+    );
+    const mixed = deriveDynamicSidebarAdmission({
+      commonFixture,
+      ...withUnwritten,
+    }).actors["actor-a"];
+    assert.deepEqual(mixed.preparedNonWeb.find((row) => row.id === untouched.id).mutableFields, []);
+    const child = mixed.preparedNonWeb.find((row) => row.id === historicalChild.id);
+    assert.equal(child.threadRef, historicalChild.threadRef);
+    assert.equal(child.parentSessionId, historicalChild.parentSessionId);
+    assert.equal(child.surface, "slack");
+    assert.deepEqual(child.mutableFields, []);
+
+    assert.equal(mixed.scopePolicy.find((row) => row.scopeId === untouched.scopeId).mode, "dynamic");
+    assert.deepEqual(mixed.preparedNonWeb.find((row) => row.id === "actor-a-slack").mutableFields, [
+      "at",
+      "title",
+      "groupedTitle",
+    ]);
+
+    assert.deepEqual(
+      dynamic.recurring.map((row) => row.definitionId),
+      ["definition-0", "definition-1", "definition-111"],
+    );
+    assert.equal(dynamic.recurring[0].effectiveActorId, "owner-0");
+    assert.equal(dynamic.recurring[0].permittedThreadFamily, "cron:cron-0:fire:");
+    assert.equal(dynamic.recurring[0].children[0].scopeId, "group:empty-written");
+    assert.equal(dynamic.recurring[1].permittedThreadFamily, null);
+    assert.deepEqual(dynamic.recurring[1].origins, [
+      { sessionId: "ask-origin", threadRef: "cron:cron-1:fire:0123456789ab" },
+    ]);
+    assert.equal(dynamic.recurring[2].permittedThreadFamily, "loop:loop-111:fire:");
+    assert.ok(dynamic.recurring.every((row) => !row.permittedThreadFamily?.includes(":item:")));
+    const written = dynamic.scopePolicy.find((row) => row.scopeId === "group:empty-written");
+    assert.equal(written.mode, "dynamic");
+    assert.deepEqual(
+      written.writeEvidence.map((row) => row.kind),
+      ["definition", "descendant"],
+    );
+    assert.equal(dynamic.scopePolicy.find((row) => row.scopeId === "group:empty-static").mode, "static-disjoint");
+    assert.deepEqual(
+      dynamic.scopePolicy.find((row) => row.scopeId === "personal:actor-a").writeEvidence.map((row) => row.kind),
+      ["definition", "definition", "direct", "approved-ask"],
+    );
+    assert.deepEqual(actor.recent, deriveSidebarReadiness(fixture, observations, profile).actors["actor-a"].recent);
+    assert.equal(actor.dynamic, undefined);
+    assert.equal(dynamic.preparedWeb, undefined);
+    assert.deepEqual(result.commonFixture, commonFixture.descriptor);
+    assert.deepEqual(result.profile, profile);
+    assert.equal(result.campaignId, "modeled-dynamic");
+    assert.equal(result.sourceProfile, i === 0 ? "baseline-observer" : "candidate");
+    assert.equal(result.condition, "peak");
+    assert.equal(result.epochAt, 20000);
+    assert.equal(result.attemptId, undefined);
+    assert.equal(result.qualified, false);
+    assert.deepEqual(result.evidence.nativeConfig, inputs[i].artifacts.nativeConfig.descriptor);
+    assert.ok(actor.contexts.every((row) => row.fallbackActivity === undefined));
+    assert.equal(dynamic.contexts.find((row) => row.scopeId === "group:empty-written").fallbackActivity, 1);
+    const catalog = buildCatalog(common, profile.sourceRevision);
+    assert.equal(catalog.length, 60);
+    assert.equal(cellsFor(catalog, "normal").length, 109);
+    assert.deepEqual(result.missing, ["browser.sidebarReadiness.dynamic: response and native reconciliation required"]);
+    assert.equal(catalog.find((row) => row.id === "web.chat.slack").sidebarReadiness.dynamic, true);
+  }
+  assert.deepEqual(commonFixture.raw, originalBytes);
+  assert.equal(JSON.stringify(JSON.parse(commonFixture.raw)), JSON.stringify(common));
+  assert.throws(() =>
+    deriveViewFixtures(fixture, observations, { sidebarProfiles: profiles, dynamicSidebarInputs: inputs }),
+  );
+  assert.throws(() => deriveSidebarReadiness(fixture, observations, profiles[0], inputs[0]));
+});
+
+test("dynamic metadata rejects missing, stale, partial and same-count replacement artifacts and source-pair drift", () => {
+  const { fixture, observations, profiles, inputs, artifact } = dynamicSidebarFixture();
+  const original = inputs[1];
+  const commonFixture = artifact(
+    "common-fixture",
+    deriveViewFixtures(fixture, observations, { sidebarProfiles: profiles }),
+  );
+  const derive = (input) => deriveDynamicSidebarAdmission({ commonFixture, ...input });
+  for (const name of Object.keys(original.artifacts)) {
+    const input = { ...original, artifacts: { ...original.artifacts } };
+    delete input.artifacts[name];
+    assert.throws(() => derive(input), name);
+  }
+  const cases = [
+    ["nativeConfig", (value) => value.recurrence.definitions.pop()],
+    ["nativeConfig", (value) => (value.recurrence.receiptSourceBindings.publicRevision = profiles[0].sourceRevision)],
+    ["nativeConfig", (value) => (value.recurrence.definitions[0].definition.cron.id = "same-count-substitution")],
+    ["nativeConfig", (value) => (value.companion.nativeShapes[0].operations[0].scopeId = "group:empty-static")],
+    ["preparation", (value) => (value.prepared.crons[115].id = "replacement")],
+    ["snapshot", (value) => value.shared.group.roster.pop()],
+    ["snapshot", (value) => (value.tables.crons[0].json.owner = "another-owner")],
+    ["histories", (value) => (value.nativeConfigSha256 = "a".repeat(64))],
+    ["histories", (value) => (value.sessions = value.sessions.filter((row) => row.session.id !== "ask-origin"))],
+    ["histories", (value) => (value.sessions[0].participants[0].valid_to = 1)],
+    ["histories", (value) => (value.sessions[1].session.scope_id = "personal:foreign")],
+    ["histories", (value) => (value.sessions[2].participants[0].principal_id = "foreign")],
+    ["observations", (value) => (value.rows[0].data.user = "foreign")],
+  ];
+  for (const [name, mutate] of cases)
+    assert.throws(() => derive(alterDynamicInput(original, name, mutate, artifact)), name);
+  const mismatchedBytes = {
+    ...original,
+    artifacts: {
+      ...original.artifacts,
+      snapshot: { ...original.artifacts.snapshot, raw: Buffer.from("{}") },
+    },
+  };
+  assert.throws(() => derive(mismatchedBytes));
+  assert.throws(() => derive({ ...original, sourceProfiles: [profiles[1]] }));
+  assert.throws(() => derive({ ...original, sourceProfiles: [...profiles].reverse() }));
+  assert.throws(() => derive({ ...original, profile: { ...profiles[1], sourceRevision: "c".repeat(40) } }));
+  assert.throws(() => derive(alterDynamicInput(original, "preparation", (value) => value.pressureAt++, artifact)));
+});
+
+test("normal and peak epochs share exact common bytes while each source sidecar owns its native and mutable state", () => {
+  const { fixture, observations, profiles, inputs, artifact } = dynamicSidebarFixture();
+  const common = deriveViewFixtures(fixture, observations, { sidebarProfiles: profiles });
+  const commonFixture = artifact("common-fixture", common);
+  const before = Buffer.from(commonFixture.raw);
+  for (const input of inputs) {
+    const catalogBefore = buildCatalog(common, input.profile.sourceRevision);
+    const peak = deriveDynamicSidebarAdmission({ commonFixture, ...input });
+    let normalInput = alterDynamicInput(
+      input,
+      "preparation",
+      (value) => {
+        value.pressureAt = 160000;
+        value.cadences.find((row) => row.cronId === "cron-1").conditionActive = false;
+      },
+      artifact,
+    );
+    normalInput = alterDynamicInput(
+      normalInput,
+      "nativeConfig",
+      (value) => {
+        value.recurrence.epochAt = 40000;
+        value.schedule.condition = "normal";
+        value.recurrence.definitions = value.recurrence.definitions.filter(
+          (row) => row.definition.cron.id !== "cron-1",
+        );
+      },
+      artifact,
+    );
+    normalInput = alterDynamicInput(
+      normalInput,
+      "observations",
+      (value) => {
+        value.at = 35000;
+        const sessions = value.rows.find((row) => row.principalId === "actor-a" && row.path === "/api/sessions").data
+          .sessions;
+        sessions.find((row) => row.id === "actor-a-slack").title = "Run-specific conversation";
+        sessions.unshift({
+          id: "run-only",
+          threadRef: "dm:actor-a:run-only",
+          scopeId: "personal:actor-a",
+          type: "dm",
+          title: "Native activity",
+          createdAt: 25000,
+        });
+        const contexts = value.rows.find((row) => row.principalId === "actor-a" && row.path === "/api/contexts").data
+          .contexts;
+        contexts.find((row) => row.scopeId === "group:empty-written").lastActivityAt = 30000;
+        contexts.reverse();
+      },
+      artifact,
+    );
+    const normal = deriveDynamicSidebarAdmission({ commonFixture, ...normalInput });
+    assert.equal(normal.condition, "normal");
+    assert.equal(normal.epochAt, 40000);
+    assert.deepEqual(normal.commonFixture, peak.commonFixture);
+    assert.notEqual(sha256ForTest(JSON.stringify(normal)), sha256ForTest(JSON.stringify(peak)));
+    assert.notEqual(normal.evidence.nativeConfig.sha256, peak.evidence.nativeConfig.sha256);
+    assert.notEqual(normal.evidence.histories.sha256, peak.evidence.histories.sha256);
+    assert.deepEqual(
+      normal.actors["actor-a"].recurring.map((row) => row.definitionId),
+      ["definition-0", "definition-111"],
+    );
+    assert.equal(
+      normal.actors["actor-a"].contexts.find((row) => row.scopeId === "group:empty-written").fallbackActivity,
+      30000,
+    );
+    assert.equal(
+      normal.actors["actor-a"].preparedNonWeb.find((row) => row.id === "actor-a-slack").title,
+      "Run-specific conversation",
+    );
+    assert.ok(normal.actors["actor-a"].preparedNonWeb.some((row) => row.id === "run-only"));
+    assert.deepEqual(buildCatalog(common, input.profile.sourceRevision), catalogBefore);
+    assert.equal(catalogBefore.length, 60);
+    for (const condition of ["normal", "peak"]) assert.equal(cellsFor(catalogBefore, condition).length, 109);
+    assert.equal(catalogBefore.find((row) => row.id === "web.chat.slack").sidebarReadiness.dynamic, true);
+    assert.ok(
+      validateQualification({ sourceRevision: input.profile.sourceRevision, catalog: catalogBefore }, common).includes(
+        "Dynamic sidebar identities require admitted native history reconciliation",
+      ),
+    );
+    assert.deepEqual(normal.missing, peak.missing);
+  }
+  assert.deepEqual(commonFixture.raw, before);
+  assert.equal(sha256ForTest(commonFixture.raw), commonFixture.descriptor.sha256);
+  assert.equal(JSON.stringify(common).includes("modeled-dynamic"), false);
+  assert.equal(JSON.stringify(common).includes("preparationReceiptSha256"), false);
+});
+
+test("sidecar rejects changed common bytes, source records, actors, immutable web rows and stable contexts", () => {
+  const { fixture, observations, profiles, inputs, artifact } = dynamicSidebarFixture();
+  const common = deriveViewFixtures(fixture, observations, { sidebarProfiles: profiles });
+  const commonFixture = artifact("common-fixture", common);
+  const input = inputs[1];
+  const derive = (binding = commonFixture, selected = input) =>
+    deriveDynamicSidebarAdmission({ commonFixture: binding, ...selected });
+  assert.throws(() => derive({ ...commonFixture, raw: Buffer.concat([commonFixture.raw, Buffer.from(" ")]) }));
+  assert.throws(() =>
+    derive({ ...commonFixture, descriptor: { ...commonFixture.descriptor, bytes: commonFixture.raw.length + 1 } }),
+  );
+  const alternateRaw = Buffer.from(JSON.stringify(common, null, 2));
+  const alternate = derive({
+    raw: alternateRaw,
+    descriptor: { ...commonFixture.descriptor, bytes: alternateRaw.length, sha256: sha256ForTest(alternateRaw) },
+  });
+  assert.notEqual(alternate.commonFixture.sha256, derive().commonFixture.sha256);
+  const actor = (value) => value.viewReadinessBySource[1].browser.sidebarReadiness.actors["actor-a"];
+  for (const mutate of [
+    (value) => delete value.viewReadinessBySource[1].browser.sidebarReadiness.actors["actor-b"],
+    (value) => (value.viewReadinessBySource[0].browser.sidebarReadiness = null),
+    (value) => delete value.viewReadinessBySource[0].browser.sidebarReadiness.actors["actor-b"].preparedWeb,
+    (value) => (value.viewReadinessBySource[1].profile.sourceRevision = "c".repeat(40)),
+    (value) => (actor(value).preparedWeb[0].title = "Wrong prepared label"),
+    (value) => (actor(value).preparedWeb[0].threadRef += ":foreign"),
+    (value) => (actor(value).preparedWeb.find((row) => row.id === "actor-a-child").parentSessionId = "foreign-parent"),
+    (value) => (actor(value).preparedWeb.find((row) => row.id === "actor-a-child").threadRef = "web:foreign:child"),
+    (value) => actor(value).preparedWeb.pop(),
+    (value) => (actor(value).preparedOffPageWeb[0].scopeId = "personal:foreign"),
+    (value) => (actor(value).contexts[0].name = "Wrong context"),
+    (value) => (actor(value).dynamic = { epochAt: 20000 }),
+  ]) {
+    const changed = structuredClone(common);
+    mutate(changed);
+    assert.throws(() => derive(artifact("common-fixture", changed)));
+  }
+  for (const mutate of [
+    (value) =>
+      (value.rows.find((row) => row.principalId === "actor-a" && row.path === "/api/sessions").data.sessions[0].pinned =
+        true),
+    (value) =>
+      (value.rows.find((row) => row.principalId === "actor-a" && row.path === "/api/contexts").data.contexts[0].name =
+        "Changed stable name"),
+    (value) => (value.rows = value.rows.filter((row) => row.principalId !== "actor-b")),
+  ])
+    assert.throws(() => derive(commonFixture, alterDynamicInput(input, "observations", mutate, artifact)));
+  assert.throws(() =>
+    derive(
+      commonFixture,
+      alterDynamicInput(input, "nativeConfig", (value) => (value.campaignId = "foreign"), artifact),
+    ),
+  );
+  assert.throws(() =>
+    derive(
+      commonFixture,
+      alterDynamicInput(input, "nativeConfig", (value) => (value.recurrence.epochAt = NaN), artifact),
+    ),
+  );
+  assert.throws(() =>
+    derive(
+      commonFixture,
+      alterDynamicInput(input, "nativeConfig", (value) => (value.sourceProfile = "baseline-observer"), artifact),
+    ),
+  );
+  const changedActors = alterDynamicInput(
+    input,
+    "nativeConfig",
+    (value) => {
+      value.fixture.cases.short.principalId = "actor-b";
+    },
+    artifact,
+  );
+  const histories = JSON.parse(changedActors.artifacts.histories.raw);
+  histories.fixtureManifestSha256 = sha256ForTest(
+    JSON.stringify(JSON.parse(changedActors.artifacts.nativeConfig.raw).fixture),
+  );
+  changedActors.artifacts.histories = artifact("histories", histories);
+  assert.throws(() => derive(commonFixture, changedActors), /Common scenario actor binding/);
+  assert.throws(() => derive({ ...commonFixture, raw: Buffer.alloc(4194305) }));
+  assert.throws(() =>
+    derive(
+      commonFixture,
+      alterDynamicInput(input, "observations", (value) => (value.rows[0].data.extra = "x".repeat(4194304)), artifact),
+    ),
+  );
+});
+
+test("shared independent surface correction preserves prepared and retained child identity without changing roots", () => {
+  for (const transport of ["legacy-get", "navigation-post"])
+    for (const surface of ["web", "slack", "cron", "loop", undefined, ""]) {
+      const { fixture, observations, sessions } = sidebarOracleFixture();
+      fixture.cases.legacy.sessionId = "actor-a-child";
+      const before = deriveSidebarReadiness(fixture, observations, sidebarProfile(transport)).actors["actor-a"];
+      const child = sessions["actor-a"].find((row) => row.id === "actor-a-child");
+      child.threadRef = "agent:main:subagent:retained";
+      if (surface !== undefined) child.surface = surface;
+      const after = deriveSidebarReadiness(fixture, observations, sidebarProfile(transport)).actors["actor-a"];
+      assert.equal(after.allowedOffPageRows.find((row) => row.id === child.id).surface, surface || "core");
+      for (const key of ["recent", "pinned", "groups", "archivedCount"]) assert.deepEqual(after[key], before[key]);
+      if (surface === "web") assert.equal(after.preparedWeb.find((row) => row.id === child.id).surface, "web");
+      else assert.ok(!after.preparedWeb.some((row) => row.id === child.id));
+    }
 });

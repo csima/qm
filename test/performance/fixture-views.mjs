@@ -2,12 +2,336 @@ import assert from "node:assert/strict";
 import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { buildCatalog, CALENDAR_EXCLUSION, validateSidebarProfile } from "./catalog.mjs";
+import { buildCatalog, cellsFor, CALENDAR_EXCLUSION, validateSidebarProfile } from "./catalog.mjs";
 import { sha256 } from "./verify.mjs";
+import { sidebarFormatter, sidebarSurface } from "./sidebar-format.mjs";
 
 const compareIdentity = (a, b) => (a < b ? -1 : Number(a !== b));
 
-export function deriveSidebarReadiness(fixture, observations, profile) {
+function retainedSidebarArtifact({ raw, descriptor }, cap) {
+  assert.ok(Buffer.isBuffer(raw) && raw.length > 0 && raw.length <= cap, "Bounded actual retained bytes required");
+  assert.equal(typeof descriptor.path, "string");
+  assert.equal(resolve(descriptor.path), descriptor.path);
+  assert.equal(sha256(raw), descriptor.sha256);
+  if (descriptor.bytes !== undefined) assert.equal(descriptor.bytes, raw.length);
+  return {
+    descriptor: { path: descriptor.path, bytes: raw.length, sha256: descriptor.sha256 },
+    data: JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(raw)),
+  };
+}
+
+function dynamicSidebarInputs(fixture, observations, profile, input) {
+  assert.deepEqual(Object.keys(input.artifacts).sort(), [
+    "histories",
+    "nativeConfig",
+    "observations",
+    "preparation",
+    "slots",
+    "snapshot",
+  ]);
+  assert.deepEqual(input.profile, profile, "Exact dynamic source selection required");
+  assert.equal(input.sourceProfiles.length, 2);
+  input.sourceProfiles.forEach(validateSidebarProfile);
+  assert.equal(new Set(input.sourceProfiles.map((row) => row.transport)).size, 2);
+  assert.equal(new Set(input.sourceProfiles.map((row) => row.sourceRevision)).size, 2);
+  assert.equal(
+    input.sourceProfiles.filter(
+      (row) => row.transport === profile.transport && row.sourceRevision === profile.sourceRevision,
+    ).length,
+    1,
+  );
+  const one = (rows) => {
+    assert.equal(rows.length, 1, "One exact prepared identity required");
+    return rows[0];
+  };
+  const unique = (rows, key) => assert.equal(new Set(rows.map((row) => row[key])).size, rows.length);
+  const evidence = {};
+  const read = (name, cap) => {
+    const { descriptor, data } = retainedSidebarArtifact(input.artifacts[name], cap);
+    evidence[name] = descriptor;
+    return data;
+  };
+  const native = read("nativeConfig", 4194304);
+  const preparation = read("preparation", 4194304);
+  const snapshot = read("snapshot", 33554432);
+  const slots = read("slots", 4194304);
+  const histories = read("histories", 134217728);
+  assert.deepEqual(read("observations", 134217728), observations, "Observed actor data changed");
+  assert.equal(native.fixture.fixtureId, fixture.fixtureId);
+  assert.match(fixture.profileSha256, /^[a-f0-9]{64}$/);
+  assert.equal(native.fixture.profileSha256, fixture.profileSha256);
+  assert.ok(typeof native.campaignId === "string" && native.campaignId);
+  assert.ok(Number.isSafeInteger(native.recurrence.epochAt) && native.recurrence.epochAt > 0);
+  assert.equal(native.sourceProfile, profile.transport === "legacy-get" ? "baseline-observer" : "candidate");
+  assert.equal(native.recurrence.receiptSourceBindings.publicRevision, profile.sourceRevision);
+  for (const key of ["helperSourceSha256", "verifierSha256"])
+    assert.match(native.recurrence.receiptSourceBindings[key], /^[a-f0-9]{64}$/);
+  assert.ok(["normal", "peak"].includes(native.schedule.condition));
+  assert.equal(native.schedule.fixtureId, fixture.fixtureId);
+  assert.equal(native.schedule.profileSha256, fixture.profileSha256);
+  assert.equal(preparation.pressureAt, native.recurrence.epochAt + 120000);
+  for (const name of ["preparation", "snapshot", "slots"])
+    one(
+      native.sourceBindings.filter((row) => row.path === evidence[name].path && row.sha256 === evidence[name].sha256),
+    );
+  for (const value of [snapshot, slots]) {
+    assert.equal(value.fixtureId, fixture.fixtureId);
+    assert.equal(value.profileSha256, fixture.profileSha256);
+  }
+  assert.equal(snapshot.payloadRepairPlanSha256, native.fixture.payloadRepair.planSha256);
+  assert.equal(snapshot.readOnly, true);
+  assert.equal(snapshot.directoryMembers.length, 213);
+  unique(snapshot.directoryMembers, "principal_id");
+  assert.equal(slots.definitions.length, 111);
+  assert.equal(slots.loops.length, 5);
+  const expected = [...slots.definitions, ...slots.loops];
+  unique(expected, "fixtureCronId");
+  assert.deepEqual(
+    preparation.prepared.crons.map((row) => row.id).sort(),
+    expected.map((row) => row.fixtureCronId).sort(),
+  );
+  assert.deepEqual(
+    preparation.prepared.loops.map((row) => row.id).sort(),
+    slots.loops.map((row) => row.fixtureLoopId).sort(),
+  );
+  assert.deepEqual(
+    preparation.policies.map((row) => row.cronId).sort(),
+    expected.map((row) => row.fixtureCronId).sort(),
+  );
+  assert.deepEqual(
+    preparation.cadences.map((row) => row.cronId).sort(),
+    expected.map((row) => row.fixtureCronId).sort(),
+  );
+  assert.ok(preparation.cadences.every((row) => typeof row.conditionActive === "boolean"));
+  assert.deepEqual(
+    native.recurrence.definitions.map((row) => row.definition.cron.id).sort(),
+    preparation.cadences
+      .filter((row) => row.conditionActive)
+      .map((row) => row.cronId)
+      .sort(),
+    "Complete native active definition set required",
+  );
+  const definitions = new Map();
+  for (const slot of expected) {
+    const cron = one(preparation.prepared.crons.filter((row) => row.id === slot.fixtureCronId)).json;
+    const policy = one(preparation.policies.filter((row) => row.cronId === cron.id));
+    assert.deepEqual(
+      one(snapshot.tables.crons.filter((row) => row.id === cron.id)).json,
+      cron,
+      "Prepared cron needs actual complete readback",
+    );
+    assert.equal(cron.id, slot.fixtureCronId);
+    assert.equal(cron.owner, slot.fixturePrincipalId);
+    assert.equal(cron.ownerScopeId, slot.fixtureScopeId);
+    assert.equal(cron.enabled, false);
+    assert.equal(cron.archived, false);
+    assert.equal(cron.destination, undefined);
+    assert.equal(cron.message, undefined);
+    assert.equal(policy.principalId, cron.owner);
+    assert.equal(policy.scopeId, cron.ownerScopeId);
+    assert.equal(policy.runAs, cron.runAs ?? "owner");
+    assert.ok(["owner", "scopeFloor", "scopeShared"].includes(policy.runAs));
+    const [kind, ...parts] = policy.scopeId.split(":");
+    const ref = parts.join(":");
+    let members;
+    if (kind === "personal") {
+      assert.equal(ref, cron.owner);
+      members = [ref];
+    } else {
+      assert.ok(["channel", "group"].includes(kind), "Unproven current scope membership");
+      const shared = snapshot.shared[kind];
+      assert.equal(one(shared.records.filter((row) => row[`${kind}_id`] === ref)).roster_known, true);
+      members = shared.roster.filter((row) => row[`${kind}_id`] === ref).map((row) => row.principal_id);
+      assert.equal(new Set(members).size, members.length);
+      members = members.filter(
+        (id) => one(snapshot.directoryMembers.filter((row) => row.principal_id === id)).type === "internal",
+      );
+    }
+    assert.deepEqual(
+      policy.currentMembers.map((row) => row.id).sort(),
+      [...members].sort(),
+      "Actual audience differs from prepared policy",
+    );
+    assert.ok(
+      members.every(
+        (id) => one(snapshot.directoryMembers.filter((row) => row.principal_id === id)).type === "internal",
+      ),
+    );
+    assert.ok(policy.currentMembers.every((row) => row.type === "internal"));
+    assert.equal(
+      policy.effectiveActorId,
+      policy.runAs === "scopeFloor" && !members.includes(cron.owner) ? members[0] : cron.owner,
+    );
+    assert.ok(members.includes(policy.effectiveActorId));
+    if (policy.runAs === "scopeShared") assert.ok(members.includes(cron.owner));
+    assert.deepEqual(cron.members, policy.currentMembers);
+    if (slot.fixtureLoopId) {
+      const loop = one(preparation.prepared.loops.filter((row) => row.id === slot.fixtureLoopId)).json;
+      assert.deepEqual(one(snapshot.tables.loops.filter((row) => row.id === loop.id)).json, loop);
+      assert.equal(loop.id, cron.loopId);
+      assert.equal(loop.cronId, cron.id);
+      assert.equal(loop.owner, cron.owner);
+      assert.equal(loop.ownerScopeId, policy.scopeId);
+      assert.equal(loop.runAs ?? "owner", policy.runAs);
+      assert.deepEqual(loop.members, policy.currentMembers);
+      assert.equal(loop.destination, undefined);
+      assert.equal(loop.message, undefined);
+      assert.equal(loop.enabled, false);
+      assert.equal(loop.state, "paused");
+    } else assert.equal(cron.loopId, undefined);
+    definitions.set(cron.id, {
+      cron,
+      slot,
+      policy,
+      audience: policy.runAs === "owner" ? [policy.effectiveActorId] : members,
+    });
+  }
+  assert.equal(histories.phase, "before");
+  assert.equal(histories.readOnly, true);
+  assert.equal(histories.campaignId, native.campaignId);
+  assert.equal(histories.sourceProfile, native.sourceProfile);
+  assert.equal(histories.nativeConfigSha256, evidence.nativeConfig.sha256);
+  assert.equal(histories.fixtureManifestSha256, sha256(JSON.stringify(native.fixture)));
+  assert.ok(Number.isSafeInteger(histories.finishedAt) && histories.finishedAt <= native.recurrence.epochAt);
+  assert.ok(
+    Number.isSafeInteger(histories.startedAt) &&
+      histories.startedAt <= histories.finishedAt &&
+      histories.finishedAt - histories.startedAt <= 30000,
+  );
+  assert.ok(Number.isSafeInteger(observations.at) && observations.at <= native.recurrence.epochAt);
+  assert.ok(observations.rows.length <= 512);
+  assert.ok(observations.rows.every((row) => Buffer.byteLength(JSON.stringify(row.data)) <= 4194304));
+  unique(
+    histories.sessions.map((row) => row.session),
+    "id",
+  );
+  unique(
+    histories.sessions.map((row) => row.session),
+    "thread_ref",
+  );
+  const history = (threadRef, sessionId) =>
+    one(
+      histories.sessions.filter(
+        (row) => row.session.thread_ref === threadRef && (!sessionId || row.session.id === sessionId),
+      ),
+    );
+  const writes = [];
+  const write = (scopeId, origin) => {
+    assert.ok(typeof scopeId === "string" && scopeId);
+    writes.push({ scopeId, ...origin });
+  };
+  for (const { cron } of definitions.values()) write(cron.ownerScopeId, { kind: "definition", id: cron.id });
+  assert.deepEqual(Object.keys(native.bindings.turns).sort(), native.schedule.turns.map((row) => row.id).sort());
+  for (const turn of native.schedule.turns.filter((row) => ["web", "slack"].includes(row.source))) {
+    const binding = native.bindings.turns[turn.id];
+    const threadRef = turn.source === "web" ? binding.history.threadRef : `dm:${binding.slack.channelId}`;
+    const row = history(threadRef, turn.source === "web" ? binding.history.sessionId : undefined);
+    assert.equal(row.session.scope_id, `personal:${turn.principalId}`);
+    assert.ok(row.participants.some((member) => member.principal_id === turn.principalId && member.valid_to === null));
+    write(row.session.scope_id, {
+      kind: "direct",
+      id: turn.id,
+      sessionId: row.session.id,
+      threadRef,
+    });
+  }
+  const recurring = [];
+  unique(native.recurrence.definitions, "id");
+  for (const row of native.recurrence.definitions) {
+    const bound = definitions.get(row.definition.cron.id);
+    assert.ok(bound, "Native definition outside complete prepared identity set");
+    assert.deepEqual(row.definition.cron, bound.cron);
+    for (const key of ["principalId", "effectiveActorId", "scopeId", "runAs", "currentMembers"])
+      assert.deepEqual(row[key], bound.policy[key]);
+    assert.equal(row.source, bound.slot.fixtureLoopId ? "loop" : "cron");
+    if (row.source === "loop") assert.equal(row.effectiveActorId, row.principalId);
+    if (row.source === "loop")
+      assert.deepEqual(
+        row.definition.loop,
+        one(preparation.prepared.loops.filter((loop) => loop.id === bound.slot.fixtureLoopId)).json,
+      );
+    assert.match(row.preparationReceiptSha256, /^[a-f0-9]{64}$/);
+    one(native.sourceBindings.filter((binding) => binding.sha256 === row.preparationReceiptSha256));
+    assert.ok(Number.isSafeInteger(row.maxFires) && row.maxFires > 0 && row.maxFires <= 1000);
+    assert.ok(row.occurrences.length >= row.maxFires && row.occurrences.length <= row.maxFires + 1);
+    unique(row.occurrences, "id");
+    const children = [];
+    for (const [index, occurrence] of row.occurrences.entries()) {
+      assert.equal(occurrence.index, index);
+      for (const child of occurrence.children) {
+        const stage = occurrence.stages[child.parentStageIndex];
+        const shape = one(native.companion.nativeShapes.filter((shape) => shape.name === stage.shape));
+        const operation = shape.operations[child.operationIndex];
+        assert.ok(["session-open", "session-followup"].includes(operation.kind));
+        assert.equal(operation.shape, child.shape);
+        const openIndex = operation.kind === "session-open" ? child.operationIndex : operation.openOperation;
+        const open = shape.operations[openIndex];
+        assert.equal(open.kind, "session-open");
+        assert.deepEqual(Object.keys(open).sort(), ["kind", "model", "name", "shape"]);
+        children.push({
+          occurrenceId: occurrence.id,
+          parentStageIndex: child.parentStageIndex,
+          operationIndex: child.operationIndex,
+          openOperationIndex: openIndex,
+          scopeId: row.scopeId,
+        });
+        write(row.scopeId, {
+          kind: "descendant",
+          id: row.id,
+          occurrenceId: occurrence.id,
+          operationIndex: child.operationIndex,
+        });
+      }
+    }
+    const origins = row.mechanism === "approved-keychain-ask" ? row.approvedAsk.preparation.origins : [];
+    if (row.mechanism === "approved-keychain-ask") {
+      assert.equal(native.schedule.condition, "peak");
+      assert.equal(origins.length, row.maxFires);
+    }
+    for (const origin of origins) {
+      const actual = history(origin.threadRef, origin.sessionId);
+      assert.equal(actual.session.scope_id, row.scopeId);
+      assert.deepEqual(actual.participants, origin.participants);
+      assert.equal(sha256(JSON.stringify(origin.participants)), origin.participantsSha256);
+      assert.equal(one(histories.runs.filter((run) => run.id === origin.runId)).session_id, origin.threadRef);
+      write(actual.session.scope_id, {
+        kind: "approved-ask",
+        id: row.id,
+        sessionId: origin.sessionId,
+        threadRef: origin.threadRef,
+      });
+    }
+    recurring.push({
+      definitionId: row.id,
+      cronId: bound.cron.id,
+      ...(bound.slot.fixtureLoopId ? { loopId: bound.slot.fixtureLoopId } : {}),
+      effectiveActorId: row.effectiveActorId,
+      scopeId: row.scopeId,
+      audience: bound.audience,
+      audienceEvidence: evidence.snapshot,
+      preparationReceiptSha256: row.preparationReceiptSha256,
+      permittedThreadFamily: origins.length ? null : `${row.source}:${bound.slot.fixtureLoopId ?? bound.cron.id}:fire:`,
+      finiteOccurrenceBinding: sha256(JSON.stringify(row.occurrences)),
+      origins: origins.map((origin) => ({
+        sessionId: origin.sessionId,
+        threadRef: origin.threadRef,
+      })),
+      children,
+    });
+  }
+  return {
+    evidence,
+    native,
+    preparation,
+    snapshot,
+    slots,
+    histories,
+    writes,
+    recurring,
+  };
+}
+
+function sidebarReadiness(fixture, observations, profile, dynamic) {
   validateSidebarProfile(profile);
   assert.equal(observations.fixtureId, fixture.fixtureId);
   const catalog = buildCatalog(fixture, profile.sourceRevision).filter((row) => !row.admin);
@@ -52,63 +376,34 @@ export function deriveSidebarReadiness(fixture, observations, profile) {
         assert.ok(Number.isFinite(row.project.createdAt) && Number.isFinite(row.project.updatedAt));
       }
     }
-    const activity = (row) => row.lastActivityAt ?? row.createdAt;
-    const ordered = (rows, identity = (row) => row.id, at = activity) =>
-      [...rows].sort(
-        (a, b) =>
-          at(b) - at(a) || (profile.transport === "navigation-post" ? compareIdentity(identity(a), identity(b)) : 0),
-      );
-    const isWeb = (row) =>
-      row.threadRef.startsWith("web:") || (row.threadRef.startsWith("agent:main:subagent:") && row.surface === "web");
+    const { activity, ordered, isWeb, labeled, groupName } = sidebarFormatter(contexts, profile);
     const roots = ordered(sessions.filter((row) => !row.parentSessionId && isWeb(row)));
     const recent = roots.filter((row) => !row.archived && !row.pinned);
     const pinned = roots.filter((row) => !row.archived && row.pinned);
     const byScope = new Map(contexts.map((row) => [row.scopeId, row]));
-    const projectName = (row) => byScope.get(row.scopeId)?.project?.name;
-    const dmNames = (value) => {
-      const raw = (value ?? "").trim().replace(/^#/, "");
-      return raw.startsWith("mpdm-")
-        ? raw
-            .slice(5)
-            .split("--")
-            .map((part) => part.trim().replace(/-\d+$/u, "").replace(/-/g, " ").trim())
-            .filter(Boolean)
-        : raw
-            .split(",")
-            .map((part) => part.trim())
-            .filter(Boolean);
-    };
-    const labeled = (row) => {
-      const names = dmNames(row.channelName);
-      let fallback = "Direct message";
-      if (projectName(row)) fallback = projectName(row);
-      else if (isWeb(row)) fallback = "Web chat";
-      else if (row.type === "channel")
-        fallback = row.channelName?.trim() ? `#${row.channelName.replace(/^#/, "")}` : "Channel";
-      else if (row.type === "group")
-        fallback = names.length ? names.join(", ") : (row.channelName?.trim() ?? "Group DM");
-      let title = fallback;
-      if (row.title?.trim()) title = row.title;
-      else if (!projectName(row) && row.type === "group" && names.length) title = `${names.length} ${names.join(", ")}`;
-      const groupedFallback = isWeb(row) ? "Web chat" : "New chat";
-      return {
-        id: row.id,
-        title,
-        groupedTitle: row.title?.trim() ? row.title : groupedFallback,
+    const ranks = new Map(sessions.map((row, index) => [row.id, index]));
+    const webRanks = new Map(sessions.filter(isWeb).map((row, index) => [row.id, index]));
+    const compact = (row) => ({
+      ...labeled(row),
+      threadRef: row.threadRef,
+      createdAt: row.createdAt,
+      at: activity(row),
+      legacyRank: (isWeb(row) ? webRanks : ranks).get(row.id),
+      archived: Boolean(row.archived),
+      pinned: Boolean(row.pinned),
+      parentSessionId: row.parentSessionId ?? null,
+      type: row.type,
+      channelName: row.channelName ?? null,
+      surface: sidebarSurface(row),
+    });
+    const stableContexts = contexts
+      .map((row) => ({
         scopeId: row.scopeId,
-      };
-    };
-    const groupName = (context) => {
-      if (context.project) return context.project.name.trim() || null;
-      if (context.kind === "personal") return "Personal";
-      if (context.scopeId.startsWith("channel:"))
-        return context.name ? `#${context.name.replace(/^#/, "")}` : "Shared channel";
-      if (context.scopeId.startsWith("group:")) {
-        const names = dmNames(context.name);
-        return names.length ? names.join(", ") : (context.name ?? "Group");
-      }
-      return null;
-    };
+        kind: row.kind,
+        name: row.name ?? null,
+        project: row.project ? { id: row.project.id, name: row.project.name } : null,
+      }))
+      .sort((a, b) => compareIdentity(a.scopeId, b.scopeId));
     const scopeOrder = [...new Set([...recent.map((row) => row.scopeId), ...contexts.map((row) => row.scopeId)])];
     const groups = ordered(
       scopeOrder.flatMap((scopeId) => {
@@ -165,6 +460,9 @@ export function deriveSidebarReadiness(fixture, observations, profile) {
     actors[principalId] = {
       surface: "web",
       evidence,
+      preparedWeb: ordered(sessions.filter(isWeb)).map(compact),
+      preparedOffPageWeb: retained.filter(isWeb).map(compact),
+      contexts: stableContexts,
       recent: {
         total: recent.length,
         allRows: recent.map(labeled),
@@ -194,9 +492,7 @@ export function deriveSidebarReadiness(fixture, observations, profile) {
         latestIdAtPreparation: ordered(sessions)[0]?.id ?? null,
       },
       allowedOffPageRows: retained.map((row) => {
-        let surface = "core";
-        if (isWeb(row)) surface = "web";
-        else if (row.threadRef.startsWith("dm:") || row.threadRef.startsWith("ch:")) surface = "slack";
+        const surface = sidebarSurface(row);
         return {
           ...labeled(row),
           threadRef: row.threadRef,
@@ -207,11 +503,118 @@ export function deriveSidebarReadiness(fixture, observations, profile) {
         };
       }),
     };
+    if (dynamic) {
+      const writtenScopes = new Set(dynamic.writes.map((row) => row.scopeId));
+      const writtenThreads = new Set(dynamic.writes.map((row) => row.threadRef).filter(Boolean));
+      assert.ok(sessions.every((row) => ["dm", "channel", "group"].includes(row.type)));
+      assert.ok(
+        sessions.every(
+          (row) => row.parentSessionId == null || (typeof row.parentSessionId === "string" && row.parentSessionId),
+        ),
+      );
+      assert.ok(contexts.every((row) => !row.project || (typeof row.project.id === "string" && row.project.id)));
+      assert.ok(
+        sessions.filter(isWeb).every((row) => !writtenThreads.has(row.threadRef)),
+        "Prepared web rows overlap the admitted workload",
+      );
+      const recurring = dynamic.recurring.filter((row) => row.audience.includes(principalId));
+      assert.ok(
+        recurring.every((row) => byScope.has(row.scopeId)),
+        "New recurring scope outside the observed authorized context universe",
+      );
+      actors[principalId].dynamic = {
+        preparedNonWeb: sessions
+          .filter((row) => !isWeb(row))
+          .map((row) => ({
+            ...compact(row),
+            mutableFields: writtenThreads.has(row.threadRef) ? ["at", "title", "groupedTitle"] : [],
+          })),
+        allowedOffPageRows: retained.map(compact),
+        contexts: stableContexts.map((context) => {
+          const row = byScope.get(context.scopeId);
+          return {
+            ...context,
+            fallbackActivity: row.lastActivityAt ?? row.project?.createdAt ?? row.project?.updatedAt ?? 0,
+          };
+        }),
+        recurring,
+        scopePolicy: contexts.map((row) => ({
+          scopeId: row.scopeId,
+          mode: writtenScopes.has(row.scopeId) ? "dynamic" : "static-disjoint",
+          writeEvidence: dynamic.writes.filter((write) => write.scopeId === row.scopeId),
+        })),
+      };
+    }
   }
-  return { schemaVersion: 1, ...profile, actors };
+  const result = { schemaVersion: 1, ...profile, actors };
+  assert.ok(Buffer.byteLength(JSON.stringify(result)) <= 4194304, "Sidebar metadata output bound");
+  return result;
+}
+
+export function deriveSidebarReadiness(fixture, observations, profile) {
+  assert.equal(arguments.length, 3, "Dynamic inputs belong in a separately bound sidecar");
+  return sidebarReadiness(fixture, observations, profile);
+}
+
+export function deriveDynamicSidebarAdmission({ commonFixture, profile, sourceProfiles, artifacts }) {
+  const { data: fixture, descriptor } = retainedSidebarArtifact(commonFixture, 4194304);
+  validateSidebarProfile(profile);
+  const catalog = buildCatalog(fixture, profile.sourceRevision);
+  assert.equal(catalog.length, 60);
+  for (const condition of ["normal", "peak"]) assert.equal(cellsFor(catalog, condition).length, 109);
+  assert.ok(Array.isArray(fixture.viewReadinessBySource) && fixture.viewReadinessBySource.length === 2);
+  assert.deepEqual(
+    sourceProfiles,
+    fixture.viewReadinessBySource.map((row) => row.profile),
+  );
+  const selected = fixture.viewReadinessBySource.find((row) => row.profile.sourceRevision === profile.sourceRevision);
+  assert.deepEqual(selected.profile, profile);
+  const prepared = selected.browser.sidebarReadiness;
+  assert.ok(prepared, "Complete common prepared sidebar identities required");
+  for (const record of fixture.viewReadinessBySource) {
+    assert.ok(record.browser.sidebarReadiness, "Both common prepared source records are required");
+    assert.deepEqual(Object.keys(record.browser.sidebarReadiness.actors).sort(), Object.keys(prepared.actors).sort());
+    for (const actor of Object.values(record.browser.sidebarReadiness.actors)) {
+      assert.equal(actor.dynamic, undefined, "Run-specific data cannot be common fixture authority");
+      for (const key of ["preparedWeb", "preparedOffPageWeb", "contexts"]) assert.ok(Array.isArray(actor[key]));
+    }
+  }
+  const { data: observations } = retainedSidebarArtifact(artifacts.observations, 134217728);
+  const dynamic = dynamicSidebarInputs(fixture, observations, profile, { profile, sourceProfiles, artifacts });
+  assert.deepEqual(
+    catalog.map((row) => [row.id, row.principalId]),
+    buildCatalog(dynamic.native.fixture, profile.sourceRevision).map((row) => [row.id, row.principalId]),
+    "Common scenario actor binding differs from the native fixture",
+  );
+  const actual = sidebarReadiness(fixture, observations, profile, dynamic);
+  assert.deepEqual(Object.keys(actual.actors).sort(), Object.keys(prepared.actors).sort(), "Common actor set changed");
+  const actors = Object.fromEntries(
+    Object.entries(actual.actors).map(([principalId, actor]) => {
+      const common = prepared.actors[principalId];
+      for (const key of ["preparedWeb", "preparedOffPageWeb", "contexts"])
+        assert.deepEqual(actor[key], common[key], `Common ${principalId} ${key} changed`);
+      return [principalId, { evidence: actor.evidence, ...actor.dynamic }];
+    }),
+  );
+  const result = {
+    schemaVersion: 1,
+    qualified: false,
+    commonFixture: descriptor,
+    profile: structuredClone(profile),
+    campaignId: dynamic.native.campaignId,
+    sourceProfile: dynamic.native.sourceProfile,
+    condition: dynamic.native.schedule.condition,
+    epochAt: dynamic.native.recurrence.epochAt,
+    evidence: dynamic.evidence,
+    actors,
+    missing: ["browser.sidebarReadiness.dynamic: response and native reconciliation required"],
+  };
+  assert.ok(Buffer.byteLength(JSON.stringify(result)) <= 4194304, "Sidebar metadata output bound");
+  return result;
 }
 
 export function deriveViewFixtures(fixture, observations, options = {}) {
+  assert.ok(Object.keys(options).every((key) => ["sidebarProfiles", "sidebarProfile"].includes(key)));
   assert.equal(observations.fixtureId, fixture.fixtureId, "View evidence belongs to another fixture");
   const output = structuredClone(fixture);
   delete output.viewReadinessBySource;
@@ -222,7 +625,9 @@ export function deriveViewFixtures(fixture, observations, options = {}) {
     assert.equal(new Set(options.sidebarProfiles.map((profile) => profile.sourceRevision)).size, 2);
     assert.equal(new Set(options.sidebarProfiles.map((profile) => profile.transport)).size, 2);
     const derived = options.sidebarProfiles.map((profile) =>
-      deriveViewFixtures(output, observations, { sidebarProfile: profile }),
+      deriveViewFixtures(output, observations, {
+        sidebarProfile: profile,
+      }),
     );
     const common = structuredClone(output);
     common.browser = structuredClone(derived[0].browser);

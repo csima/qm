@@ -1,29 +1,123 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  appendFileSync,
+  closeSync,
+  constants,
+  existsSync,
+  fstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { ATTACHMENT, BLOCKING_SELECTORS, buildCatalog, cellsFor, chatReady, multiviewState } from "./catalog.mjs";
-import { sha256, verifyRun } from "./verify.mjs";
+import {
+  ATTACHMENT,
+  INTERACTIVE_KINDS,
+  BLOCKING_SELECTORS,
+  buildCatalog,
+  cellsFor,
+  chatReady,
+  multiviewState,
+  validateSidebarProfile,
+} from "./catalog.mjs";
+import { sha256, verifyRun, validateSidebarCapture, validateSidebarDom } from "./verify.mjs";
+import { projectSidebarResponse } from "./sidebar-response.mjs";
+import { retainSidebarProjection } from "./sidebar-retention.mjs";
+import { pruneSidebarDomRecords, waitSidebarDom } from "./sidebar-dom.mjs";
 
 const sourcePath = fileURLToPath(import.meta.url);
-const INTERACTIVE_KINDS = new Set([
-  "earlier",
-  "sidebar-switch",
-  "sidebar-more",
-  "admin-next",
-  "web-overlay",
-  "hidden-tab",
-  "attachment",
-  "disabled-crons",
-  "memory-facts",
-]);
 const json = (path) => JSON.parse(readFileSync(path, "utf8"));
 const plainError = (error) => ({
   name: error?.name ?? "Error",
   message: String(error?.message ?? error).slice(0, 3000),
   stack: typeof error?.stack === "string" ? error.stack.slice(0, 12000) : undefined,
 });
+
+export function readDynamicSidebar(path, fixtureRaw, profile, condition, fixturePath) {
+  assert.equal(resolve(path), path, "Resolved dynamic sidebar path required");
+  validateSidebarProfile(profile);
+  const cap = 4194304;
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  let raw;
+  try {
+    const stat = fstatSync(fd);
+    assert.ok(stat.isFile() && stat.size > 0 && stat.size <= cap, "Bounded regular dynamic sidebar file required");
+    const buffer = Buffer.allocUnsafe(cap + 1);
+    let count = 0;
+    for (let size; count < buffer.length && (size = readSync(fd, buffer, count, buffer.length - count, count));)
+      count += size;
+    assert.ok(count > 0 && count <= cap, "Dynamic sidebar exceeds input bound");
+    raw = buffer.subarray(0, count);
+  } finally {
+    closeSync(fd);
+  }
+  assert.ok(Buffer.isBuffer(fixtureRaw) && fixtureRaw.length > 0 && fixtureRaw.length <= cap);
+  const parse = (bytes) => JSON.parse(new TextDecoder("utf8", { fatal: true }).decode(bytes));
+  const fixture = parse(fixtureRaw),
+    data = parse(raw);
+  assert.equal(data.schemaVersion, 1);
+  assert.equal(data.qualified, false, "Runtime data is not native qualification");
+  assert.equal(data.commonFixture.bytes, fixtureRaw.length);
+  assert.equal(data.commonFixture.sha256, sha256(fixtureRaw), "Dynamic sidebar belongs to a different common fixture");
+  assert.equal(resolve(fixturePath), fixturePath);
+  assert.equal(data.commonFixture.path, fixturePath);
+  assert.deepEqual(data.profile, profile);
+  assert.equal(data.condition, condition);
+  assert.ok(["normal", "peak"].includes(condition));
+  assert.equal(data.sourceProfile, profile.transport === "legacy-get" ? "baseline-observer" : "candidate");
+  assert.ok(typeof data.campaignId === "string" && data.campaignId);
+  assert.ok(Number.isSafeInteger(data.epochAt) && data.epochAt > 0);
+  assert.deepEqual(data.missing, ["browser.sidebarReadiness.dynamic: response and native reconciliation required"]);
+  const records = fixture.viewReadinessBySource.filter((row) => row.profile.sourceRevision === profile.sourceRevision);
+  assert.equal(records.length, 1);
+  assert.deepEqual(records[0].profile, profile);
+  const commonActors = records[0].browser.sidebarReadiness.actors;
+  assert.deepEqual(Object.keys(data.actors).sort(), Object.keys(commonActors).sort());
+  assert.deepEqual(Object.keys(data.evidence).sort(), [
+    "histories",
+    "nativeConfig",
+    "observations",
+    "preparation",
+    "slots",
+    "snapshot",
+  ]);
+  for (const [role, value] of Object.entries(data.evidence)) {
+    assert.equal(resolve(value.path), value.path);
+    assert.match(value.sha256, /^[a-f0-9]{64}$/);
+    assert.ok(
+      Number.isSafeInteger(value.bytes) &&
+        value.bytes > 0 &&
+        value.bytes <= ({ histories: 134217728, observations: 134217728, snapshot: 33554432 }[role] ?? cap),
+    );
+  }
+  for (const [principalId, actor] of Object.entries(data.actors)) {
+    for (const key of ["preparedNonWeb", "allowedOffPageRows", "contexts", "recurring", "scopePolicy"])
+      assert.ok(Array.isArray(actor[key]), `Dynamic ${principalId} ${key} required`);
+    for (const key of ["preparedWeb", "preparedOffPageWeb", "contexts"])
+      assert.ok(Array.isArray(commonActors[principalId][key]), `Prepared ${principalId} ${key} required`);
+  }
+  return {
+    data,
+    commonActors,
+    retention: { identities: new Map(), bytes: 0 },
+    binding: {
+      path,
+      bytes: raw.length,
+      sha256: sha256(raw),
+      commonFixtureSha256: sha256(fixtureRaw),
+      profile: data.profile,
+      campaignId: data.campaignId,
+      sourceProfile: data.sourceProfile,
+      condition,
+      epochAt: data.epochAt,
+      nativeConfigSha256: data.evidence.nativeConfig.sha256,
+    },
+  };
+}
 
 export function validateReadySpec(spec) {
   assert.ok(spec && typeof spec.root === "string" && spec.root.length, "Readiness needs an explicit rendered root");
@@ -331,13 +425,32 @@ export async function establishSplitState(request, baseUrl, principalId, value) 
   return { ...state, updatedAt: verified.updatedAt };
 }
 
+function validateSidebarSettled(observer, proof) {
+  assert.deepEqual(
+    observer.sidebarSnapshot().capture,
+    {
+      generation: proof.generation,
+      version: proof.version,
+      ready: true,
+      errors: [],
+    },
+    "Sidebar changed after rendered readiness",
+  );
+}
+
+function waitScenarioSidebar(page, scenario, observer, options) {
+  return scenario.sidebarReadiness.dynamic
+    ? observer.waitSidebar(page, options)
+    : waitSidebarReady(page, scenario.sidebarReadiness, options);
+}
+
 async function prepare(page, scenario, cache, baseUrl, observer, timeoutMs) {
   const interact = INTERACTIVE_KINDS.has(scenario.kind);
   let limit = 50;
   if (cache === "cold" && !interact) return { limit, prepared: false };
   await navigate(page, baseUrl, scenario.path);
   if (scenario.sidebarReadiness)
-    await waitSidebarReady(page, scenario.sidebarReadiness, { retainedIds: sidebarRetainedIds(scenario, true) });
+    await waitScenarioSidebar(page, scenario, observer, { retainedIds: sidebarRetainedIds(scenario, true) });
   if (scenario.kind === "earlier") {
     await waitReady(page, scenario.prepareReady);
     for (const ready of scenario.preparePages ?? []) {
@@ -356,7 +469,7 @@ async function prepare(page, scenario, cache, baseUrl, observer, timeoutMs) {
       assert.ok(attempts < 100, "Sidebar target is absent after 100 pages");
       await page.getByRole("button", { name: "Show more conversations", exact: true }).click();
       limit += 50;
-      await waitSidebarReady(page, scenario.sidebarReadiness, {
+      await waitScenarioSidebar(page, scenario, observer, {
         limit,
         retainedIds: sidebarRetainedIds(scenario, true),
       });
@@ -536,13 +649,19 @@ function sidebarRetainedIds(scenario, preparation = false) {
 }
 
 export function sidebarRequirements(spec, { optional = false, cursorSha256 } = {}) {
-  if (spec.transport === "legacy-get") return ["/api/sessions", "/api/contexts"].map((path) => ({ path, optional }));
+  if (spec.transport === "legacy-get")
+    return ["/api/sessions", "/api/contexts"].map((path) => ({
+      path,
+      optional,
+      ...(spec.dynamic ? { captureSidebar: true } : {}),
+    }));
   assert.equal(spec.transport, "navigation-post");
   const common = {
     path: "/api/session-navigation",
     method: "POST",
     navigation: { surface: spec.surface },
     captureNavigation: true,
+    ...(spec.dynamic ? { captureSidebar: true } : {}),
     allowSupersededAbort: true,
     optional,
   };
@@ -562,6 +681,28 @@ export function sidebarRequirements(spec, { optional = false, cursorSha256 } = {
 
 export function validateSidebarEvidence(evidence, spec, previousRequests = []) {
   assert.deepEqual(evidence.errors, [], "Browser/request errors occurred before sidebar completion");
+  if (spec.dynamic) {
+    const entries = [...previousRequests, ...evidence.requests].filter(
+      (entry) =>
+        entry.sameOrigin &&
+        entry.completed &&
+        entry.status === 200 &&
+        [
+          "/api/sessions",
+          "/api/contexts",
+          "/api/session-navigation",
+          "/api/session-navigation/page",
+          "/api/session-navigation/resolve",
+        ].includes(entry.path),
+    );
+    assert.ok(entries.length, "Dynamic sidebar needs actual completed response evidence");
+    for (const entry of entries)
+      validateSidebarCapture(entry, {
+        principalId: evidence.identity,
+        profile: { transport: spec.transport, sourceRevision: spec.sourceRevision },
+      });
+    return;
+  }
   if (spec.transport === "legacy-get") return;
   assert.equal(
     evidence.requests.some((entry) => entry.sameOrigin && entry.path === "/api/sessions"),
@@ -814,7 +955,84 @@ function actionablePageEvidence(data, intent) {
   };
 }
 
+function supersededSurfaceRefresh(entry, next) {
+  const before = entry.sidebarCapture,
+    after = next.sidebarCapture;
+  if (
+    entry.sameOrigin !== true ||
+    next.sameOrigin !== true ||
+    entry.origin !== next.origin ||
+    entry.path !== "/api/session-navigation" ||
+    next.path !== entry.path ||
+    entry.method !== "POST" ||
+    next.method !== entry.method ||
+    entry.phase !== "failed" ||
+    entry.failure !== "net::ERR_ABORTED" ||
+    entry.completed !== false ||
+    [entry.status, entry.responseAt, entry.responseBodyBytes, entry.responseBodySha256, entry.sidebarProjection].some(
+      (value) => value !== undefined,
+    ) ||
+    next.phase !== "finished" ||
+    next.completed !== true ||
+    next.status !== 200 ||
+    next.failure ||
+    next.envelopeError ||
+    !next.sidebarProjection ||
+    !before ||
+    !after ||
+    before.role !== "navigation-refresh" ||
+    after.role !== before.role ||
+    before.referencesPresent !== true ||
+    after.referencesPresent !== true ||
+    before.cursorSha256 !== null ||
+    after.cursorSha256 !== null ||
+    !Number.isSafeInteger(before.generation) ||
+    before.generation < 1 ||
+    after.generation !== before.generation ||
+    !Number.isSafeInteger(before.sequence) ||
+    before.sequence < 1 ||
+    !Number.isSafeInteger(after.sequence) ||
+    after.sequence <= before.sequence ||
+    entry.navigation?.surface !== "web" ||
+    next.navigation?.surface !== "all" ||
+    ![null, "archived"].includes(entry.navigation.section) ||
+    entry.navigation.cursorSha256 !== null ||
+    JSON.stringify({ ...entry.navigation, surface: "all" }) !== JSON.stringify(next.navigation)
+  )
+    return false;
+  const sections = ["recent", "pinned", "groups", "archived"];
+  return [
+    [before, "web"],
+    [after, "all"],
+  ].every(
+    ([capture, surface]) =>
+      Array.isArray(capture.chains) &&
+      capture.chains.length === sections.length &&
+      capture.chains.every(
+        (chain, index) =>
+          chain.section === sections[index] &&
+          chain.chainSequence === capture.sequence &&
+          chain.keySha256 === sha256(JSON.stringify(["navigation", surface, chain.section])),
+      ),
+  );
+}
+
+function sameSidebarCapture(entry, later) {
+  const before = entry.sidebarCapture;
+  if (!before) return true;
+  const after = later.sidebarCapture;
+  if (!after || before.role !== after.role || before.referencesPresent !== after.referencesPresent) return false;
+  const bindings = (capture) =>
+    capture.chains.map(({ section, keySha256, chainSequence }) => [
+      section,
+      keySha256,
+      before.cursorSha256 ? chainSequence : null,
+    ]);
+  return JSON.stringify(bindings(before)) === JSON.stringify(bindings(after));
+}
+
 function supersededAbort(entry, later) {
+  if (later.some((row) => supersededSurfaceRefresh(entry, row))) return true;
   return (
     entry.navigation &&
     entry.phase === "failed" &&
@@ -823,6 +1041,7 @@ function supersededAbort(entry, later) {
     later.some(
       (row) =>
         matchesRequest(row, { path: entry.path, method: entry.method, navigation: entry.navigation }) &&
+        sameSidebarCapture(entry, row) &&
         JSON.stringify(row.navigation) === JSON.stringify(entry.navigation),
     )
   );
@@ -839,6 +1058,7 @@ export function requiredResponsesComplete(requests, requirements) {
         : entry.status >= 200 && entry.status < 300) &&
       (!requirement.expectedError || entry.expectedErrorMatched === true) &&
       (!requirement.captureNavigation || Boolean(entry.navigationPages)) &&
+      (!requirement.captureSidebar || Boolean(entry.sidebarProjection)) &&
       (!requirement.captureActionable || Boolean(entry.actionablePage));
     return (
       matching.length > 0 &&
@@ -870,7 +1090,7 @@ export function requiredResponsesComplete(requests, requirements) {
   });
 }
 
-export function observe(page, origin, requirements) {
+export function observe(page, origin, requirements, sidebar) {
   const requests = [];
   const errors = [];
   const byRequest = new Map();
@@ -883,6 +1103,114 @@ export function observe(page, origin, requirements) {
   let identityRead = 0;
   let active = false;
   let generation = 0;
+  let contextProjection;
+  let contextsReady = Promise.withResolvers();
+  let lastSidebar;
+  let sidebarVersion = 0;
+  let sidebarPhaseGeneration = 0;
+  const sidebarRecords = [];
+  let sidebarSequence = 0;
+  let contextSequence = 0;
+  let lastSidebarSequence = 0;
+  const sidebarEntries = new Map();
+  const sidebarRequests = new Map();
+  const activeChains = new Map();
+  const bindSidebarRequest = (entry, request) => {
+    const body = request.body;
+    const sequence = sidebarEntries.get(entry);
+    const read = { sequence, request, chains: new Map(), earlier: new Set(), done: Promise.withResolvers() };
+    let role = request.path === "/api/sessions" ? "legacy-sessions" : "legacy-contexts";
+    const selected = [];
+    if (request.path === "/api/session-navigation") {
+      const refresh = body.cursor === undefined && (!body.section || Object.hasOwn(body, "references"));
+      role = refresh ? "navigation-refresh" : "navigation-section";
+      for (const section of refresh ? ["recent", "pinned", "groups", "archived"] : [body.section])
+        selected.push([section, JSON.stringify(["navigation", body.surface ?? "all", section])]);
+    } else if (request.path === "/api/session-navigation/page") {
+      role = "session-page";
+      const filters = { ...entry.navigation };
+      delete filters.cursorSha256;
+      filters.surface ??= "all";
+      filters.children ??= false;
+      filters.actionable ??= false;
+      selected.push(["page", JSON.stringify([role, filters])]);
+    } else if (request.path === "/api/session-navigation/resolve") role = "resolve";
+    for (const [section, key] of selected) {
+      let chain = activeChains.get(key);
+      if (body.cursor === undefined) {
+        chain = { sequence, key, tokens: new Map(), reads: [] };
+        activeChains.set(key, chain);
+      }
+      read.chains.set(section, chain);
+      if (chain) {
+        for (const earlier of chain.reads) read.earlier.add(earlier.done.promise);
+        chain.reads.push(read);
+      }
+    }
+    sidebarVersion++;
+    entry.sidebarCapture = {
+      generation,
+      sequence,
+      role,
+      referencesPresent: Boolean(body && Object.hasOwn(body, "references")),
+      cursorSha256: body?.cursor === undefined ? null : sha256(body.cursor),
+      requestIntentSha256: sha256(JSON.stringify(request)),
+      chains: selected.map(([section, key]) => ({
+        section,
+        keySha256: sha256(key),
+        chainSequence: read.chains.get(section)?.sequence ?? null,
+      })),
+    };
+    return read;
+  };
+  const projectSidebar = async (entry, data, request, observedGeneration, read) => {
+    if (request.path === "/api/sessions" && !contextProjection) await contextsReady.promise;
+    const chain = read?.chains.get(request.path === "/api/session-navigation" ? request.body?.section : "page");
+    const token = request.body?.cursor === undefined ? null : sha256(request.body.cursor);
+    const preceding = () => {
+      const producer = token ? chain?.tokens.get(token) : null;
+      return producer?.sequence < read.sequence ? producer.projection : null;
+    };
+    if (token && !preceding()) await Promise.all(read.earlier);
+    if (generation !== observedGeneration) return;
+    const previous = preceding();
+    const projection = projectSidebarResponse({
+      data,
+      responseBody: { bytes: entry.responseBodyBytes, sha256: entry.responseBodySha256 },
+      request,
+      commonActor: sidebar.commonActor,
+      dynamicActor: sidebar.dynamicActor,
+      profile: sidebar.profile,
+      principalId: sidebar.principalId,
+      previous,
+      legacySurface: sidebar.surface,
+      contextProjection,
+    });
+    entry.sidebarProjection = retainSidebarProjection(projection, sidebar.retention, entry.responseAt);
+    sidebarRecords.push({ entry, projection, request, data, previous });
+    pruneSidebarDomRecords(
+      sidebarRecords,
+      new Map([...activeChains.values()].map((chain) => [sha256(chain.key), chain.sequence])),
+      sidebar.surface,
+    );
+    const sequence = sidebarEntries.get(entry);
+    if (request.path === "/api/contexts" && sequence > contextSequence) {
+      contextProjection = projection;
+      contextSequence = sequence;
+      contextsReady.resolve();
+    }
+    for (const [section, owned] of read?.chains ?? []) {
+      const next = projection.sections[section]?.nextCursorSha256;
+      if (owned && next && (!owned.tokens.has(next) || sequence < owned.tokens.get(next).sequence))
+        owned.tokens.set(next, { sequence, projection });
+    }
+    if (["/api/sessions", "/api/session-navigation"].includes(request.path) && sequence > lastSidebarSequence) {
+      lastSidebar = { projection, request, data, previous };
+      lastSidebarSequence = sequence;
+    }
+    sidebarVersion++;
+    notify();
+  };
   const currentErrors = () => [
     ...errors,
     ...requests.flatMap((entry, index) => {
@@ -897,7 +1225,7 @@ export function observe(page, origin, requirements) {
                 (later) =>
                   later.completed &&
                   later.status === 200 &&
-                  (later.actionablePage || later.navigationPages) &&
+                  (later.actionablePage || later.navigationPages || later.sidebarProjection) &&
                   !later.envelopeError,
               ),
           ))
@@ -906,6 +1234,27 @@ export function observe(page, origin, requirements) {
       return [{ type: "contract", path: entry.path, message: entry.envelopeError }];
     }),
   ];
+  const sidebarState = () => {
+    assert.ok(
+      identity === undefined || identity === sidebar.principalId,
+      "Sidebar viewer differs from the observed identity",
+    );
+    const entries = requests.filter((entry) => entry.sidebarCapture);
+    const succeeded = (entry) =>
+      entry.completed && entry.status === 200 && entry.sidebarProjection && !entry.envelopeError;
+    return {
+      records: sidebarRecords,
+      chains: new Map([...activeChains.values()].map((chain) => [sha256(chain.key), chain.sequence])),
+      generation: sidebarPhaseGeneration,
+      version: sidebarVersion,
+      errors: currentErrors(),
+      ready:
+        identity === sidebar.principalId &&
+        entries.every(
+          (entry, index) => succeeded(entry) || supersededAbort(entry, entries.slice(index + 1).filter(succeeded)),
+        ),
+    };
+  };
   page.on("pageerror", (error) => {
     if (active) errors.push({ type: "pageerror", ...plainError(error) });
   });
@@ -923,13 +1272,30 @@ export function observe(page, origin, requirements) {
       completed: false,
       phase: "started",
     };
+    if (sidebar) sidebarEntries.set(entry, ++sidebarSequence);
     if (entry.sameOrigin && entry.method === "POST" && entry.path.startsWith("/api/session-navigation")) {
       try {
         entry.navigation = navigationIntent(entry.path, request.postData());
+        if (sidebar)
+          sidebarRequests.set(
+            request,
+            bindSidebarRequest(entry, {
+              method: entry.method,
+              path: entry.path,
+              body: JSON.parse(request.postData()),
+            }),
+          );
       } catch {
         errors.push({ type: "contract", path: entry.path, message: "Invalid navigation request intent" });
       }
     }
+    if (
+      sidebar &&
+      entry.sameOrigin &&
+      entry.method === "GET" &&
+      ["/api/sessions", "/api/contexts"].includes(entry.path)
+    )
+      sidebarRequests.set(request, bindSidebarRequest(entry, { method: entry.method, path: entry.path }));
     byRequest.set(request, entry);
     requests.push(entry);
     notify();
@@ -940,6 +1306,7 @@ export function observe(page, origin, requirements) {
     entry.phase = "failed";
     entry.failedAt = Date.now();
     entry.failure = request.failure()?.errorText;
+    sidebarRequests.get(request)?.done.resolve();
     entry.timing = request.timing();
     if (entry.sameOrigin && entry.failure !== "net::ERR_ABORTED")
       errors.push({ type: "requestfailed", path: entry.path, message: entry.failure });
@@ -955,14 +1322,44 @@ export function observe(page, origin, requirements) {
     entry.responseAt = Date.now();
     entry.timing = request.timing();
     entry.fromServiceWorker = response.fromServiceWorker();
-    const boundedJson = async () => {
-      const raw = await response.body();
-      if (generation !== observedGeneration) return;
-      assert.ok(raw.length > 0 && raw.length <= 4194304, "Response body exceeds the observation bound");
-      entry.responseBodyBytes = raw.length;
-      entry.responseBodySha256 = sha256(raw);
-      return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(raw));
-    };
+    let bodyRead;
+    const boundedJson = () =>
+      (bodyRead ??= (async () => {
+        const raw = await response.body();
+        if (generation !== observedGeneration) return;
+        assert.ok(raw.length > 0 && raw.length <= 4194304, "Response body exceeds the observation bound");
+        entry.responseBodyBytes = raw.length;
+        entry.responseBodySha256 = sha256(raw);
+        return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(raw));
+      })());
+    const capturesSidebar =
+      sidebar &&
+      entry.sameOrigin &&
+      ((entry.method === "GET" && ["/api/sessions", "/api/contexts"].includes(entry.path)) ||
+        (entry.method === "POST" &&
+          ["/api/session-navigation", "/api/session-navigation/page", "/api/session-navigation/resolve"].includes(
+            entry.path,
+          )));
+    if (capturesSidebar) {
+      const read = sidebarRequests.get(request);
+      const job = boundedJson()
+        .then(async (data) => {
+          if (generation !== observedGeneration) return;
+          assert.equal(entry.status, 200, "Sidebar response failed");
+          assert.ok(read, "Sidebar request intent missing");
+          await projectSidebar(entry, data, read.request, observedGeneration, read);
+        })
+        .catch((error) => {
+          if (generation === observedGeneration)
+            entry.envelopeError = `Invalid sidebar response: ${plainError(error).message}`;
+        });
+      pending.add(job);
+      void job.finally(() => {
+        read?.done.resolve();
+        pending.delete(job);
+        notify();
+      });
+    }
     if (entry.sameOrigin && ["/me", "/admin/api/me"].includes(entry.path)) {
       identity = undefined;
       const observedIdentityRead = ++identityRead;
@@ -1106,6 +1503,18 @@ export function observe(page, origin, requirements) {
     void job.finally(() => pending.delete(job));
   });
   return {
+    sidebarSnapshot() {
+      let capture = null;
+      if (sidebar) {
+        const { generation, version, ready, errors } = sidebarState();
+        capture = structuredClone({ generation, version, ready, errors });
+      }
+      return { lastSidebar, contextProjection, version: sidebarVersion, capture };
+    },
+    async waitSidebar(page, options = {}) {
+      assert.ok(sidebar, "Dynamic sidebar capture is not configured");
+      return waitSidebarDom(page, sidebarState, sidebar, options);
+    },
     async waitResponses(timeoutMs, selected = requirements, previousRequests = []) {
       const complete = () => requiredResponsesComplete([...previousRequests, ...requests], selected);
       if (complete()) return;
@@ -1174,6 +1583,21 @@ export function observe(page, origin, requirements) {
       else identity = undefined;
       requirements = nextRequirements;
       generation++;
+      sidebarPhaseGeneration = generation;
+      contextsReady.resolve();
+      contextsReady = Promise.withResolvers();
+      if (!reuseIdentity) {
+        contextProjection = undefined;
+        lastSidebar = undefined;
+        contextSequence = 0;
+        lastSidebarSequence = 0;
+        activeChains.clear();
+        sidebarRecords.length = 0;
+      }
+      for (const read of sidebarRequests.values()) read.done.resolve();
+      sidebarEntries.clear();
+      sidebarRequests.clear();
+      sidebarVersion++;
       byRequest.clear();
       pending.clear();
       requests.length = 0;
@@ -1200,6 +1624,8 @@ export function observe(page, origin, requirements) {
       } finally {
         clearTimeout(timer);
         generation++;
+        contextsReady.resolve();
+        for (const read of sidebarRequests.values()) read.done.resolve();
         pending.clear();
       }
       const now = Date.now();
@@ -1210,7 +1636,7 @@ export function observe(page, origin, requirements) {
   };
 }
 
-async function sample(browser, config, scenario, cell, iteration, output) {
+async function sample(browser, config, scenario, cell, iteration, output, runtimeSidebar) {
   const result = {
     schemaVersion: 1,
     cellId: cell.id,
@@ -1240,6 +1666,20 @@ async function sample(browser, config, scenario, cell, iteration, output) {
         transport: sidebar.transport,
         sourceRevision: config.sourceRevision,
       });
+    }
+    let captureSidebar;
+    if (sidebar?.dynamic) {
+      assert.ok(runtimeSidebar, "Dynamic sidebar runtime input required");
+      result.dynamicSidebarSha256 = runtimeSidebar.binding.sha256;
+      captureSidebar = {
+        commonActor: runtimeSidebar.commonActors[scenario.principalId],
+        dynamicActor: runtimeSidebar.data.actors[scenario.principalId],
+        profile: runtimeSidebar.data.profile,
+        principalId: scenario.principalId,
+        surface: sidebar.surface,
+        retention: runtimeSidebar.retention,
+      };
+      assert.ok(captureSidebar.commonActor && captureSidebar.dynamicActor, "Runtime sidebar actor missing");
     }
     const storageState =
       config.authStates?.[scenario.principalId] ?? (scenario.admin ? config.adminAuthState : undefined);
@@ -1294,27 +1734,41 @@ async function sample(browser, config, scenario, cell, iteration, output) {
     );
     const common = sidebar ? [{ path: "/me" }, ...sidebarRequirements(sidebar)] : [];
     const preparationRequirements = [...(scenario.kind === "web-overlay" ? [] : scenario.requiredResponses), ...common];
-    observer = observe(page, config.baseUrl, preparationRequirements);
+    observer = observe(page, config.baseUrl, preparationRequirements, captureSidebar);
     observer.start();
     const preparation = await prepare(page, scenario, cell.cache, config.baseUrl, observer, config.timeoutMs ?? 15000);
     if (preparation.prepared) {
       await observer.waitResponses(config.timeoutMs ?? 15_000);
-      const sidebarState = sidebar
-        ? await waitSidebarReady(page, sidebar, {
-            limit: preparation.limit,
-            retainedIds: sidebarRetainedIds(scenario, true),
-          })
-        : undefined;
       const actionable = await observer.waitActionable(
         page,
         actionableTargets(scenario, true),
         [],
         config.timeoutMs ?? 15000,
       );
-      result.preparation = { ...(await observer.finish(config.timeoutMs ?? 15000)), sidebar: sidebarState, actionable };
+      const sidebarState = sidebar
+        ? await waitScenarioSidebar(page, scenario, observer, {
+            limit: preparation.limit,
+            retainedIds: sidebarRetainedIds(scenario, true),
+          })
+        : undefined;
+      result.preparation = {
+        ...(await observer.finish(config.timeoutMs ?? 15000)),
+        finishedAt: Date.now(),
+        sidebar: sidebarState,
+        actionable,
+      };
       assert.equal(result.preparation.identity, scenario.principalId, "Preparation authenticated the wrong principal");
       assert.deepEqual(result.preparation.errors, [], "Browser/request errors occurred during preparation");
       if (sidebar) validateSidebarEvidence(result.preparation, sidebar);
+      if (sidebar?.dynamic) {
+        validateSidebarSettled(observer, sidebarState);
+        validateSidebarDom(sidebarState, result.preparation.requests, {
+          finishedAt: result.preparation.finishedAt,
+          principalId: scenario.principalId,
+          profile: captureSidebar.profile,
+          surface: sidebar.surface,
+        });
+      }
     }
     const interactive = INTERACTIVE_KINDS.has(scenario.kind);
     let cursorSha256;
@@ -1342,11 +1796,6 @@ async function sample(browser, config, scenario, cell, iteration, output) {
     await action(page, scenario, cell.cache, config.baseUrl);
     await observer.waitResponses(config.timeoutMs ?? 15_000);
     await waitReady(page, scenario.ready);
-    if (sidebar)
-      result.sidebar = await waitSidebarReady(page, sidebar, {
-        limit: interactive ? preparation.limit + (scenario.kind === "sidebar-more" ? 50 : 0) : 50,
-        retainedIds: sidebarRetainedIds(scenario),
-      });
     await observer.waitResponses(config.timeoutMs ?? 15_000);
     result.actionable = await observer.waitActionable(
       page,
@@ -1354,6 +1803,11 @@ async function sample(browser, config, scenario, cell, iteration, output) {
       interactive ? result.preparation.requests : [],
       config.timeoutMs ?? 15000,
     );
+    if (sidebar)
+      result.sidebar = await waitScenarioSidebar(page, scenario, observer, {
+        limit: interactive ? preparation.limit + (scenario.kind === "sidebar-more" ? 50 : 0) : 50,
+        retainedIds: sidebarRetainedIds(scenario),
+      });
     result.durationMs = performance.now() - measurementStart;
     result.finishedAt = Date.now();
     result.readiness = { passed: true, completedAt: result.finishedAt, assertions: scenario.ready };
@@ -1381,6 +1835,15 @@ async function sample(browser, config, scenario, cell, iteration, output) {
     assert.equal(evidence.identity, scenario.principalId, "Browser is authenticated as the wrong fixture principal");
     assert.deepEqual(evidence.errors, [], "Browser/request errors occurred during measurement");
     if (sidebar) validateSidebarEvidence(evidence, sidebar, interactive ? result.preparation.requests : []);
+    if (sidebar?.dynamic) {
+      validateSidebarSettled(observer, result.sidebar);
+      validateSidebarDom(result.sidebar, [...(interactive ? result.preparation.requests : []), ...evidence.requests], {
+        finishedAt: result.finishedAt,
+        principalId: scenario.principalId,
+        profile: captureSidebar.profile,
+        surface: sidebar.surface,
+      });
+    }
     const actionable = actionableRequirements(actionableTargets(scenario));
     const actionableRequests = [...(interactive ? result.preparation.requests : []), ...evidence.requests];
     assert.ok(requiredResponsesComplete(actionableRequests, actionable), "Actionable requests changed after readiness");
@@ -1459,6 +1922,20 @@ export async function run(configPath, listOnly = false) {
     console.log(JSON.stringify(selected, null, 2));
     return;
   }
+  if (catalog.some((scenario) => scenario.sidebarReadiness?.dynamic))
+    assert.ok(
+      typeof config.dynamicSidebarPath === "string" && config.dynamicSidebarPath,
+      "Dynamic sidebar runtime path required",
+    );
+  const runtimeSidebar = catalog.some((scenario) => scenario.sidebarReadiness?.dynamic)
+    ? readDynamicSidebar(
+        fromConfig(config.dynamicSidebarPath),
+        fixtureBytes,
+        config.sidebarProfile,
+        config.loadCondition,
+        fromConfig(config.fixturePath),
+      )
+    : undefined;
   for (const key of Object.keys(config.authStates ?? {})) config.authStates[key] = fromConfig(config.authStates[key]);
   if (config.adminAuthState) config.adminAuthState = fromConfig(config.adminAuthState);
   if (config.localAuthPrincipal)
@@ -1485,6 +1962,7 @@ export async function run(configPath, listOnly = false) {
     fixtureId: fixture.fixtureId,
     sourceRevision: config.sourceRevision,
     sidebarProfile: config.sidebarProfile,
+    ...(runtimeSidebar ? { dynamicSidebar: runtimeSidebar.binding } : {}),
     profileSha256: profileHash,
     fixtureSha256: sha256(fixtureBytes),
     catalogSha256: sha256(readFileSync(resolve(dirname(sourcePath), "catalog.mjs"))),
@@ -1518,13 +1996,17 @@ export async function run(configPath, listOnly = false) {
   });
   runState.browserVersion = browser.version();
   const samples = [];
+  let sampleBytes = 0;
   try {
     for (let iteration = 0; iteration < config.samples; iteration++) {
       for (const cell of shuffle([...cells], (config.orderSeed ?? 7349) + iteration)) {
         const scenario = selected.find((entry) => entry.id === cell.scenarioId);
-        const observation = await sample(browser, config, scenario, cell, iteration, output);
+        const observation = await sample(browser, config, scenario, cell, iteration, output, runtimeSidebar);
         samples.push(observation);
-        appendFileSync(resolve(output, "samples.jsonl"), JSON.stringify(observation) + "\n");
+        const line = JSON.stringify(observation) + "\n";
+        sampleBytes += Buffer.byteLength(line);
+        assert.ok(sampleBytes <= 134217728, "Complete samples exceed the existing native output reader bound");
+        appendFileSync(resolve(output, "samples.jsonl"), line);
         console.log(
           JSON.stringify({
             cell: cell.id,

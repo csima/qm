@@ -1,3 +1,14 @@
+export const INTERACTIVE_KINDS = new Set([
+  "earlier",
+  "sidebar-switch",
+  "sidebar-more",
+  "admin-next",
+  "web-overlay",
+  "hidden-tab",
+  "attachment",
+  "disabled-crons",
+  "memory-facts",
+]);
 import assert from "node:assert/strict";
 
 export const ADMIN_VIEWS = [
@@ -165,6 +176,7 @@ export function validateSidebarProfile(profile) {
 }
 
 export function buildCatalog(fixture, sourceRevision) {
+  const dynamicSidebar = fixture.viewReadinessBySource !== undefined;
   if (fixture.viewReadinessBySource !== undefined) {
     const records = fixture.viewReadinessBySource;
     assert.ok(Array.isArray(records) && records.length === 2, "Both campaign source profiles are required");
@@ -491,6 +503,7 @@ export function buildCatalog(fixture, sourceRevision) {
               transport: sidebar.transport,
               sourceRevision: sidebar.sourceRevision,
               ...actor,
+              ...(dynamicSidebar ? { dynamic: true, surface: scenario.id === "web.chat.slack" ? "all" : "web" } : {}),
             },
           }
         : {}),
@@ -503,10 +516,10 @@ export function buildCatalog(fixture, sourceRevision) {
           .flatMap((ready) => ready.missing ?? []),
         ...(!scenario.principalId ? ["principalId"] : []),
         ...(!scenario.admin && !sidebarReady ? ["browser.sidebarReadiness"] : []),
-        ...(!scenario.admin && sidebarReady && actor.groups.dynamicOrderScopes.length
+        ...(!dynamicSidebar && !scenario.admin && sidebarReady && actor.groups.dynamicOrderScopes.length
           ? ["browser.sidebarReadiness.dynamicOrderScopes"]
           : []),
-        ...(scenario.id === "web.chat.slack"
+        ...(!dynamicSidebar && scenario.id === "web.chat.slack"
           ? ["browser.sidebarReadiness: dynamic all-surface oracle unresolved"]
           : []),
       ],
