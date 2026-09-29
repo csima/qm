@@ -437,6 +437,7 @@ test("admin history uses independent scope cohorts and derives seeded search and
     fixtureId: "fixture",
     orgScopeId: "org:fixture",
     adminPrincipalId: "actor",
+    cases: { short: { principalId: "actor" } },
     cohorts: { max: { scopeId: "personal:web-actor" } },
     adminHistoryCohorts: {
       max: { scopeId: "channel:admin-history", conversationCount: 61, rootCase: { sessionId: "first" } },
@@ -564,6 +565,52 @@ test("admin history uses independent scope cohorts and derives seeded search and
     change(invalid.rows.find((row) => row.path === `${path}0&category=conversation`).data);
     assert.equal(deriveViewFixtures(fixture, invalid).views["history.max"], undefined);
   }
+});
+
+test("web view evidence belongs to its actual actor and never falls back to admin", () => {
+  const fixture = {
+    fixtureId: "distinct-actors",
+    adminPrincipalId: "admin",
+    orgScopeId: "org:test",
+    cases: { short: { principalId: "web" } },
+  };
+  const rows = [
+    {
+      path: "/admin/api/me",
+      principalId: "admin",
+      status: 200,
+      data: { principal: "admin", scopeId: "org:test", isAdmin: true },
+    },
+    { path: "/admin/api/scopes", principalId: "admin", status: 200, data: { scopeId: "org:test", scopes: [] } },
+  ];
+  for (const principalId of ["admin", "web"]) {
+    for (const [path, data] of [
+      [
+        "/me",
+        {
+          user: principalId,
+          displayName: principalId,
+          org: "test",
+          permissions: principalId === "admin" ? ["admin", "loops"] : [],
+        },
+      ],
+      ["/api/user-model-auth/status", { account: "company" }],
+      ["/api/search?q=performance", { hits: [{ surface: "web", snippet: `${principalId} conversation` }] }],
+      [
+        "/api/resources/search?q=performance",
+        { hits: [{ title: `${principalId} skill`, snippet: `QM performance ${principalId}` }] },
+      ],
+    ])
+      rows.push({ path, principalId, status: 200, data });
+  }
+  const derive = (rows) => deriveViewFixtures(fixture, { fixtureId: fixture.fixtureId, rows });
+  const result = derive(rows);
+  assert.deepEqual(result.views["web.settings"]?.expectedText, ["web · test"]);
+  assert.ok(!result.views["web.browse"].expectedText.includes("Admin"));
+  assert.ok(!result.views["web.browse"].expectedText.includes("Loops"));
+  assert.deepEqual(result.views["web.search"].expectedText, ["web conversation", "web skill", "QM performance web"]);
+  const missing = derive(rows.filter((row) => row.principalId !== "web"));
+  for (const view of ["web.settings", "web.browse", "web.search"]) assert.equal(missing.views[view], undefined);
 });
 
 test("multiview fixture represents twelve tabs across four visible panes", () => {

@@ -526,17 +526,22 @@ export function deriveViewFixtures(fixture, observations, options = {}) {
         { rows: { selector: ".spend-models tbody tr", minimum: result.models.length } },
       );
     });
+  const webPrincipal = fixture.cases?.short?.principalId;
+  const webRead = (path) => {
+    assert.ok(webPrincipal, "Web surface fixture has no principal");
+    return read(path, webPrincipal);
+  };
   attempt("web.settings", () => {
-    const me = read("/me");
+    const me = webRead("/me");
     assert.equal(me.user, fixture.cases.short.principalId);
-    const result = read("/api/user-model-auth/status");
+    const result = webRead("/api/user-model-auth/status");
     assert.ok(["company", "anthropic", "openai"].includes(result.account));
     text("web.settings", `${me.displayName?.trim() || me.user} · ${me.org}`, {
       controlSelector: '[aria-label="AI access"] button[aria-pressed="true"]',
     });
   });
   attempt("web.browse", () => {
-    const me = read("/me");
+    const me = webRead("/me");
     const labels = ["Projects", "Files", "Crons", "Webhooks", "Keychain", "Apps", "Memory", "Skills"];
     if (me.permissions.includes("loops")) labels.push("Loops");
     if (me.permissions.includes("admin")) labels.push("Admin");
@@ -546,8 +551,8 @@ export function deriveViewFixtures(fixture, observations, options = {}) {
     });
   });
   attempt("web.search", () => {
-    const chats = read("/api/search?q=performance");
-    const resources = read("/api/resources/search?q=performance");
+    const chats = webRead("/api/search?q=performance");
+    const resources = webRead("/api/resources/search?q=performance");
     assert.deepEqual(resources.failed ?? [], [], "Resource search returned partial results");
     const hit = resources.hits?.find((row) => row.snippet?.includes("QM performance"));
     const chat = chats.hits?.find((row) => row.surface === "web" && row.snippet?.trim());
@@ -557,11 +562,6 @@ export function deriveViewFixtures(fixture, observations, options = {}) {
       rows: { selector: ".chat-search-row", minimum: 2 },
     });
   });
-  const webPrincipal = fixture.cases?.short?.principalId;
-  const webRead = (path) => {
-    assert.ok(webPrincipal, "Web surface fixture has no principal");
-    return read(path, webPrincipal);
-  };
   const webList = (name, selector, items, expectedText, rowSelector, controlSelector) => {
     assert.ok(Array.isArray(items) && items.length > 0, `${name} needs populated API-observed fixture rows`);
     text(name, expectedText, {
