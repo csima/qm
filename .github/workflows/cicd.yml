@@ -107,14 +107,17 @@ jobs:
           npm run build:connector-sdk
           npm ci --prefix test/performance
           npm run install:browser --prefix test/performance
+      - name: Allow the installed Chromium sandbox
+        run: |
+          QM_CHROMIUM_PATH=$(node -p "require('./test/performance/node_modules/playwright').chromium.executablePath()")
+          test -x "$QM_CHROMIUM_PATH"
+          [[ "$QM_CHROMIUM_PATH" =~ ^/[-a-zA-Z0-9_./]+$ ]]
+          printf 'abi <abi/4.0>,\ninclude <tunables/global>\nprofile qm-lifecycle "%s" flags=(unconfined) {\n  userns,\n}\n' "$QM_CHROMIUM_PATH" | sudo tee /etc/apparmor.d/qm-lifecycle
+          sudo apparmor_parser -r /etc/apparmor.d/qm-lifecycle
       - name: Verify harness, fixtures and workload protocols
         env:
           QM_PERF_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/qm_perf_test
-          CHROME_DEVEL_SANDBOX: /opt/google/chrome/chrome-sandbox
-        run: |
-          test -u "$CHROME_DEVEL_SANDBOX"
-          test "$(stat -c %u "$CHROME_DEVEL_SANDBOX")" = 0
-          npm test --prefix test/performance
+        run: npm test --prefix test/performance
 
   cli:
     name: CLI
