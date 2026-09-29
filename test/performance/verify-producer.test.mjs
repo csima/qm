@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { validateQualification, verifyCampaign } from "./verify.mjs";
+import { validateQualification, verifyCampaign, verifyRun } from "./verify.mjs";
 import { buildCatalog, cellsFor } from "./catalog.mjs";
 
 const run = {
@@ -79,7 +79,7 @@ test("qualification checks the complete catalog independently of a run's declare
   assert.equal(missing(requiredCells), false);
 });
 
-test("campaign retains measured baseline failures without accepting missing evidence or candidate failures", () => {
+test("campaign retains baseline failures and comparisons without qualifying an unprepared fixture", () => {
   const features = Object.fromEntries(
     ["modelProvider", "slack", "composio", "loops", "inbox"].map((key) => [
       key,
@@ -156,7 +156,17 @@ test("campaign retains measured baseline failures without accepting missing evid
   const baseline = make("before", 1400);
   const candidate = [make("after-one", 600), make("after-two", 600)];
   const check = () => verifyCampaign({ baseline: [baseline], candidate }, ["peak"]);
-  assert.equal(check().qualified, true);
+  const checked = (item) =>
+    verifyRun(item.run, item.samples, item.fixture, item.envelope, item.workload, item.producer);
+  const candidateResult = checked(candidate[0]);
+  assert.ok(Object.values(candidateResult.cells).every((cell) => cell.pass));
+  assert.equal(candidateResult.qualified, false);
+  assert.ok(candidateResult.qualificationReasons.includes("Prepared source pair is required for qualification"));
+  assert.ok(candidateResult.qualificationReasons.includes("Prepared source catalog is missing readiness data"));
+  assert.ok(
+    candidateResult.qualificationReasons.includes("Prepared source catalog must match the recorded run catalog"),
+  );
+  assert.equal(check().qualified, false);
   baseline.samples[0] = {
     ...baseline.samples[0],
     status: "failed",
@@ -165,7 +175,7 @@ test("campaign retains measured baseline failures without accepting missing evid
     errors: [{ type: "timeout" }],
   };
   const result = check();
-  assert.equal(result.qualified, true, result.reasons.join("\n"));
+  assert.equal(result.qualified, false);
   assert.equal(result.comparison[0].baselineFailures, 1);
   assert.equal(result.comparison[0].baselineMedianMs, null);
   assert.equal(result.comparison[0].baselineP95Ms, null);
@@ -177,9 +187,11 @@ test("campaign retains measured baseline failures without accepting missing evid
     baseline.samples[0] = original;
   }
   const missing = baseline.samples.pop();
+  assert.equal(checked(baseline).cells[missing.cellId].count, 30);
   assert.equal(check().qualified, false);
   baseline.samples.push(missing);
   candidate[0].samples[0].status = "failed";
+  assert.equal(checked(candidate[0]).cells[candidate[0].samples[0].cellId].failures, 1);
   assert.equal(check().qualified, false);
   candidate[0].samples[0].status = "pass";
   const extra = make("extra-condition", 600);

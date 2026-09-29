@@ -2,17 +2,15 @@ import assert from "node:assert/strict";
 import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { buildCatalog, CALENDAR_EXCLUSION } from "./catalog.mjs";
+import { buildCatalog, CALENDAR_EXCLUSION, validateSidebarProfile } from "./catalog.mjs";
 import { sha256 } from "./verify.mjs";
 
 const compareIdentity = (a, b) => (a < b ? -1 : Number(a !== b));
 
 export function deriveSidebarReadiness(fixture, observations, profile) {
-  assert.deepEqual(Object.keys(profile ?? {}).sort(), ["sourceRevision", "transport"]);
-  assert.ok(["legacy-get", "navigation-post"].includes(profile.transport));
-  assert.match(profile.sourceRevision, /^[a-f0-9]{40}$/);
+  validateSidebarProfile(profile);
   assert.equal(observations.fixtureId, fixture.fixtureId);
-  const catalog = buildCatalog(fixture).filter((row) => !row.admin);
+  const catalog = buildCatalog(fixture, profile.sourceRevision).filter((row) => !row.admin);
   const actors = Object.create(null);
   for (const principalId of new Set(catalog.map((row) => row.principalId).filter(Boolean))) {
     const evidence = {};
@@ -216,6 +214,37 @@ export function deriveSidebarReadiness(fixture, observations, profile) {
 export function deriveViewFixtures(fixture, observations, options = {}) {
   assert.equal(observations.fixtureId, fixture.fixtureId, "View evidence belongs to another fixture");
   const output = structuredClone(fixture);
+  delete output.viewReadinessBySource;
+  if (options.sidebarProfiles !== undefined) {
+    assert.deepEqual(Object.keys(options), ["sidebarProfiles"]);
+    assert.ok(Array.isArray(options.sidebarProfiles) && options.sidebarProfiles.length === 2);
+    options.sidebarProfiles.forEach(validateSidebarProfile);
+    assert.equal(new Set(options.sidebarProfiles.map((profile) => profile.sourceRevision)).size, 2);
+    assert.equal(new Set(options.sidebarProfiles.map((profile) => profile.transport)).size, 2);
+    const derived = options.sidebarProfiles.map((profile) =>
+      deriveViewFixtures(output, observations, { sidebarProfile: profile }),
+    );
+    const common = structuredClone(output);
+    common.browser = structuredClone(derived[0].browser);
+    common.views = structuredClone(derived[0].views);
+    delete common.browser.sidebarReadiness;
+    delete common.browser.rootSidebarCases;
+    common.viewReadinessBySource = options.sidebarProfiles.map((profile, index) => {
+      const selected = derived[index];
+      assert.deepEqual(selected.browser.features, common.browser.features);
+      return {
+        profile: structuredClone(profile),
+        browser: {
+          rootSidebarCases: selected.browser.rootSidebarCases,
+          sidebarReadiness: selected.browser.sidebarReadiness ?? null,
+        },
+        views: selected.views,
+        sidebarPagination: selected.sidebarPagination ?? null,
+        viewReadinessEvidence: selected.viewReadinessEvidence,
+      };
+    });
+    return common;
+  }
   output.browser ??= {};
   delete output.browser.sidebarReadiness;
   const views = (output.views = {});
@@ -888,22 +917,26 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const [fixturePath, observationsPath, outputPath, profilePath] = process.argv.slice(2);
   assert.ok(
     fixturePath && observationsPath && outputPath,
-    "Usage: fixture-views.mjs FIXTURE OBSERVATIONS OUTPUT [SIDEBAR_PROFILE]",
+    "Usage: fixture-views.mjs FIXTURE OBSERVATIONS OUTPUT [SIDEBAR_PROFILE_OR_PAIR]",
   );
   assert.notEqual(resolve(fixturePath), resolve(outputPath), "Preserve the original fixture manifest");
+  const profile = profilePath ? JSON.parse(readFileSync(profilePath, "utf8")) : undefined;
   const output = deriveViewFixtures(
     JSON.parse(readFileSync(fixturePath, "utf8")),
     JSON.parse(readFileSync(observationsPath, "utf8")),
-    profilePath ? { sidebarProfile: JSON.parse(readFileSync(profilePath, "utf8")) } : {},
+    Array.isArray(profile) ? { sidebarProfiles: profile } : { sidebarProfile: profile },
   );
   writeFileSync(outputPath, JSON.stringify(output, null, 2) + "\n", { flag: "wx" });
   console.log(
     JSON.stringify(
       {
         outputPath,
-        views: Object.keys(output.views).length,
-        missing: output.viewReadinessEvidence.missing,
-        gaps: output.viewReadinessEvidence.gaps,
+        sources: (output.viewReadinessBySource ?? [output]).map((record) => ({
+          profile: record.profile ?? profile,
+          views: Object.keys(record.views).length,
+          missing: record.viewReadinessEvidence.missing,
+          gaps: record.viewReadinessEvidence.gaps,
+        })),
       },
       null,
       2,

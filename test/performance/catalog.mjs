@@ -1,3 +1,5 @@
+import assert from "node:assert/strict";
+
 export const ADMIN_VIEWS = [
   "governance",
   "models",
@@ -156,7 +158,50 @@ export function multiviewState(sessions, updatedAt, visibleGroups = 4) {
   };
 }
 
-export function buildCatalog(fixture) {
+export function validateSidebarProfile(profile) {
+  assert.deepEqual(Object.keys(profile ?? {}).sort(), ["sourceRevision", "transport"]);
+  assert.match(profile.sourceRevision, /^[a-f0-9]{40}$/);
+  assert.ok(["legacy-get", "navigation-post"].includes(profile.transport));
+}
+
+export function buildCatalog(fixture, sourceRevision) {
+  if (fixture.viewReadinessBySource !== undefined) {
+    const records = fixture.viewReadinessBySource;
+    assert.ok(Array.isArray(records) && records.length === 2, "Both campaign source profiles are required");
+    for (const record of records) {
+      assert.deepEqual(Object.keys(record).sort(), [
+        "browser",
+        "profile",
+        "sidebarPagination",
+        "viewReadinessEvidence",
+        "views",
+      ]);
+      validateSidebarProfile(record.profile);
+      assert.deepEqual(Object.keys(record.browser).sort(), ["rootSidebarCases", "sidebarReadiness"]);
+      if (record.browser?.sidebarReadiness) {
+        assert.equal(record.browser.sidebarReadiness.sourceRevision, record.profile.sourceRevision);
+        assert.equal(record.browser.sidebarReadiness.transport, record.profile.transport);
+      }
+      for (const view of ["web.search", "web.browse"])
+        assert.equal(record.views?.[view]?.query, fixture.views?.[view]?.query, "Source profile changed query input");
+      if (record.sidebarPagination)
+        assert.equal(
+          record.sidebarPagination.principalId,
+          fixture.adminPrincipalId ?? fixture.browser?.adminPrincipalId,
+          "Source profile changed pagination principal",
+        );
+    }
+    assert.equal(new Set(records.map((record) => record.profile.sourceRevision)).size, 2);
+    assert.equal(new Set(records.map((record) => record.profile.transport)).size, 2);
+    const selected = records.find((record) => record.profile.sourceRevision === sourceRevision);
+    assert.ok(selected, "Select an exact prepared campaign source revision");
+    fixture = {
+      ...fixture,
+      browser: { ...fixture.browser, ...selected.browser },
+      views: selected.views,
+      sidebarPagination: selected.sidebarPagination,
+    };
+  }
   const cases = fixture.cases ?? {};
   const cohorts = fixture.cohorts ?? fixture.principalCohorts ?? {};
   const adminHistoryCohorts = fixture.adminHistoryCohorts ?? cohorts;

@@ -84,7 +84,29 @@ export function validateQualification(run, fixture, envelope, workload, producer
   require(run.samplesPerCell <= 1000, "At most 1000 observations per cell are supported");
   require(run.thresholdMs === 1000, "Qualification requires the fixed 1000 ms threshold");
   require(!run.filtered, "Filtered catalogs cannot qualify");
-  const requiredCells = cellsFor(buildCatalog(fixture), run.loadCondition).map((cell) => cell.id);
+  require(Array.isArray(fixture.viewReadinessBySource), "Prepared source pair is required for qualification");
+  let catalog = [];
+  try {
+    catalog = buildCatalog(fixture, run.sourceRevision);
+    const profile = fixture.viewReadinessBySource?.find(
+      (record) => record.profile.sourceRevision === run.sourceRevision,
+    )?.profile;
+    require(profile &&
+      Object.keys(run.sidebarProfile ?? {})
+        .sort()
+        .join(",") === "sourceRevision,transport" &&
+      run.sidebarProfile?.sourceRevision === profile.sourceRevision &&
+      run.sidebarProfile?.transport ===
+        profile.transport, "Prepared source profile must match the recorded run profile");
+    require(JSON.stringify(run.catalog) ===
+      JSON.stringify(catalog), "Prepared source catalog must match the recorded run catalog");
+    require(catalog.every(
+      (scenario) => scenario.missing.length === 0,
+    ), "Prepared source catalog is missing readiness data");
+  } catch {
+    require(false, "Prepared source expectations must select one exact valid revision");
+  }
+  const requiredCells = cellsFor(catalog, run.loadCondition).map((cell) => cell.id);
   require(new Set(run.requiredCells ?? []).size === requiredCells.length &&
     requiredCells.every((cell) =>
       run.requiredCells?.includes(cell),

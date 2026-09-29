@@ -891,6 +891,121 @@ function sidebarOracleFixture() {
 }
 const sidebarProfile = (transport) => ({ transport, sourceRevision: "a".repeat(40) });
 
+test("one campaign fixture selects exact source expectations without changing dataset bytes or catalog coverage", () => {
+  const { fixture, observations, sessions } = sidebarOracleFixture();
+  fixture.browser = { visibleGroups: 4, maxPanels: 12, features: { loops: { enabled: true } } };
+  observations.rows.find((row) => row.path === "/me" && row.principalId === "actor-a").data.permissions = [];
+  const recent = sessions["actor-a"].splice(0, 112).reverse();
+  recent.forEach((row) => (row.lastActivityAt = 1000));
+  sessions["actor-a"].unshift(...recent);
+  fixture.sidebarPagination.sessionId = "actor-a-000";
+  observations.rows.push(
+    {
+      path: "/admin/api/me",
+      principalId: "actor-a",
+      status: 200,
+      data: { principal: "actor-a", scopeId: fixture.orgScopeId, isAdmin: true },
+    },
+    {
+      path: "/admin/api/scopes",
+      principalId: "actor-a",
+      status: 200,
+      data: { scopeId: fixture.orgScopeId, scopes: [] },
+    },
+  );
+  const profiles = [sidebarProfile("legacy-get"), { transport: "navigation-post", sourceRevision: "b".repeat(40) }];
+  const original = JSON.stringify(fixture);
+  const common = deriveViewFixtures(fixture, observations, { sidebarProfiles: profiles });
+  const bytes = JSON.stringify(common);
+  assert.equal(common.viewReadinessBySource.length, 2);
+  assert.equal(common.browser.features.loops.enabled, false);
+  assert.equal(fixture.browser.features.loops.enabled, true);
+  const catalogs = profiles.map((profile) => buildCatalog(common, profile.sourceRevision));
+  for (const [index, profile] of profiles.entries()) {
+    const single = deriveViewFixtures(fixture, observations, { sidebarProfile: profile });
+    assert.deepEqual(catalogs[index], buildCatalog(single));
+    assert.equal(catalogs[index].length, 60);
+    assert.equal(cellsFor(catalogs[index], "normal").length, 109);
+    assert.ok(
+      catalogs[index]
+        .filter((row) => !row.admin)
+        .every((row) => row.sidebarReadiness.sourceRevision === profile.sourceRevision),
+    );
+    assert.deepEqual(deriveSidebarReadiness(common, observations, profile), single.browser.sidebarReadiness);
+    const recorded = {
+      ...run,
+      sourceRevision: profile.sourceRevision,
+      sidebarProfile: profile,
+      catalog: catalogs[index],
+    };
+    const sourceReasons = (value) =>
+      validateQualification(value, common).filter(
+        (reason) =>
+          reason.startsWith("Prepared source") && reason !== "Prepared source catalog is missing readiness data",
+      );
+    assert.deepEqual(sourceReasons(recorded), []);
+    assert.ok(validateQualification(recorded, common).includes("Prepared source catalog is missing readiness data"));
+    const omitted = structuredClone(common);
+    delete omitted.viewReadinessBySource;
+    assert.ok(validateQualification(recorded, omitted).includes("Prepared source pair is required for qualification"));
+    for (const wrong of [
+      { ...recorded, sourceRevision: "c".repeat(40) },
+      { ...recorded, sidebarProfile: profiles[1 - index] },
+      { ...recorded, catalog: catalogs[1 - index] },
+    ])
+      assert.ok(sourceReasons(wrong).length);
+  }
+  assert.notEqual(
+    catalogs[0].find((row) => row.id === "web.root.median").ready.visible,
+    catalogs[1].find((row) => row.id === "web.root.median").ready.visible,
+  );
+  assert.notEqual(
+    catalogs[0].find((row) => row.id === "web.sidebar.more").ready.visible,
+    catalogs[1].find((row) => row.id === "web.sidebar.more").ready.visible,
+  );
+  assert.equal(JSON.stringify(fixture), original);
+  assert.equal(JSON.stringify(common), bytes);
+  assert.deepEqual(deriveViewFixtures(common, observations, { sidebarProfiles: profiles }), common);
+  for (const field of ["visibleGroups", "maxPanels", "features", "multiview", "adminPrincipalId"]) {
+    const changed = structuredClone(common);
+    changed.viewReadinessBySource[1].browser[field] = field === "features" ? { loops: { enabled: true } } : 2;
+    assert.throws(() => buildCatalog(changed, profiles[1].sourceRevision));
+  }
+  for (const view of ["web.search", "web.browse"]) {
+    const changed = structuredClone(common);
+    changed.viewReadinessBySource[1].views[view] = { query: "different workload" };
+    for (const profile of profiles) assert.throws(() => buildCatalog(changed, profile.sourceRevision));
+  }
+  const changedActor = structuredClone(common);
+  changedActor.viewReadinessBySource[1].sidebarPagination.principalId = "actor-b";
+  for (const profile of profiles) assert.throws(() => buildCatalog(changedActor, profile.sourceRevision));
+  for (const revision of [undefined, "HEAD", "c".repeat(40)]) assert.throws(() => buildCatalog(common, revision));
+  const duplicate = structuredClone(common);
+  duplicate.viewReadinessBySource.push(duplicate.viewReadinessBySource[0]);
+  assert.throws(() => buildCatalog(duplicate, profiles[0].sourceRevision));
+  const stale = structuredClone(common);
+  stale.viewReadinessBySource[1].browser.sidebarReadiness.sourceRevision = profiles[0].sourceRevision;
+  assert.throws(() => buildCatalog(stale, profiles[1].sourceRevision));
+  const partial = deriveViewFixtures(
+    common,
+    { ...observations, rows: observations.rows.filter((row) => row.principalId !== "actor-extra") },
+    { sidebarProfiles: profiles },
+  );
+  for (const profile of profiles)
+    assert.ok(
+      buildCatalog(partial, profile.sourceRevision)
+        .filter((row) => !row.admin)
+        .every((row) => row.missing.includes("browser.sidebarReadiness")),
+    );
+  for (const sidebarProfiles of [
+    [],
+    [profiles[0]],
+    [profiles[0], profiles[0]],
+    [{ ...profiles[0], sourceRevision: "HEAD" }, profiles[1]],
+  ])
+    assert.throws(() => deriveViewFixtures(fixture, observations, { sidebarProfiles }));
+});
+
 test("sidebar oracle derives all actors, full recent prefixes, profile-specific groups/pins and exact continuations", () => {
   const { fixture, observations } = sidebarOracleFixture();
   for (const transport of ["legacy-get", "navigation-post"]) {
