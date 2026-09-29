@@ -2501,6 +2501,7 @@ export function createChatSurface(
     subagentUi.page = null;
     subagentUi.legacy = false;
     subagentUi.notice = "";
+    subagentUi.ticking = false;
     subagentUi.approvalsKey = "";
     subagentUi.approvals.clear();
     stopSubagentPeek();

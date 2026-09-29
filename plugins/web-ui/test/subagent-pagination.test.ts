@@ -55,6 +55,34 @@ function model(rows: Session[]) {
   };
 }
 
+test("paged subagent elapsed time advances and its ticker stops when the chat is torn down", async (t) => {
+  const root = row("root");
+  const child = row("working", { parentSessionId: root.id, working: true, createdAt: Date.now() - 1000 });
+  const m = model([root, child]);
+  const h = await harness({ path: "/s/root", session: root, listSessions: m.rows, onRequest: m.onRequest });
+  const starts = t.mock.method(globalThis, "setInterval");
+  const clears = t.mock.method(globalThis, "clearInterval");
+  try {
+    await h.boot();
+    await until(() => displayed().length === 1);
+    const elapsed = () => strip()?.querySelector(".subagent-row-meta")?.textContent;
+    const first = elapsed();
+    assert.match(first ?? "", /working/);
+    await until(() => elapsed() !== first);
+    const tickers = starts.mock.calls.filter((call) => call.arguments[1] === 1000).map((call) => call.result);
+    assert.equal(tickers.length, 1);
+    h.visibleConversation().teardown();
+    assert.ok(
+      clears.mock.calls.some((call) => call.arguments[0] === tickers[0]),
+      "subagent ticker was not stopped",
+    );
+  } finally {
+    starts.mock.restore();
+    clears.mock.restore();
+    await h.close();
+  }
+});
+
 test("zero active summary still reads old failed descendants with true depth behind idle siblings", async () => {
   const root = row("root", { subagents: { running: 0, waiting: 0 } });
   const chain = Array.from({ length: 6 }, (_, i) =>
