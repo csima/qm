@@ -2780,6 +2780,12 @@ test("pg tail turn rows count back to the requested user turn without reading pa
   assert.equal(await s.tailTurnRows(session.id, 25, 5), 4, "a capped page still starts on a user turn");
   assert.equal(await s.tailTurnRows(session.id, 25, 2, 5), 2, "a turn larger than the cap yields just the cap");
   assert.equal(await s.tailTurnRows("missing-session", 25, 2000), 0);
+  const opener = await s.getOrCreateByThread("pg-tail-turn-rows-opener", "dm", scope);
+  const held = (await s.acquireLease(opener.id)).lease!;
+  for (const type of ["assistant", "user", "assistant"] as const)
+    await s.append(held, { type, scopeLabel: scope, payload: { text: type } });
+  await s.releaseLease(held);
+  assert.equal(await s.tailTurnRows(opener.id, 25, 2000), 3, "an uncapped short session keeps its opening entry");
 });
 
 test(

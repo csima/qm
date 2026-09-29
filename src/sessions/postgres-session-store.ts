@@ -1096,15 +1096,17 @@ export function createPostgresSessionStore(connectionString: string, opts: Store
 
     async tailTurnRows(sessionId, turns, maxRows, beforeSeq) {
       const rows = await q(
-        `SELECT tail.last + 1 - GREATEST(
-           COALESCE((SELECT seq FROM session_entries
-                      WHERE session_id = $1 AND type = 'user' AND seq < $3
-                      ORDER BY seq DESC OFFSET $2 - 1 LIMIT 1), 0),
-           COALESCE((SELECT seq FROM session_entries
-                      WHERE session_id = $1 AND type = 'user' AND seq < $3 AND seq > tail.last - $4
-                      ORDER BY seq LIMIT 1), tail.last + 1 - $4)
-         ) AS n
-           FROM (SELECT COALESCE(MAX(seq), -1) AS last FROM session_entries WHERE session_id = $1 AND seq < $3) tail`,
+        `SELECT t.last + 1 - CASE WHEN t.last - t.nth < $4 THEN t.nth ELSE COALESCE(
+             (SELECT seq FROM session_entries
+               WHERE session_id = $1 AND type = 'user' AND seq < $3 AND seq > t.last - $4
+               ORDER BY seq LIMIT 1),
+             t.last + 1 - $4) END AS n
+           FROM (SELECT tail.last, COALESCE((
+                   SELECT seq FROM session_entries
+                    WHERE session_id = $1 AND type = 'user' AND seq < $3
+                    ORDER BY seq DESC OFFSET $2 - 1 LIMIT 1), 0) AS nth
+                   FROM (SELECT COALESCE(MAX(seq), -1) AS last FROM session_entries
+                          WHERE session_id = $1 AND seq < $3) tail) t`,
         [sessionId, turns, beforeSeq ?? 2 ** 31 - 1, maxRows],
       );
       return Number(rows[0]?.n ?? 0);

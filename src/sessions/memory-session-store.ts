@@ -320,7 +320,8 @@ export function createMemorySessionStore(opts: StoreOptions = {}): SessionStore 
       const rows = (entries.get(sessionId) ?? []).filter((e) => e.seq < beforeSeq);
       const users = rows.filter((e) => e.type === "user").map((e) => e.seq);
       const floor = (rows.at(-1)?.seq ?? -1) + 1 - maxRows;
-      const start = Math.max(users.at(-turns) ?? 0, users.find((seq) => seq >= floor) ?? floor);
+      const nth = users.at(-turns) ?? 0;
+      const start = nth >= floor ? nth : (users.find((seq) => seq >= floor) ?? floor);
       return rows.filter((e) => e.seq >= start).length;
     },
 

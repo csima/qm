@@ -1764,8 +1764,9 @@ export async function openSessionInto(
     if (continuable)
       void fetchSessionApprovals(s.id).then((r) => {
         if (!r?.approvals.length || openGenerations.get(conv) !== generation || conv.state.sessionId !== s.id) return;
-        if (!conv.activePendingApprovals().length)
-          mountTranscript(conv, s, cachedTranscript(s.id) ?? cached, r.approvals, true);
+        if (!isLiveConversation(conv) || conv.activePendingApprovals().length) return;
+        mountTranscript(conv, s, cachedTranscript(s.id) ?? cached, r.approvals, true);
+        conv.onDelivery(s.threadRef);
       });
     return;
   }
