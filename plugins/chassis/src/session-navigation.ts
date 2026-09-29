@@ -1,4 +1,4 @@
-export interface GroupDmLabel {
+interface GroupDmLabel {
   names: string[];
   text: string;
   count: number;
@@ -42,9 +42,9 @@ export interface SessionNavigationFields {
 }
 
 export type ChatBrowseStatus = "active" | "waiting" | "archived";
-export type SessionNavigationSurface = "all" | "web" | "slack" | "core";
+type SessionNavigationSurface = "all" | "web" | "slack" | "core";
 export type SessionReference = { kind: "id" | "thread"; value: string };
-export type SessionNavigationSection = "recent" | "pinned" | "groups" | "archived";
+type SessionNavigationSection = "recent" | "pinned" | "groups" | "archived";
 
 export interface SessionNavigationRequest {
   surface?: "all" | "web";

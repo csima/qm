@@ -18,7 +18,7 @@ import {
 import type { Session } from "../types.ts";
 import type { ContextSummary } from "./app-types.ts";
 
-export const SESSION_NAVIGATION_LIMIT = 50;
+const SESSION_NAVIGATION_LIMIT = 50;
 export const SESSION_REFERENCE_LIMIT = 12;
 
 export class InvalidSessionNavigationRequest extends Error {}

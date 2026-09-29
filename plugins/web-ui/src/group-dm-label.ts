@@ -1,1 +1,1 @@
-export { groupDmLabel, groupDmText, type GroupDmLabel } from "../../chassis/src/session-navigation.ts";
+export { groupDmLabel, groupDmText } from "../../chassis/src/session-navigation.ts";
