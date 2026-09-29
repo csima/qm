@@ -609,6 +609,29 @@ test("a thinking_dropped marker renders as a system note before the reply", () =
   assert.equal((msgs[2] as { role?: string }).role, "assistant");
 });
 
+test("a thinking_dropped marker mid-turn keeps the turn's work in one fold", () => {
+  const entries: SessionEntry[] = [
+    { type: "user", payload: { text: "continue" }, createdAt: 100 },
+    { type: "thinking", payload: { thinking: "checking" }, createdAt: 101 },
+    { type: "tool_call", payload: { tool: "execute", callId: "c1", command: "ls" }, createdAt: 102 },
+    { type: "tool_result", payload: { callId: "c1", result: "ok" }, createdAt: 103 },
+    {
+      type: "system",
+      payload: { kind: "thinking_dropped", count: 1, reasons: ["prefix_binding_mismatch"] },
+      createdAt: 104,
+    },
+    { type: "tool_call", payload: { tool: "execute", callId: "c2", command: "pwd" }, createdAt: 105 },
+    { type: "tool_result", payload: { callId: "c2", result: "/" }, createdAt: 106 },
+    { type: "assistant", payload: { text: "done" }, createdAt: 110 },
+  ];
+  const msgs = entriesToMessages(entries, MODEL) as Array<{ role?: string; work?: { activity: unknown[] } }>;
+  assert.deepEqual(
+    msgs.map((m) => m.role),
+    ["user", "system-note", "assistant"],
+  );
+  assert.equal(msgs[2]!.work?.activity.filter((a) => (a as { type?: string }).type === "tool_call").length, 2);
+});
+
 test("other system entries (file events, context summaries) still never render", () => {
   const entries: SessionEntry[] = [
     { type: "user", payload: { text: "hi" }, createdAt: 100 },

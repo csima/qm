@@ -2113,8 +2113,6 @@ export function entriesToMessages(entries: SessionEntry[], model?: Model<Api>): 
       }
       const dropped = thinkingDroppedPayload(e.payload);
       if (dropped) {
-        spillHeldPosts();
-        flushWork("", e.createdAt);
         out.push({ ...dropped, timestamp: e.createdAt } as unknown as AgentMessage);
         continue;
       }
