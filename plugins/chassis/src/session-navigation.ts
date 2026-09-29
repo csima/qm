@@ -73,18 +73,26 @@ export function descendantsOf<T extends SessionLink>(
   list: readonly T[],
   rootId: string,
 ): { session: T; depth: number }[] {
+  const children = new Map<string, { session: T; index: number }[]>();
+  list.forEach((session, index) => {
+    const parent = session.parentSessionId;
+    if (!parent) return;
+    const siblings = children.get(parent);
+    if (siblings) siblings.push({ session, index });
+    else children.set(parent, [{ session, index }]);
+  });
   const out: { session: T; depth: number }[] = [];
   const seen = new Set([rootId]);
-  let frontier = [rootId];
+  let frontier = children.get(rootId) ?? [];
   for (let depth = 1; frontier.length; depth++) {
-    const parents = new Set(frontier);
-    frontier = [];
-    for (const session of list) {
-      if (!session.parentSessionId || !parents.has(session.parentSessionId) || seen.has(session.id)) continue;
+    const next: typeof frontier = [];
+    for (const { session } of frontier.sort((a, b) => a.index - b.index)) {
+      if (seen.has(session.id)) continue;
       seen.add(session.id);
       out.push({ session, depth });
-      frontier.push(session.id);
+      for (const child of children.get(session.id) ?? []) next.push(child);
     }
+    frontier = next;
   }
   return out;
 }

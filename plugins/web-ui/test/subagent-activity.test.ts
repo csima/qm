@@ -50,6 +50,35 @@ test("descendants roll grandchildren up to the top-level parent", () => {
   );
 });
 
+test("descendant traversal reads parent links once across deep history and preserves breadth-first list order", () => {
+  let reads = 0;
+  const chain = Array.from({ length: 512 }, (_, index) => ({
+    id: `chain-${index}`,
+    get parentSessionId() {
+      reads++;
+      return index ? `chain-${index - 1}` : undefined;
+    },
+  }));
+  const descendants = descendantsOf(chain, "chain-0");
+  assert.equal(descendants.length, 511);
+  assert.deepEqual(
+    descendants.map(({ depth }) => depth),
+    Array.from({ length: 511 }, (_, i) => i + 1),
+  );
+  assert.ok(reads <= chain.length, `Traversal read ${reads} parent links for ${chain.length} sessions`);
+  assert.deepEqual(
+    descendantsOf([row("a", "root"), row("b1", "b"), row("b", "root"), row("a1", "a")], "root").map(
+      ({ session, depth }) => [session.id, depth],
+    ),
+    [
+      ["a", 1],
+      ["b", 1],
+      ["b1", 2],
+      ["a1", 2],
+    ],
+  );
+});
+
 test("running and waiting counts feed the sidebar and tab badge", () => {
   assert.deepEqual(subagentCounts(list, "root"), { running: 2, waiting: 1 });
   assert.deepEqual(subagentCounts(list, "other"), { running: 0, waiting: 0 });
