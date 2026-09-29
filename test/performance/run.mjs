@@ -331,7 +331,7 @@ export async function establishSplitState(request, baseUrl, principalId, value) 
   return { ...state, updatedAt: verified.updatedAt };
 }
 
-async function prepare(page, scenario, cache, baseUrl) {
+async function prepare(page, scenario, cache, baseUrl, observer, timeoutMs) {
   const interact = INTERACTIVE_KINDS.has(scenario.kind);
   let limit = 50;
   if (cache === "cold" && !interact) return { limit, prepared: false };
@@ -378,8 +378,10 @@ async function prepare(page, scenario, cache, baseUrl) {
       page,
       scenario.visibleIndices.map((i) => chatReady(scenario.sessions[i], `perf-pane-${i}`)),
     );
+    await observer.waitActionable(page, actionableTargets(scenario, true), [], timeoutMs);
     await page.getByRole("tab").filter({ hasText: scenario.sessions[0].title }).first().click();
     await waitReady(page, scenario.ready);
+    await observer.waitActionable(page, actionableTargets(scenario), [], timeoutMs);
     await page
       .getByRole("tab")
       .filter({ hasText: scenario.sessions[scenario.visibleIndices[0]].title })
@@ -395,6 +397,136 @@ async function prepare(page, scenario, cache, baseUrl) {
     await waitReady(page, scenario.prepareReady ?? scenario.ready);
   }
   return { limit, prepared: true };
+}
+
+export function actionableTargets(scenario, preparation = false) {
+  if (scenario.admin || scenario.sidebarReadiness?.transport !== "navigation-post") return [];
+  if (["multiview", "hidden-tab"].includes(scenario.kind)) {
+    const indices =
+      scenario.kind === "hidden-tab" && !preparation
+        ? [0, ...scenario.visibleIndices.slice(1)]
+        : scenario.visibleIndices;
+    return indices.map((index) => ({
+      parent: scenario.sessions[index].sessionId,
+      root: `[data-pane-id="perf-pane-${index}"]`,
+    }));
+  }
+  const match = /^\/s\/([^/?#]+)$/.exec(scenario.path);
+  if (!match) return [];
+  const parent =
+    !preparation && scenario.kind === "sidebar-switch" ? scenario.session.sessionId : decodeURIComponent(match[1]);
+  assert.ok(typeof parent === "string" && parent.length > 0 && parent.length <= 512);
+  return [{ parent, root: ".custom-chat" }];
+}
+
+export function actionableRequirements(targets) {
+  return targets.map(({ parent }) => ({
+    path: "/api/session-navigation/page",
+    method: "POST",
+    navigation: navigationIntent(
+      "/api/session-navigation/page",
+      JSON.stringify({ parentSessionId: parent, children: true, actionable: true }),
+    ),
+    captureActionable: true,
+    allowSupersededAbort: true,
+  }));
+}
+
+async function waitActionableDom(page, target, evidence, requests, timeout) {
+  const waiting = evidence.waiting.map(({ pathSha256, idSha256 }) => {
+    const response = requests.findLast(
+      (entry) =>
+        entry.sameOrigin &&
+        entry.method === "GET" &&
+        sha256(entry.path) === pathSha256 &&
+        entry.completed &&
+        entry.approvalCount !== undefined,
+    );
+    assert.ok(response);
+    const id = decodeURIComponent(response.path.slice("/api/sessions/".length, -"/approvals".length));
+    assert.equal(sha256(id), idSha256);
+    return { id, idSha256, count: response.approvalCount };
+  });
+  const result = await page.waitForFunction(
+    ({ target, evidence, waiting }) => {
+      const visible = (element) =>
+        element.getClientRects().length > 0 &&
+        element.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true });
+      const root = [...globalThis.document.querySelectorAll(target.root)].find(visible);
+      if (!root) return false;
+      const strips = [...root.querySelectorAll(".subagent-activity")].filter(visible);
+      if (evidence.count === 0 && evidence.total === 0 && evidence.nextCursorSha256 === null)
+        return strips.length === 0 ? { parent: target.parent, loaded: 0, total: 0, waiting: [] } : false;
+      if (strips.length !== 1) return false;
+      const strip = strips[0];
+      if (
+        strip.dataset.parentSessionId !== target.parent ||
+        strip.dataset.sessionPageState !== "ready" ||
+        strip.getAttribute("aria-busy") !== "false" ||
+        strip.dataset.loaded !== String(evidence.count) ||
+        strip.dataset.total !== String(evidence.total)
+      )
+        return false;
+      const more = [...strip.querySelectorAll('[data-session-page="subagents"]')].filter(visible);
+      if (
+        more.length !== Number(Boolean(evidence.nextCursorSha256)) ||
+        more.some((element) => element.disabled || element.getAttribute("aria-disabled") === "true")
+      )
+        return false;
+      const rows = [...strip.querySelectorAll(".subagent-row.waiting")].filter(visible);
+      if (rows.length !== waiting.length) return false;
+      if (
+        rows.some((row, index) => {
+          if (row.dataset.sessionId !== waiting[index].id) return true;
+          const approvals = [...row.querySelectorAll(".composer-approval")];
+          return (
+            approvals.length !== waiting[index].count ||
+            approvals.some((approval) => {
+              if (!visible(approval)) return true;
+              const buttons = [...approval.querySelectorAll("button.approval-btn")];
+              return (
+                !buttons.some((button) => button.classList.contains("deny") && button.textContent.trim() === "Deny") ||
+                !buttons.some((button) => button.textContent.trim() === "Allow once") ||
+                buttons.some(
+                  (button) =>
+                    !visible(button) ||
+                    button.matches(":disabled") ||
+                    button.closest('[aria-disabled="true"], [inert]') ||
+                    globalThis.getComputedStyle(button).pointerEvents === "none",
+                )
+              );
+            })
+          );
+        })
+      )
+        return false;
+      return {
+        parent: target.parent,
+        loaded: evidence.count,
+        total: evidence.total,
+        waiting: rows.map((row) => ({
+          id: row.dataset.sessionId,
+          count: row.querySelectorAll(".composer-approval").length,
+        })),
+      };
+    },
+    { target, evidence, waiting },
+    { timeout },
+  );
+  const rendered = await result.jsonValue();
+  const hashedWaiting = waiting.map(({ idSha256, count }) => ({ idSha256, count }));
+  assert.deepEqual(
+    rendered.waiting.map(({ id, count }) => ({ idSha256: sha256(id), count })),
+    hashedWaiting,
+    "Actionable approval rendering differs from completed responses",
+  );
+  return {
+    parentSha256: sha256(rendered.parent),
+    pageSha256: sha256(JSON.stringify(evidence)),
+    loaded: rendered.loaded,
+    total: rendered.total,
+    waiting: hashedWaiting,
+  };
 }
 
 function sidebarRetainedIds(scenario, preparation = false) {
@@ -607,6 +739,95 @@ function navigationPageEvidence(data) {
   return pages;
 }
 
+function actionablePageEvidence(data, intent) {
+  assert.ok(data && Array.isArray(data.items) && data.items.length <= 50);
+  assert.ok(Number.isSafeInteger(data.total) && data.total >= data.items.length);
+  assert.ok(
+    data.nextCursor === null ||
+      (typeof data.nextCursor === "string" &&
+        data.nextCursor.length > 0 &&
+        data.nextCursor.length <= 4096 &&
+        data.items.length === 50),
+  );
+  if (intent.cursorSha256 === null) assert.equal(Boolean(data.nextCursor), data.total > data.items.length);
+  const metadata = data.actionable;
+  assert.ok(
+    metadata &&
+      typeof metadata.parentSessionId === "string" &&
+      metadata.parentSessionId.length > 0 &&
+      metadata.parentSessionId.length <= 512,
+  );
+  assert.equal(sha256(metadata.parentSessionId), intent.parentSessionIdSha256);
+  assert.ok(
+    Array.isArray(metadata.depths) &&
+      metadata.depths.length === data.items.length &&
+      metadata.depths.every((depth) => Number.isSafeInteger(depth) && depth > 0),
+  );
+  const ids = data.items.map((row) => row?.id);
+  assert.ok(
+    ids.every((id) => typeof id === "string" && id.length > 0 && id.length <= 512 && id !== metadata.parentSessionId),
+  );
+  assert.equal(new Set(ids).size, ids.length);
+  assert.ok(Array.isArray(data.contexts) && data.contexts.length <= 51);
+  for (const context of data.contexts) {
+    assert.ok(
+      context && typeof context.scopeId === "string" && ["personal", "channel", "group"].includes(context.kind),
+    );
+    assert.ok(context.name === null || typeof context.name === "string");
+    assert.ok(Number.isSafeInteger(context.sessionCount) && context.sessionCount >= 0);
+    assert.ok(context.lastActivityAt === null || Number.isFinite(context.lastActivityAt));
+  }
+  for (const field of ["active", "waiting", "archived"])
+    assert.ok(Number.isSafeInteger(data.statusTotals?.[field]) && data.statusTotals[field] >= 0);
+  for (const row of data.items) {
+    assert.ok(
+      typeof row.scopeId === "string" &&
+        typeof row.threadRef === "string" &&
+        Number.isFinite(row.createdAt) &&
+        ["dm", "channel", "group"].includes(row.type),
+    );
+    for (const field of ["working", "awaitingInput", "lastTurnFailed"])
+      assert.ok(row[field] === undefined || typeof row[field] === "boolean");
+    assert.ok(row.working || row.awaitingInput || row.lastTurnFailed);
+  }
+  if (metadata.parentSubagents === null) assert.equal(data.total, 0);
+  else
+    for (const field of ["running", "waiting"])
+      assert.ok(Number.isSafeInteger(metadata.parentSubagents?.[field]) && metadata.parentSubagents[field] >= 0);
+  return {
+    parentSha256: sha256(metadata.parentSessionId),
+    idsSha256: sha256(JSON.stringify(ids)),
+    depthsSha256: sha256(JSON.stringify(metadata.depths)),
+    count: ids.length,
+    total: data.total,
+    nextCursorSha256: data.nextCursor === null ? null : sha256(data.nextCursor),
+    parentSubagents:
+      metadata.parentSubagents === null
+        ? null
+        : { running: metadata.parentSubagents.running, waiting: metadata.parentSubagents.waiting },
+    waiting: data.items
+      .filter((row) => row.awaitingInput)
+      .map((row) => ({
+        idSha256: sha256(row.id),
+        pathSha256: sha256(`/api/sessions/${encodeURIComponent(row.id)}/approvals`),
+      })),
+  };
+}
+
+function supersededAbort(entry, later) {
+  return (
+    entry.navigation &&
+    entry.phase === "failed" &&
+    entry.failure === "net::ERR_ABORTED" &&
+    (entry.status === undefined || (entry.status >= 200 && entry.status < 300)) &&
+    later.some(
+      (row) =>
+        matchesRequest(row, { path: entry.path, method: entry.method, navigation: entry.navigation }) &&
+        JSON.stringify(row.navigation) === JSON.stringify(entry.navigation),
+    )
+  );
+}
+
 export function requiredResponsesComplete(requests, requirements) {
   return requirements.every((requirement) => {
     const matching = requests.filter((entry) => matchesRequest(entry, requirement));
@@ -616,7 +837,8 @@ export function requiredResponsesComplete(requests, requirements) {
       (requirement.expectedStatuses
         ? requirement.expectedStatuses.includes(entry.status)
         : entry.status >= 200 && entry.status < 300) &&
-      (!requirement.expectedError || entry.expectedErrorMatched === true);
+      (!requirement.expectedError || entry.expectedErrorMatched === true) &&
+      (!requirement.captureActionable || Boolean(entry.actionablePage));
     return (
       matching.length > 0 &&
       matching.every(
@@ -624,17 +846,20 @@ export function requiredResponsesComplete(requests, requirements) {
           succeeded(entry) ||
           (requirement.allowSupersededAbort === true &&
             requirement.navigation &&
-            entry.navigation &&
-            entry.phase === "failed" &&
-            entry.failure === "net::ERR_ABORTED" &&
-            (entry.status === undefined || (entry.status >= 200 && entry.status < 300)) &&
-            matching
-              .slice(index + 1)
-              .some(
-                (later) => JSON.stringify(later.navigation) === JSON.stringify(entry.navigation) && succeeded(later),
-              )),
+            supersededAbort(entry, matching.slice(index + 1).filter(succeeded))),
       ) &&
       (!requirement.captureNavigation || matching.some((entry) => succeeded(entry) && entry.navigationPages)) &&
+      (!requirement.captureActionable ||
+        (matching.some(succeeded) &&
+          matching.findLast(succeeded).actionablePage.waiting.every(({ pathSha256 }) => {
+            const approvals = requests.filter(
+              (entry) => entry.sameOrigin && entry.method === "GET" && sha256(entry.path) === pathSha256,
+            );
+            return (
+              approvals.length > 0 &&
+              approvals.every((entry) => entry.completed && entry.status === 200 && entry.approvalCount !== undefined)
+            );
+          }))) &&
       (!requirement.paginated || matching.some((entry) => entry.finalPage === true)) &&
       (!requirement.settledField || matching.some((entry) => entry.settled === true)) &&
       (!requirement.followupWhenNonempty ||
@@ -658,6 +883,25 @@ export function observe(page, origin, requirements) {
   let identityRead = 0;
   let active = false;
   let generation = 0;
+  const currentErrors = () => [
+    ...errors,
+    ...requests.flatMap((entry, index) => {
+      if (
+        !entry.envelopeError ||
+        (entry.navigation?.actionable === true &&
+          supersededAbort(
+            entry,
+            requests
+              .slice(index + 1)
+              .filter(
+                (later) => later.completed && later.status === 200 && later.actionablePage && !later.envelopeError,
+              ),
+          ))
+      )
+        return [];
+      return [{ type: "contract", path: entry.path, message: entry.envelopeError }];
+    }),
+  ];
   page.on("pageerror", (error) => {
     if (active) errors.push({ type: "pageerror", ...plainError(error) });
   });
@@ -726,6 +970,45 @@ export function observe(page, origin, requirements) {
         pending.add(job);
         void job.finally(() => pending.delete(job));
       }
+    }
+    const actionable =
+      entry.sameOrigin &&
+      entry.path === "/api/session-navigation/page" &&
+      entry.method === "POST" &&
+      entry.navigation?.actionable === true;
+    const approval =
+      entry.sameOrigin && entry.method === "GET" && /^\/api\/sessions\/[^/]+\/approvals$/.test(entry.path);
+    if (actionable || approval) {
+      const job = response
+        .json()
+        .then((data) => {
+          if (generation !== observedGeneration) return;
+          if (actionable) {
+            assert.equal(entry.navigation.children, true);
+            entry.actionablePage = actionablePageEvidence(data, entry.navigation);
+          } else {
+            assert.ok(Array.isArray(data?.approvals));
+            assert.ok(
+              data.approvals.every(
+                (row) =>
+                  typeof row?.requestId === "string" &&
+                  row.requestId.length > 0 &&
+                  row.requestId.length <= 512 &&
+                  typeof row.command === "string",
+              ),
+            );
+            entry.approvalCount = data.approvals.length;
+          }
+        })
+        .catch(() => {
+          if (generation === observedGeneration)
+            entry.envelopeError = actionable ? "Invalid actionable page envelope" : "Invalid approval envelope";
+        });
+      pending.add(job);
+      void job.finally(() => {
+        pending.delete(job);
+        notify();
+      });
     }
     const requirement = requirements.find((item) => matchesRequest(entry, item));
     if (
@@ -810,18 +1093,21 @@ export function observe(page, origin, requirements) {
     void job.finally(() => pending.delete(job));
   });
   return {
-    async waitResponses(timeoutMs) {
-      if (requiredResponsesComplete(requests, requirements)) return;
+    async waitResponses(timeoutMs, selected = requirements, previousRequests = []) {
+      const complete = () => requiredResponsesComplete([...previousRequests, ...requests], selected);
+      if (complete()) return;
       await new Promise((resolve, reject) => {
         const done = () => {
-          if (!requiredResponsesComplete(requests, requirements)) return;
+          if (!complete()) return;
           clearTimeout(timer);
           changed.delete(done);
           resolve();
         };
         const timer = setTimeout(() => {
           changed.delete(done);
-          const unfinished = requirements.filter((requirement) => !requiredResponsesComplete(requests, [requirement]));
+          const unfinished = selected.filter(
+            (requirement) => !requiredResponsesComplete([...previousRequests, ...requests], [requirement]),
+          );
           reject(
             new Error(`Required page requests did not finish: ${unfinished.map((entry) => entry.path).join(", ")}`),
           );
@@ -829,6 +1115,46 @@ export function observe(page, origin, requirements) {
         changed.add(done);
         done();
       });
+    },
+    async waitActionable(page, targets, previousRequests = [], timeoutMs = 15000) {
+      if (targets.length === 0) return [];
+      const selected = actionableRequirements(targets);
+      const previous = previousRequests.filter(
+        (entry) =>
+          entry.completed && entry.status === 200 && (entry.actionablePage || entry.approvalCount !== undefined),
+      );
+      const deadline = performance.now() + timeoutMs;
+      const remaining = () => {
+        const ms = deadline - performance.now();
+        assert.ok(ms > 0, "Actionable readiness did not settle");
+        return ms;
+      };
+      for (;;) {
+        await this.waitResponses(remaining(), selected, previous);
+        assert.deepEqual(currentErrors(), [], "Actionable readiness observed a request error");
+        const all = [...previous, ...requests];
+        const responses = selected.map((requirement) =>
+          all.findLast(
+            (entry) =>
+              matchesRequest(entry, requirement) && entry.completed && entry.status === 200 && entry.actionablePage,
+          ),
+        );
+        const approvalPaths = new Set(
+          responses.flatMap((entry) => entry.actionablePage.waiting.map((row) => row.pathSha256)),
+        );
+        const involved = (entry) =>
+          selected.some((requirement) => matchesRequest(entry, requirement)) ||
+          (entry.sameOrigin && entry.method === "GET" && approvalPaths.has(sha256(entry.path)));
+        const checked = all.filter(involved);
+        const rendered = [];
+        for (const [index, target] of targets.entries())
+          rendered.push(await waitActionableDom(page, target, responses[index].actionablePage, all, remaining()));
+        const current = [...previous, ...requests].filter(involved);
+        if (current.length === checked.length && current.every((entry, index) => entry === checked[index])) {
+          assert.deepEqual(currentErrors(), [], "Actionable readiness observed a request error");
+          return rendered;
+        }
+      }
     },
     start(nextRequirements = requirements, { reuseIdentity = false } = {}) {
       if (reuseIdentity) assert.ok(typeof identity === "string" && identity, "No verified identity to reuse");
@@ -841,13 +1167,32 @@ export function observe(page, origin, requirements) {
       errors.length = 0;
       active = true;
     },
-    async finish() {
+    async finish(timeoutMs = 15000) {
+      assert.ok(Number.isFinite(timeoutMs) && timeoutMs >= 0);
       active = false;
-      await Promise.all(pending);
+      let timer;
+      try {
+        const settled = await Promise.race([
+          Promise.all(pending).then(() => true),
+          new Promise((resolve) => {
+            timer = setTimeout(() => resolve(false), timeoutMs);
+          }),
+        ]);
+        if (!settled)
+          errors.push({
+            type: "observer-timeout",
+            message: "Response observation did not finish",
+            pendingObservations: pending.size,
+          });
+      } finally {
+        clearTimeout(timer);
+        generation++;
+        pending.clear();
+      }
       const now = Date.now();
       for (const entry of requests)
         if (!entry.completed && entry.phase !== "failed") entry.pendingForMs = now - entry.startedAt;
-      return structuredClone({ requests, errors, identity });
+      return structuredClone({ requests, errors: currentErrors(), identity });
     },
   };
 }
@@ -938,7 +1283,7 @@ async function sample(browser, config, scenario, cell, iteration, output) {
     const preparationRequirements = [...(scenario.kind === "web-overlay" ? [] : scenario.requiredResponses), ...common];
     observer = observe(page, config.baseUrl, preparationRequirements);
     observer.start();
-    const preparation = await prepare(page, scenario, cell.cache, config.baseUrl);
+    const preparation = await prepare(page, scenario, cell.cache, config.baseUrl, observer, config.timeoutMs ?? 15000);
     if (preparation.prepared) {
       await observer.waitResponses(config.timeoutMs ?? 15_000);
       const sidebarState = sidebar
@@ -947,7 +1292,13 @@ async function sample(browser, config, scenario, cell, iteration, output) {
             retainedIds: sidebarRetainedIds(scenario, true),
           })
         : undefined;
-      result.preparation = { ...(await observer.finish()), sidebar: sidebarState };
+      const actionable = await observer.waitActionable(
+        page,
+        actionableTargets(scenario, true),
+        [],
+        config.timeoutMs ?? 15000,
+      );
+      result.preparation = { ...(await observer.finish(config.timeoutMs ?? 15000)), sidebar: sidebarState, actionable };
       assert.equal(result.preparation.identity, scenario.principalId, "Preparation authenticated the wrong principal");
       assert.deepEqual(result.preparation.errors, [], "Browser/request errors occurred during preparation");
       if (sidebar) validateSidebarEvidence(result.preparation, sidebar);
@@ -984,6 +1335,12 @@ async function sample(browser, config, scenario, cell, iteration, output) {
         retainedIds: sidebarRetainedIds(scenario),
       });
     await observer.waitResponses(config.timeoutMs ?? 15_000);
+    result.actionable = await observer.waitActionable(
+      page,
+      actionableTargets(scenario),
+      interactive ? result.preparation.requests : [],
+      config.timeoutMs ?? 15000,
+    );
     result.durationMs = performance.now() - measurementStart;
     result.finishedAt = Date.now();
     result.readiness = { passed: true, completedAt: result.finishedAt, assertions: scenario.ready };
@@ -1005,19 +1362,40 @@ async function sample(browser, config, scenario, cell, iteration, output) {
       ).length,
     }));
     for (const navigation of result.browser.navigation) delete navigation.name;
-    const evidence = await observer.finish();
+    const evidence = await observer.finish(config.timeoutMs ?? 15000);
     Object.assign(result, evidence);
     result.requiredResponses = measuredRequirements;
     assert.equal(evidence.identity, scenario.principalId, "Browser is authenticated as the wrong fixture principal");
     assert.deepEqual(evidence.errors, [], "Browser/request errors occurred during measurement");
     if (sidebar) validateSidebarEvidence(evidence, sidebar, interactive ? result.preparation.requests : []);
+    const actionable = actionableRequirements(actionableTargets(scenario));
+    const actionableRequests = [...(interactive ? result.preparation.requests : []), ...evidence.requests];
+    assert.ok(requiredResponsesComplete(actionableRequests, actionable), "Actionable requests changed after readiness");
+    for (const [index, requirement] of actionable.entries()) {
+      const latest = actionableRequests.findLast((entry) => matchesRequest(entry, requirement));
+      assert.equal(
+        sha256(JSON.stringify(latest.actionablePage)),
+        result.actionable[index].pageSha256,
+        "Actionable page changed after rendering",
+      );
+      assert.deepEqual(
+        latest.actionablePage.waiting.map(({ idSha256, pathSha256 }) => ({
+          idSha256,
+          count: actionableRequests.findLast(
+            (entry) => entry.sameOrigin && entry.method === "GET" && sha256(entry.path) === pathSha256,
+          ).approvalCount,
+        })),
+        result.actionable[index].waiting,
+        "Actionable approvals changed after rendering",
+      );
+    }
     result.status = "pass";
   } catch (error) {
     result.error = plainError(error);
     if (measurementStart !== undefined && result.durationMs === null)
       result.durationMs = performance.now() - measurementStart;
     result.finishedAt ??= Date.now();
-    if (observer) Object.assign(result, await observer.finish());
+    if (observer) Object.assign(result, await observer.finish(0));
     if (context) {
       const page = context.pages()[0];
       if (page) {
@@ -1061,7 +1439,7 @@ export async function run(configPath, listOnly = false) {
   const profileHash = sha256(JSON.stringify(profiles));
   assert.ok(typeof fixture.fixtureId === "string" && fixture.fixtureId, "Fixture identity is required");
   assert.equal(fixture.profileSha256, profileHash, "Fixture was seeded from a different profile");
-  const catalog = buildCatalog(fixture);
+  const catalog = buildCatalog(fixture, config.sourceRevision);
   const selected = config.filter ? catalog.filter((scenario) => new RegExp(config.filter).test(scenario.id)) : catalog;
   assert.ok(selected.length, "No catalog scenarios matched");
   if (listOnly) {
@@ -1093,6 +1471,7 @@ export async function run(configPath, listOnly = false) {
     baseUrl: config.baseUrl,
     fixtureId: fixture.fixtureId,
     sourceRevision: config.sourceRevision,
+    sidebarProfile: config.sidebarProfile,
     profileSha256: profileHash,
     fixtureSha256: sha256(fixtureBytes),
     catalogSha256: sha256(readFileSync(resolve(dirname(sourcePath), "catalog.mjs"))),

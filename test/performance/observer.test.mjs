@@ -2,9 +2,12 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import test from "node:test";
 import {
+  actionableRequirements,
+  actionableTargets,
   navigationIntent,
   observe,
   requiredResponsesComplete,
+  run,
   sidebarRequirements,
   validateSidebarEvidence,
   waitSidebarReady,
@@ -585,3 +588,615 @@ test("navigation completion binds method, section, cursor, filters and ordered r
   assert.deepEqual(evidence.requests[0].navigation, intent);
   assert.equal(JSON.stringify(evidence).includes("private-"), false);
 });
+
+function actionablePage(parent = "private-parent", waiting = false, count = 0) {
+  return {
+    items: Array.from({ length: count }, (_, i) => ({
+      id: `private-child-${i}`,
+      scopeId: "scope",
+      threadRef: `thread-${i}`,
+      createdAt: 1,
+      type: "dm",
+      working: !waiting,
+      awaitingInput: waiting,
+    })),
+    total: count,
+    nextCursor: null,
+    contexts: [],
+    statusTotals: { active: count, waiting: waiting ? count : 0, archived: 0 },
+    actionable: {
+      parentSessionId: parent,
+      parentSubagents: { running: waiting ? 0 : count, waiting: waiting ? count : 0 },
+      depths: Array(count).fill(1),
+    },
+  };
+}
+
+function actionableObserver() {
+  const origin = "http://127.0.0.1:8129";
+  const page = new EventEmitter();
+  const requirements = actionableRequirements([{ parent: "private-parent", root: ".custom-chat" }]);
+  const observer = observe(page, origin, requirements);
+  observer.start();
+  const send = (
+    data,
+    {
+      parent = "private-parent",
+      path = "/api/session-navigation/page",
+      status = 200,
+      json,
+      finish = true,
+      cursor,
+    } = {},
+  ) => {
+    const request = {
+      url: () => origin + path,
+      method: () => (path.endsWith("/approvals") ? "GET" : "POST"),
+      postData: () =>
+        JSON.stringify({ parentSessionId: parent, children: true, actionable: true, ...(cursor ? { cursor } : {}) }),
+      resourceType: () => "fetch",
+      timing: () => ({}),
+      sizes: async () => ({ responseBodySize: 2 }),
+      failure: () => ({ errorText: "net::ERR_ABORTED" }),
+    };
+    page.emit("request", request);
+    page.emit("response", {
+      request: () => request,
+      status: () => status,
+      fromServiceWorker: () => false,
+      allHeaders: async () => ({}),
+      json: json ?? (async () => data),
+    });
+    if (finish) page.emit("requestfinished", request);
+    return request;
+  };
+  return { page, observer, requirements, send };
+}
+
+test("actionable requirements follow the measured parent and visible panes without imposing a baseline endpoint", () => {
+  const sidebarReadiness = { transport: "navigation-post" };
+  const scenario = { kind: "sidebar-switch", path: "/s/long%20id", session: { sessionId: "short" }, sidebarReadiness };
+  assert.deepEqual(actionableTargets(scenario), [{ parent: "short", root: ".custom-chat" }]);
+  assert.equal(actionableTargets(scenario, true)[0].parent, "long id");
+  for (const path of ["/", "/settings", "/admin/history"])
+    assert.deepEqual(actionableTargets({ ...scenario, path }), []);
+  assert.deepEqual(actionableTargets({ ...scenario, admin: true }), []);
+  assert.deepEqual(actionableTargets({ ...scenario, sidebarReadiness: { transport: "legacy-get" } }), []);
+  const multi = {
+    kind: "hidden-tab",
+    sidebarReadiness,
+    sessions: Array.from({ length: 12 }, (_, i) => ({ sessionId: `s${i}` })),
+    visibleIndices: [2, 5, 8, 11],
+  };
+  assert.deepEqual(
+    actionableTargets(multi, true).map((row) => row.parent),
+    ["s2", "s5", "s8", "s11"],
+  );
+  assert.deepEqual(
+    actionableTargets(multi).map((row) => row.parent),
+    ["s0", "s5", "s8", "s11"],
+  );
+  assert.equal(actionableTargets(multi)[0].root, '[data-pane-id="perf-pane-0"]');
+  assert.deepEqual(actionableTargets({ ...multi, kind: "multiview" }), actionableTargets(multi, true));
+});
+
+test("actionable completion requires bounded well-formed initial parent data even for an absent empty strip", async () => {
+  for (const mutate of [
+    (data) => {
+      data.actionable.parentSessionId = "wrong";
+    },
+    (data) => {
+      delete data.actionable;
+    },
+    (data) => {
+      data.actionable.depths = [1];
+    },
+    (data) => {
+      data.total = false;
+    },
+    (data) => {
+      data.total = 1;
+    },
+    (data) => {
+      data.nextCursor = "cursor";
+    },
+    (data) => {
+      data.actionable.parentSubagents.waiting = -1;
+    },
+    (data) => {
+      delete data.contexts;
+    },
+    (data) => {
+      data.statusTotals.active = false;
+    },
+    (data) => {
+      Object.assign(data, actionablePage("private-parent", false, 51));
+    },
+    (data) => {
+      Object.assign(data, actionablePage("private-parent", false, 1));
+      data.items[0].working = "true";
+    },
+    (data) => {
+      Object.assign(data, actionablePage("private-parent", false, 1));
+      data.items[0].working = false;
+    },
+    (data) => {
+      Object.assign(data, actionablePage("private-parent", false, 1));
+      data.actionable.depths[0] = 0;
+    },
+    (data) => {
+      Object.assign(data, actionablePage("private-parent", false, 1));
+      data.actionable.parentSubagents = null;
+    },
+  ]) {
+    const { observer, send } = actionableObserver();
+    const data = actionablePage();
+    mutate(data);
+    send(data);
+    await assert.rejects(observer.waitResponses(8));
+    assert.equal(
+      (await observer.finish()).errors.some((row) => row.type === "contract"),
+      true,
+    );
+  }
+  for (const mode of ["empty", "null", "more"]) {
+    const { observer, send } = actionableObserver();
+    const data = actionablePage("private-parent", false, ["more", "missing-more"].includes(mode) ? 50 : 0);
+    if (mode === "null") data.actionable.parentSubagents = null;
+    if (mode === "more") {
+      data.total = 51;
+      data.nextCursor = "private-cursor";
+    }
+    send(data);
+    await observer.waitResponses(100);
+    const evidence = await observer.finish();
+    assert.deepEqual(evidence.errors, []);
+    assert.equal(evidence.requests[0].actionablePage.count, data.items.length);
+    assert.equal(JSON.stringify(evidence).includes("private-"), false);
+  }
+  for (const mode of ["omitted", "wrong-parent", "failed", "continuation-only"]) {
+    const { observer, send } = actionableObserver();
+    if (mode === "wrong-parent") send(actionablePage("other"), { parent: "other" });
+    if (mode === "failed") send(actionablePage(), { status: 500 });
+    if (mode === "continuation-only") send(actionablePage(), { cursor: "continuation" });
+    await assert.rejects(observer.waitResponses(8));
+    await observer.finish();
+  }
+});
+
+test("waiting actionable children require completed approval data and cannot borrow an older phase or parent", async () => {
+  const { page, observer, requirements, send } = actionableObserver();
+  send(actionablePage("private-parent", true, 1));
+  await assert.rejects(observer.waitResponses(8));
+  const late = Promise.withResolvers();
+  send(undefined, { path: "/api/sessions/private-child-0/approvals", json: () => late.promise });
+  await assert.rejects(observer.waitResponses(8));
+  late.resolve({ approvals: [{ requestId: "approval", command: "modeled command" }] });
+  await observer.waitResponses(100);
+  const prepared = await observer.finish();
+  assert.equal(prepared.requests[1].approvalCount, 1);
+  observer.start();
+  await observer.waitResponses(100, requirements, prepared.requests);
+  const aborted = send(actionablePage(), { finish: false });
+  page.emit("requestfailed", aborted);
+  await assert.rejects(observer.waitResponses(8, requirements, prepared.requests));
+  send(actionablePage());
+  await observer.waitResponses(100, requirements, prepared.requests);
+  const measured = await observer.finish();
+  assert.equal(requiredResponsesComplete(measured.requests, actionableRequirements([{ parent: "other" }])), false);
+  observer.start();
+  const old = Promise.withResolvers();
+  send(undefined, { json: () => old.promise });
+  observer.start();
+  old.resolve(actionablePage());
+  await assert.rejects(observer.waitResponses(8));
+  assert.equal((await observer.finish()).requests.length, 0);
+  for (const data of [{}, { approvals: [{}] }, { approvals: [{ requestId: "ok", command: false }] }]) {
+    observer.start();
+    send(actionablePage("private-parent", true, 1));
+    send(data, { path: "/api/sessions/private-child-0/approvals" });
+    await assert.rejects(observer.waitResponses(8));
+    assert.equal(
+      (await observer.finish()).errors.some((row) => row.message === "Invalid approval envelope"),
+      true,
+    );
+  }
+});
+
+test("an aborted actionable body needs a later identical completed successor regardless of body rejection order", async () => {
+  for (const successor of [false, true]) {
+    const { page, observer, send } = actionableObserver();
+    const body = Promise.withResolvers();
+    const request = send(undefined, { json: () => body.promise, finish: false });
+    body.reject(new Error("Modeled aborted body"));
+    await new Promise((resolve) => setImmediate(resolve));
+    page.emit("requestfailed", request);
+    if (successor) {
+      send(actionablePage());
+      await observer.waitResponses(100);
+    } else await assert.rejects(observer.waitResponses(8));
+    assert.equal((await observer.finish()).errors.length, successor ? 0 : 1);
+  }
+});
+
+test("actionable response bodies cannot overwrite a newer request or satisfy a later incomplete request", async () => {
+  const { observer, send } = actionableObserver();
+  const old = Promise.withResolvers();
+  send(undefined, { json: () => old.promise });
+  send(actionablePage());
+  await assert.rejects(observer.waitResponses(8));
+  old.resolve(actionablePage("private-parent", false, 1));
+  await observer.waitResponses(100);
+  const evidence = await observer.finish();
+  assert.deepEqual(
+    evidence.requests.map((row) => row.actionablePage.count),
+    [1, 0],
+  );
+  observer.start();
+  send(actionablePage());
+  send(actionablePage(), { finish: false });
+  await assert.rejects(observer.waitResponses(8));
+  await observer.finish();
+});
+
+test("observer finalization bounds pending bodies and preserves failure evidence against late completion", async () => {
+  const { observer, send } = actionableObserver();
+  const body = Promise.withResolvers();
+  send(undefined, { json: () => body.promise, finish: false });
+  const start = performance.now();
+  const result = await observer.finish(10);
+  assert.ok(performance.now() - start < 500);
+  assert.deepEqual(result.errors, [
+    { type: "observer-timeout", message: "Response observation did not finish", pendingObservations: 1 },
+  ]);
+  assert.equal(result.requests[0].completed, false);
+  assert.equal(result.requests[0].status, 200);
+  observer.start();
+  body.resolve(actionablePage());
+  await new Promise((resolve) => setImmediate(resolve));
+  await assert.rejects(observer.waitResponses(8));
+  send(actionablePage());
+  await observer.waitResponses(100);
+  const next = await observer.finish(50);
+  assert.deepEqual(next.errors, []);
+  assert.equal(next.requests.length, 1);
+  assert.equal(result.requests[0].actionablePage, undefined);
+});
+
+test(
+  "modeled HTTP Chromium samples include actionable and approval completion, including empty initial pages",
+  { timeout: 35000 },
+  async (t) => {
+    const { createServer } = await import("node:http");
+    const { mkdtemp, mkdir, readFile, writeFile, rm } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const output = await mkdtemp(join(tmpdir(), "qm-actionable-observer-"));
+    const actor = "modeled-actor",
+      parent = "private-parent",
+      sourceRevision = "a".repeat(40);
+    const row = {
+      id: parent,
+      title: "Modeled chat",
+      groupedTitle: "Modeled chat",
+      scopeId: "personal",
+      threadRef: "web:modeled:parent",
+    };
+    const group = { scopeId: "personal", name: "Personal", count: 1 };
+    const sessions = Array.from({ length: 4 }, (_, i) => ({
+      sessionId: `pane-${i}`,
+      principalId: actor,
+      title: `Pane ${i}`,
+      expectedVisibleText: `Transcript ${i}`,
+      scopeId: "personal",
+      threadRef: `web:modeled:${i}`,
+    }));
+    const hiddenPhases = [];
+    const hungClosed = new Set();
+    const waitingModes = [
+      "waiting",
+      "waiting-zero",
+      "missing-approvals",
+      "wrong-render",
+      "hung-approvals",
+      "hidden-approval",
+      "no-controls",
+      "aria-disabled",
+      "hidden-controls",
+      "missing-deny",
+      "hidden-waiting",
+    ];
+    const hiddenMode = () => mode === "hidden" || mode === "hidden-omitted";
+    const rows = () =>
+      hiddenMode()
+        ? sessions.map((session) => ({
+            id: session.sessionId,
+            title: session.title,
+            groupedTitle: session.title,
+            scopeId: session.scopeId,
+            threadRef: session.threadRef,
+          }))
+        : [row];
+    let mode,
+      state = { value: { v: 2, active: false }, updatedAt: 0 };
+    const server = createServer(async (req, res) => {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      const body = chunks.length ? JSON.parse(Buffer.concat(chunks)) : {};
+      const send = (value) => {
+        res.setHeader("content-type", "application/json");
+        res.end(JSON.stringify(value));
+      };
+      if (req.url === "/me") return send({ user: actor });
+      if (req.url.startsWith("/api/ui-state")) {
+        if (req.method === "PUT") state = { value: body.value, updatedAt: body.updatedAt };
+        return send({ ...state, ok: true });
+      }
+      if (req.url === "/api/session-navigation")
+        return send({
+          recent: { items: rows(), total: rows().length, nextCursor: null },
+          pinned: { items: [], total: 0, nextCursor: null },
+          groups: { items: [{ ...group, count: rows().length }], total: 1, nextCursor: null },
+        });
+      if (req.url === "/api/sessions") return send({ sessions: rows() });
+      if (req.url === "/modeled-hidden-phase") {
+        hiddenPhases.push(body);
+        return send({ ok: true });
+      }
+      if (req.url === "/api/contexts") return send({ contexts: [] });
+      if (req.url === "/api/session-navigation/page") {
+        if (mode === "hung-page") {
+          const heldMode = mode;
+          res.on("close", () => hungClosed.add(heldMode));
+          res.writeHead(200, { "content-type": "application/json" });
+          res.write('{"items":');
+          return;
+        }
+        const waiting = waitingModes.includes(mode);
+        const count = ["more", "missing-more"].includes(mode) ? 50 : Number(waiting);
+        const data = actionablePage(body.parentSessionId, waiting, count);
+        if (["more", "missing-more"].includes(mode)) {
+          data.total = 51;
+          data.nextCursor = "next";
+        }
+        if (mode === "malformed") delete data.actionable;
+        return setTimeout(() => send(data), 180);
+      }
+      if (req.url.endsWith("/approvals")) {
+        if (mode === "hung-approvals") {
+          const heldMode = mode;
+          res.on("close", () => hungClosed.add(heldMode));
+          res.writeHead(200, { "content-type": "application/json" });
+          res.write('{"approvals":');
+          return;
+        }
+        return setTimeout(
+          () =>
+            send({
+              approvals: ["waiting-zero", "hidden-waiting"].includes(mode)
+                ? []
+                : [{ requestId: "a", command: "modeled only" }],
+            }),
+          220,
+        );
+      }
+      if (req.url === "/favicon.ico") {
+        res.writeHead(204);
+        return res.end();
+      }
+      res.setHeader("content-type", "text/html");
+      res.end(`<!doctype html><div class="custom-chat">Visible transcript<textarea></textarea><div id="activity"></div></div><div id="sidebar-body"></div><script>
+      const mode=${JSON.stringify(mode)}, parent=${JSON.stringify(parent)}, sessions=${JSON.stringify(sessions)}, rows=${JSON.stringify(rows())};
+      const hiddenMode=mode==='hidden'||mode==='hidden-omitted', waitingModes=${JSON.stringify(waitingModes)};
+      const root=document.querySelector('#sidebar-body');
+      (async()=>{
+        await fetch('/me').then(r=>r.json());
+        if(mode==='legacy') await Promise.all([fetch('/api/sessions'),fetch('/api/contexts')]);
+        else await fetch('/api/session-navigation',{method:'POST',body:JSON.stringify({surface:'web'})}).then(r=>r.json());
+        if(mode!=='legacy') Object.assign(root.dataset,{sessionNavigation:'ready',sessionNavigationMode:'bounded',sessionNavigationPending:'',sessionRecentLoaded:String(rows.length),sessionRecentTotal:String(rows.length),sessionPinnedLoaded:'0',sessionPinnedTotal:'0',sessionGroupsLoaded:'1',sessionGroupsTotal:'1'});
+        root.setAttribute('aria-busy','false');
+        root.innerHTML='<section class="recent-project" data-scope-id="personal"><span class="recent-project-name">Personal</span><span class="recent-project-count">'+rows.length+'</span><div class="recent-project-menu"><button data-menu-id="project:personal">Options</button></div>'+rows.map(row=>'<div class="session-row" data-session-id="'+row.id+'"><a class="session"><span class="tl">'+row.title+'</span></a></div>').join('')+'</section>';
+        if(hiddenMode){
+          const chat=document.querySelector('.custom-chat');
+          chat.innerHTML=sessions.map((session,i)=>'<button role="tab" data-index="'+i+'">'+session.title+'</button><div data-pane-id="perf-pane-'+i+'" style="display:none">'+session.expectedVisibleText+'<textarea></textarea></div>').join('');
+          const loaded=new Set(),controllers=new Map(),visible=new Set();
+          const show=(i)=>{
+            for(const old of [...visible]) if(Math.floor(old/2)===Math.floor(i/2)){
+              void fetch('/modeled-hidden-phase',{method:'POST',body:JSON.stringify({hidden:old,loaded:loaded.has(old)})});
+              controllers.get(old)?.abort();visible.delete(old);
+              chat.querySelector('[data-pane-id="perf-pane-'+old+'"]').style.display='none';
+            }
+            visible.add(i);chat.querySelector('[data-pane-id="perf-pane-'+i+'"]').style.display='block';
+            if(loaded.has(i)||mode==='hidden-omitted'&&i===0)return;
+            const controller=new AbortController();controllers.set(i,controller);
+            void fetch('/api/session-navigation/page',{method:'POST',signal:controller.signal,body:JSON.stringify({parentSessionId:sessions[i].sessionId,children:true,actionable:true})}).then(r=>r.json()).then(()=>loaded.add(i)).catch(()=>{});
+          };
+          for(const button of chat.querySelectorAll('[role="tab"]'))button.onclick=()=>show(Number(button.dataset.index));
+          show(1);show(3);return;
+        }
+        if(mode==='legacy'||mode==='omitted')return;
+        const data=await fetch('/api/session-navigation/page',{method:'POST',body:JSON.stringify({parentSessionId:mode==='stale'?'stale':parent,children:true,actionable:true})}).then(r=>r.json());
+        if(!data.items.length)return;
+        const activity=document.querySelector('#activity');
+        activity.innerHTML='<section class="subagent-activity" data-parent-session-id="'+(mode==='wrong-render'?'old-parent':parent)+'" data-session-page-state="ready" data-loaded="'+data.items.length+'" data-total="'+data.total+'" aria-busy="false">'+(data.nextCursor?'<button data-session-page="subagents">Show more subagents</button>':'<div class="subagent-row waiting" data-session-id="private-child-0" data-depth="1"></div>')+'</section>';
+        if(mode==='missing-more')activity.querySelector('[data-session-page]').remove();
+        if(mode==='hidden-waiting')document.querySelector('.subagent-row').style.visibility='hidden';
+        if(waitingModes.includes(mode)&&mode!=='missing-approvals'){
+          const approvals=await fetch('/api/sessions/private-child-0/approvals').then(r=>r.json());
+          await new Promise(r=>setTimeout(r,80));
+          document.querySelector('.subagent-row').innerHTML=approvals.approvals.map(()=>'<div class="composer-approval">Modeled command<button class="approval-btn deny">Deny</button><button class="approval-btn">Allow once</button></div>').join('');
+          const approval=document.querySelector('.composer-approval');
+
+          if(mode==='hidden-approval')approval.style.display='none';
+          if(mode==='no-controls')for(const button of approval.querySelectorAll('button'))button.remove();
+          if(mode==='aria-disabled')for(const button of approval.querySelectorAll('button'))button.setAttribute('aria-disabled','true');
+          if(mode==='hidden-controls')for(const button of approval.querySelectorAll('button'))button.style.visibility='hidden';
+          if(mode==='missing-deny')approval.querySelector('.deny').remove();
+        }
+      })();
+    </script>`);
+    });
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    t.after(() => server.closeAllConnections());
+    const baseUrl = `http://127.0.0.1:${server.address().port}`;
+    const oldExitCode = process.exitCode;
+    try {
+      for (mode of [
+        "waiting",
+        "empty",
+        "more",
+        "legacy",
+        "omitted",
+        "malformed",
+        "stale",
+        "missing-approvals",
+        "wrong-render",
+        "missing-more",
+        "hidden",
+        "hidden-omitted",
+        "waiting-zero",
+        "hidden-approval",
+        "no-controls",
+        "aria-disabled",
+        "hidden-controls",
+        "missing-deny",
+        "hidden-waiting",
+        "hung-page",
+        "hung-approvals",
+      ]) {
+        const directory = join(output, mode);
+        hiddenPhases.length = 0;
+        await mkdir(directory);
+        const sidebarProfile = { transport: mode === "legacy" ? "legacy-get" : "navigation-post", sourceRevision };
+        const fixture = {
+          fixtureId: "modeled-actionable-only",
+          profileSha256: sha256("[]"),
+          cases: { short: { principalId: actor, sessionId: parent, expectedVisibleText: "Visible transcript" } },
+          browser: {
+            ...(hiddenMode() ? { multiview: sessions, maxPanels: 4, visibleGroups: 2 } : {}),
+            sidebarReadiness: {
+              schemaVersion: 1,
+              ...sidebarProfile,
+              actors: {
+                [actor]: {
+                  surface: "web",
+                  recent: { total: rows().length, allRows: rows() },
+                  pinned: { total: 0, rows: [], hasMore: false },
+                  groups: {
+                    total: 1,
+                    items: [{ ...group, count: rows().length }],
+                    hasMore: false,
+                    dynamicOrderScopes: [],
+                  },
+                  archivedCount: 0,
+                  allowedOffPageRows: rows(),
+                },
+              },
+            },
+          },
+        };
+        await writeFile(join(directory, "fixture.json"), JSON.stringify(fixture));
+        await writeFile(join(directory, "profiles.json"), "[]");
+        await writeFile(
+          join(directory, "config.json"),
+          JSON.stringify({
+            baseUrl,
+            isolated: true,
+            mode: "diagnostic",
+            loadCondition: "normal",
+            samples: 1,
+            sourceRevision,
+            sidebarProfile,
+            fixturePath: "fixture.json",
+            profilePath: "profiles.json",
+            outDir: "result",
+            localAuthPrincipal: actor,
+            filter: hiddenMode() ? "^web.multiview.hidden-return$" : "^web.chat.short$",
+            cacheFilter: hiddenMode() ? "warm" : "cold",
+            timeoutMs: 900,
+            browser: {
+              viewport: { width: 1000, height: 800 },
+              cpuThrottleRate: 1,
+              network: { latencyMs: 0, downloadBytesPerSecond: 10000000, uploadBytesPerSecond: 10000000 },
+            },
+          }),
+        );
+        const runStarted = performance.now();
+        await run(join(directory, "config.json"));
+        const runElapsedMs = performance.now() - runStarted;
+        const sample = JSON.parse((await readFile(join(directory, "result/samples.jsonl"), "utf8")).trim());
+        const summary = JSON.parse(await readFile(join(directory, "result/summary.json"), "utf8"));
+        assert.equal(summary.qualified, false);
+        const nativeRun = JSON.parse(await readFile(join(directory, "result/run.json"), "utf8"));
+        t.diagnostic(
+          JSON.stringify({
+            kind: "modeled-actionable-browser",
+            mode,
+            browserVersion: nativeRun.browserVersion,
+            status: sample.status,
+            durationMs: sample.durationMs,
+            actionable: sample.actionable,
+            requests: sample.requests,
+            errors: sample.errors,
+            runElapsedMs,
+            hungSocketClosed: hungClosed.has(mode),
+            qualified: false,
+          }),
+        );
+        const succeeds = ["waiting", "waiting-zero", "empty", "more", "legacy", "hidden"].includes(mode);
+        assert.equal(
+          sample.status,
+          succeeds ? "pass" : "failed",
+          `${mode}: ${sample.error?.stack ?? sample.error?.message}`,
+        );
+        if (mode === "hidden") {
+          assert.ok(hiddenPhases.some((entry) => entry.hidden === 0 && entry.loaded));
+          assert.ok(
+            hiddenPhases.every((entry) => entry.loaded),
+            JSON.stringify(hiddenPhases),
+          );
+          assert.equal(sample.preparation.requests.filter((entry) => entry.actionablePage).length, 3);
+          assert.equal(sample.requests.filter((entry) => entry.actionablePage).length, 0);
+          assert.deepEqual(
+            sample.actionable.map((entry) => entry.parentSha256),
+            [sha256("pane-0"), sha256("pane-3")],
+          );
+        }
+        if (mode === "hidden-omitted")
+          assert.equal(
+            hiddenPhases.some((entry) => entry.hidden === 0),
+            false,
+          );
+        if (mode === "hung-page" || mode === "hung-approvals") {
+          assert.ok(runElapsedMs < 5000, `Hung response finalization took ${runElapsedMs}ms`);
+          assert.ok(hungClosed.has(mode), "Owned context did not close held response");
+          assert.ok(sample.errors.some((entry) => entry.type === "observer-timeout" && entry.pendingObservations > 0));
+          assert.ok(sample.requests.some((entry) => entry.status === 200 && !entry.completed));
+        }
+        if (mode === "waiting-zero")
+          assert.deepEqual(sample.actionable[0].waiting, [{ idSha256: sha256("private-child-0"), count: 0 }]);
+        if (mode === "waiting") {
+          assert.ok(sample.durationMs >= 470, `Approval response/render excluded: ${sample.durationMs}`);
+          assert.deepEqual(sample.actionable[0].waiting, [{ idSha256: sha256("private-child-0"), count: 1 }]);
+        }
+        if (mode === "empty") {
+          assert.ok(sample.durationMs >= 170);
+          assert.equal(sample.actionable[0].loaded, 0);
+        }
+        if (mode === "more") assert.equal(sample.actionable[0].loaded, 50);
+        if (mode === "legacy") {
+          assert.deepEqual(sample.actionable, []);
+          assert.equal(
+            sample.requests.some((entry) => entry.path === "/api/session-navigation/page"),
+            false,
+          );
+        }
+      }
+    } finally {
+      process.exitCode = oldExitCode;
+      server.closeAllConnections();
+      await new Promise((resolve) => server.close(resolve));
+      await rm(output, { recursive: true, force: true });
+    }
+  },
+);
