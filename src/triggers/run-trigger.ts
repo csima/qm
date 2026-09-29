@@ -142,11 +142,12 @@ async function actorMayReadScope(
     return kind !== "group" && kind !== "channel" ? { ok: true } : { ok: false, note: MEMBERSHIP_SKIP_NOTE };
   if (kind === "group") {
     if (await isVisible(deps.directory, actorId, { kind: "group", groupId: ref })) return { ok: true };
+    const known = await deps.directory.groupMembership?.(ref, actorId).catch(() => undefined);
+    if (known === false) return { ok: false, note: MEMBERSHIP_SKIP_NOTE };
     if (snapshotGap) {
       if (await participatesInScope(deps, actorId, scope)) return { ok: true };
       return { ok: false, note: UNKNOWN_HOME_SKIP_NOTE };
     }
-    const known = await deps.directory.groupMembership?.(ref, actorId).catch(() => undefined);
     if (known === undefined && (await participatesInScope(deps, actorId, scope))) return { ok: true };
     return { ok: false, note: MEMBERSHIP_SKIP_NOTE };
   }
