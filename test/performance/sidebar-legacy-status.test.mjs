@@ -56,8 +56,7 @@ test("exact legacy notices refuse stale readiness while both real empty states r
         { fn: renderClient.toString(), data: { sessions: next.m.rows }, contexts: next.m.contexts },
       );
       await page.locator("#sidebar-body").evaluate((element) => {
-        for (const attribute of [...element.attributes])
-          if (attribute.name !== "id") element.removeAttribute(attribute.name);
+        for (const name of element.getAttributeNames()) if (name !== "id") element.removeAttribute(name);
       });
       assert.deepEqual(
         await page

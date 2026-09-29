@@ -255,7 +255,7 @@ function addPrepared(m, value) {
   return value;
 }
 function actionable(m, rows, parent = "web-000", options = {}) {
-  const input = { parentSessionId: parent, children: true, actionable: true, ...(options.input ?? {}) };
+  const input = { parentSessionId: parent, children: true, actionable: true, ...options.input };
   const key = JSON.stringify([
     input.surface ?? "all",
     null,

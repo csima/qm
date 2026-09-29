@@ -12,7 +12,7 @@ export function renderClient(data, transport, contexts, surface, limit = 50, ret
     : ordered(data.sessions.filter((r) => !r.parentSessionId && (surface !== "web" || web(r))));
   const allRecent = bounded ? data.recent.items : roots.filter((r) => !r.pinned && !r.archived);
   const pinned = bounded ? data.pinned.items : roots.filter((r) => r.pinned && !r.archived);
-  const recent = bounded ? allRecent : [...allRecent.filter((r, i) => i < limit || retainedIds.includes(r.id))];
+  const recent = bounded ? allRecent : allRecent.filter((r, i) => i < limit || retainedIds.includes(r.id));
   if (bounded)
     for (const reference of data.references ?? [])
       if (
