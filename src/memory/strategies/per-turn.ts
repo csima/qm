@@ -47,20 +47,17 @@ export const MEMORY_EXTRACTION_PROMPT = [
 
 const FACT_TAG = /\s*\[(personal|project)\]\s*$/i;
 
-export function parseFacts(out: string): string[] {
+function parseTaggedFacts(out: string): Array<{ text: string; personal: boolean }> {
   const trimmed = out.trim();
   if (!trimmed || /^none$/i.test(trimmed)) return [];
-  return bullets(trimmed)
-    .map((fact) => fact.replace(FACT_TAG, ""))
-    .filter(Boolean);
+  return bullets(trimmed).flatMap((line) => {
+    const text = line.replace(FACT_TAG, "");
+    return text ? [{ text, personal: FACT_TAG.exec(line)?.[1]?.toLowerCase() === "personal" }] : [];
+  });
 }
 
-function parsePersonalFlags(out: string): boolean[] {
-  const trimmed = out.trim();
-  if (!trimmed || /^none$/i.test(trimmed)) return [];
-  return bullets(trimmed)
-    .filter(Boolean)
-    .map((fact) => FACT_TAG.exec(fact)?.[1]?.toLowerCase() !== "project");
+export function parseFacts(out: string): string[] {
+  return parseTaggedFacts(out).map((fact) => fact.text);
 }
 
 export async function extractFacts(
@@ -68,20 +65,21 @@ export async function extractFacts(
   turns: Array<{ input: string; reply: string }>,
 ): Promise<{
   facts: string[];
-  personal: boolean[];
+  personalFacts: string[];
   sensitivity: NonNullable<MemoryCaptureMetadata["sensitivity"]>;
 }> {
-  if (!harness.oneShot) return { facts: [], personal: [], sensitivity: "unknown" };
+  if (!harness.oneShot) return { facts: [], personalFacts: [], sensitivity: "unknown" };
   try {
     const transcript = turns.map((t) => `User said:\n${t.input}\n\nAssistant replied:\n${t.reply}`).join("\n\n---\n\n");
     const out = await harness.oneShot(MEMORY_EXTRACTION_PROMPT, transcript);
+    const tagged = parseTaggedFacts(out ?? "");
     return {
-      facts: parseFacts(out ?? ""),
-      personal: parsePersonalFlags(out ?? ""),
+      facts: tagged.map((fact) => fact.text),
+      personalFacts: tagged.filter((fact) => fact.personal).map((fact) => fact.text),
       sensitivity: parseSensitivity(/^SENSITIVITY: (ordinary|unknown|sensitive|restricted)\n/.exec(out ?? "")?.[1]),
     };
   } catch {
-    return { facts: [], personal: [], sensitivity: "unknown" };
+    return { facts: [], personalFacts: [], sensitivity: "unknown" };
   }
 }
 
@@ -186,11 +184,10 @@ export function createPerTurnStrategy(deps: {
   onCaptureError?: (e: unknown, scopeId: ScopeId) => void;
 }): MemoryStrategy {
   async function flush(burst: Burst): Promise<void> {
-    const { facts, personal, sensitivity } = await extractFacts(deps.harness, burst.turns);
+    const { facts, personalFacts, sensitivity } = await extractFacts(deps.harness, burst.turns);
     if (!facts.length) return;
     const at = Date.now();
     await deps.memory.capture(burst.scopeId, facts, at, burst.actorId, { ...burstCaptureContext(burst), sensitivity });
-    const personalFacts = facts.filter((_, i) => personal[i]);
     await ccCaptureToPersonal(
       deps.memory,
       burst.conversationScopeId,

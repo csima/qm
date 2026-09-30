@@ -75,14 +75,17 @@ test("parseFacts: [personal]/[project] tags are stripped from the fact text", ()
   ]);
 });
 
-test("extractFacts: personal[] marks [personal] true, [project] false, and untagged true", async () => {
+test("extractFacts: personalFacts come from the same parsed bullet as their text, and fail closed", async () => {
   const harness: HarnessModelUtilities = {
     oneShot: () =>
-      Promise.resolve("- Prefers terse replies [personal]\n- Ships in Q4 [project]\n- Owns the billing service"),
+      Promise.resolve(
+        "SENSITIVITY: sensitive\n- [personal]\n- Ships in Q4 [project]\n- Owns the billing service\n- Prefers terse replies [personal]",
+      ),
   };
-  const { facts, personal } = await extractFacts(harness, [{ input: "hi", reply: "hello" }]);
-  assert.deepEqual(facts, ["Prefers terse replies", "Ships in Q4", "Owns the billing service"]);
-  assert.deepEqual(personal, [true, false, true]);
+  const result = await extractFacts(harness, [{ input: "hi", reply: "hello" }]);
+  assert.deepEqual(result.facts, ["Ships in Q4", "Owns the billing service", "Prefers terse replies"]);
+  assert.deepEqual(result.personalFacts, ["Prefers terse replies"]);
+  assert.equal(result.sensitivity, "sensitive");
 });
 
 test("per-turn swallows extraction failures and captures nothing", async () => {

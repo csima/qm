@@ -90,7 +90,7 @@ test("cc gates on the conversation scope, not the (environment-redirected) write
 
 test("the cc'd copy is tagged with where it was said; the channel's own copy stays clean", async () => {
   const harness: HarnessModelUtilities = {
-    oneShot: () => Promise.resolve("- Prefers all lowercase replies"),
+    oneShot: () => Promise.resolve("- Prefers all lowercase replies [personal]"),
   };
   const { workspace, memory } = freshMemory();
   const strategy = createPerTurnStrategy({ harness, memory });
@@ -316,4 +316,34 @@ test("a burst of only [project] facts captures the channel but skips the cc enti
 
   assert.match((await readMemory(workspace, CHANNEL)) ?? "", /Repro Alpha ships in Q4/);
   assert.equal(await readMemory(workspace, PERSONAL), null, "nothing cc'd — no personal-tagged facts in the burst");
+});
+
+test("a tag-only bullet cannot shift classification onto the next fact", async () => {
+  const harness: HarnessModelUtilities = {
+    oneShot: () =>
+      Promise.resolve("- [personal]\n- Owns billing service [project]\n- Prefers terse replies [personal]"),
+  };
+  const { workspace, memory } = freshMemory();
+  const strategy = createPerTurnStrategy({ harness, memory });
+  await strategy.onTurnEnd!({ scopeId: CHANNEL, input: INPUT, reply: REPLY, actorId: ACTOR });
+
+  const personalBody = (await readMemory(workspace, PERSONAL)) ?? "";
+  assert.match((await readMemory(workspace, CHANNEL)) ?? "", /Owns billing service/);
+  assert.doesNotMatch(personalBody, /Owns billing service/);
+  assert.match(personalBody, /Prefers terse replies \(said in a channel\)/);
+});
+
+test("untagged or malformed classification is captured to the channel but never cc'd", async () => {
+  const harness: HarnessModelUtilities = {
+    oneShot: () => Promise.resolve("- Uses flag PAY_V2\n- Ships in Q4 [persnal]\n- Owner is Priya [personal] later"),
+  };
+  const { workspace, memory } = freshMemory();
+  const strategy = createPerTurnStrategy({ harness, memory });
+  await strategy.onTurnEnd!({ scopeId: CHANNEL, input: INPUT, reply: REPLY, actorId: ACTOR });
+
+  const channelBody = (await readMemory(workspace, CHANNEL)) ?? "";
+  assert.match(channelBody, /Uses flag PAY_V2/);
+  assert.match(channelBody, /Ships in Q4/);
+  assert.match(channelBody, /Owner is Priya/);
+  assert.equal(await readMemory(workspace, PERSONAL), null);
 });
