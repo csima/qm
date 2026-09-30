@@ -93,17 +93,10 @@ export function effortLevelsForHarness(
   harnessId: string,
   model?: Model<Api>,
 ): Array<{ value: EffortLevel; label: string }> {
-  const advertised = (model as ModelMetadata | undefined)?.effortLevelsByHarness?.[harnessId];
-  return EFFORT_LEVELS.filter(({ value }) => {
-    if (advertised) return advertised.includes(value);
-    if (!["pi", "claude", "codex"].includes(harnessId) || !EFFORT_TIERS.includes(value)) return false;
-    if (value === "ultra") return harnessId === "codex";
-    if (value === "ultracode") return harnessId === "claude";
-    return true;
-  });
+  const advertised = (model as ModelMetadata | undefined)?.effortLevelsByHarness?.[harnessId] ?? [];
+  return EFFORT_LEVELS.filter(({ value }) => advertised.includes(value));
 }
 
-const EFFORT_TIERS: readonly EffortLevel[] = ["low", "medium", "high", "xhigh", "max", "ultra", "ultracode"];
 const PEAK_EFFORTS: readonly EffortLevel[] = ["max", "ultra", "ultracode"];
 
 export function isPeakEffort(harnessId: string, model: Model<Api> | undefined, level: string): boolean {

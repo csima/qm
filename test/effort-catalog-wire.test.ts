@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { createPiHarness } from "../src/harness/pi-harness.ts";
 import { builtInModelCatalog } from "../src/model/model-catalog.ts";
 import {
+  modelRequestOverrides,
   modelSupportedByHarness,
   parseEffort,
   resolveModel,
@@ -105,7 +106,7 @@ test("Pi sends every catalog model's offered effort to the provider exactly as s
         });
         assert.equal(result.reply, "ok");
         const body = bodies.at(-1)!;
-        assert.equal(body.model, resolveModel(modelId)!.id);
+        assert.equal(body.model, modelRequestOverrides(modelId)?.model ?? resolveModel(modelId)!.id);
         const sent = anthropic ? body.output_config?.effort : body.reasoning?.effort;
         assert.equal(sent, level === "default" || level === "adaptive" ? undefined : level);
         if (level === "adaptive") assert.equal(body.thinking?.type, "adaptive");

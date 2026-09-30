@@ -53,9 +53,8 @@ export class SettingsState extends SettingState {
     return this.context.harnessOptions?.length ? this.context.harnessOptions : [this.context.harnessDefault || "pi"];
   }
   get efforts(): string[] {
-    const advertised = this.models.find((model) => model.id === this.draft.modelId)?.effortLevels;
-    const levels: string[] = advertised ?? this.context.thinkingLevelsByHarness?.[this.draft.harnessId] ?? [];
-    return levels.filter((level) => level !== "auto" && (advertised || (level !== "adaptive" && level !== "default")));
+    const advertised = this.models.find((model) => model.id === this.draft.modelId)?.effortLevels ?? [];
+    return advertised.filter((level) => level !== "auto");
   }
   get fastCapable() {
     return (

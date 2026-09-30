@@ -81,7 +81,6 @@ test("runtime resolution carries reasoning and fast-mode defaults into turns", (
     {
       harnessId: "codex",
       modelId: "gpt-5.5",
-      effortLevel: "high",
       fastMode: false,
     },
   );

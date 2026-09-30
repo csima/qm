@@ -198,22 +198,23 @@ test("the model catalog falls back from unavailable saved harnesses using only c
   assert.deepEqual(modelLoadoutOptions([], saved, "claude"), []);
 });
 
-test("harness effort choices exclude unsupported settings and label extra high clearly", () => {
-  assert.deepEqual(
-    effortLevelsForHarness("pi").map(({ value }) => value),
-    ["low", "medium", "high", "xhigh", "max"],
-  );
-  assert.deepEqual(
-    effortLevelsForHarness("claude").map(({ value }) => value),
-    ["low", "medium", "high", "xhigh", "max", "ultracode"],
-  );
-  assert.deepEqual(
-    effortLevelsForHarness("codex").map(({ value }) => value),
-    ["low", "medium", "high", "xhigh", "max", "ultra"],
-  );
+test("harness effort choices come from the model's advertised levels and label extra high clearly", () => {
+  const model = {
+    ...option("pi:one").model,
+    effortLevelsByHarness: {
+      pi: ["auto", "low", "medium", "high", "xhigh", "max"],
+      claude: ["auto", "low", "medium", "high", "xhigh", "max", "ultracode"],
+      codex: ["auto", "low", "medium", "high", "xhigh", "max", "ultra"],
+      opencode: ["auto"],
+    },
+  };
+  const menu = (harnessId: string) => effortLevelsForHarness(harnessId, model).map(({ value }) => value);
+  assert.deepEqual(menu("pi"), ["low", "medium", "high", "xhigh", "max"]);
+  assert.deepEqual(menu("claude"), ["low", "medium", "high", "xhigh", "max", "ultracode"]);
+  assert.deepEqual(menu("codex"), ["low", "medium", "high", "xhigh", "max", "ultra"]);
   for (const harnessId of ["pi", "claude", "codex"])
-    assert.equal(effortLevelsForHarness(harnessId).find(({ value }) => value === "xhigh")?.label, "Extra high");
-  for (const harnessId of ["opencode", "mock", "unknown"]) assert.deepEqual(effortLevelsForHarness(harnessId), []);
+    assert.equal(effortLevelsForHarness(harnessId, model).find(({ value }) => value === "xhigh")?.label, "Extra high");
+  for (const harnessId of ["opencode", "mock", "unknown"]) assert.deepEqual(menu(harnessId), []);
 });
 
 test("native reasoning choices require model and harness metadata while legacy settings survive", () => {
@@ -286,10 +287,11 @@ test("only the top tier each provider offers is the rainbow peak", () => {
 });
 
 test("the Anthropic default effort is only Low where the model offers it", () => {
-  const model = option("pi:one").model;
+  const model = { ...option("pi:one").model, effortLevelsByHarness: { pi: ["auto", "low"] } };
   assert.equal(defaultEffortForModel(model), "low");
   const haiku = { ...model, effortLevelsByHarness: { pi: ["auto", "default"], claude: ["auto"] } };
   assert.equal(defaultEffortForModel(haiku), "auto");
+  assert.equal(defaultEffortForModel(option("pi:one").model), "auto");
 });
 
 test("Astra speed variants share a preset and preserve a saved tier", () => {
@@ -300,4 +302,20 @@ test("Astra speed variants share a preset and preserve a saved tier", () => {
   assert.deepEqual(modelLoadoutOptions([base, ultra], [saved], "pi"), [ultra]);
   assert.deepEqual(modelLoadoutOptions([ultra], [], "pi"), [ultra]);
   assert.deepEqual(upsertLoadout([entry(base.value)], saved), [saved]);
+});
+
+test("the effort menu lists exactly what the model advertises for its harness and has no built-in fallback", () => {
+  const model = {
+    ...option("pi:one").model,
+    effortLevelsByHarness: { pi: ["auto", "default", "low", "xhigh"], codex: ["auto", "low", "ultra"] },
+  };
+  const menu = (harnessId: string, candidate?: typeof model) =>
+    effortLevelsForHarness(harnessId, candidate).map(({ value }) => value);
+  assert.deepEqual(menu("pi", model), ["default", "low", "xhigh"]);
+  assert.deepEqual(menu("codex", model), ["low", "ultra"]);
+  assert.deepEqual(menu("claude", model), []);
+  assert.deepEqual(menu("pi"), []);
+  assert.deepEqual(menu("codex", { ...model, effortLevelsByHarness: undefined } as never), []);
+  for (const level of ["low", "medium", "high", "xhigh", "max", "ultra", "ultracode", "adaptive", "default"] as const)
+    assert.ok([level, "auto"].includes(resolveEffort("pi", model, level)), level);
 });

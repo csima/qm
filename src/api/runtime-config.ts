@@ -18,7 +18,6 @@ import {
   modelUnavailableReason,
   parseEffort,
   parseRuntimeChoice,
-  storedEffort,
   harnessSupportsFastMode,
   codexProviderModelId,
   codexSubscriptionModelId,
@@ -120,7 +119,7 @@ export async function runtimeConfigBody(
       harnessId: orgStored.harnessId,
       modelId: orgStored.modelId,
       ...(orgStored.effortLevel
-        ? { effortLevel: storedEffort(orgStored.harnessId, orgStored.modelId, orgStored.effortLevel) }
+        ? { effortLevel: parseEffort(orgStored.harnessId, orgStored.modelId, orgStored.effortLevel) }
         : {}),
       ...(typeof orgStored.fastMode === "boolean" ? { fastMode: orgStored.fastMode } : {}),
       revision: orgStored.revision ?? 0,
@@ -141,9 +140,7 @@ export async function runtimeConfigBody(
     scopeOverride = {
       harnessId: stored.harnessId,
       modelId: stored.modelId,
-      ...(stored.effortLevel
-        ? { effortLevel: storedEffort(stored.harnessId, stored.modelId, stored.effortLevel) }
-        : {}),
+      ...(stored.effortLevel ? { effortLevel: parseEffort(stored.harnessId, stored.modelId, stored.effortLevel) } : {}),
       ...(typeof stored.fastMode === "boolean" ? { fastMode: stored.fastMode } : {}),
       orgRevision: stored.orgRevision,
     };

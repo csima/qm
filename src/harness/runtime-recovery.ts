@@ -1,6 +1,7 @@
 import type { RuntimeChoice } from "./harness.ts";
 import type { SessionEntry } from "../types.ts";
-import { isHarnessId, storedEffort } from "../model/pi-models.ts";
+import { isHarnessId, parseRuntimeChoice } from "../model/pi-models.ts";
+import { NonRetryableTurnError } from "../core/turn-error.ts";
 import { isObj } from "../util/objects.ts";
 
 export function recoveredRuntime(
@@ -27,13 +28,9 @@ export function recoveredRuntime(
       (choice.effortLevel === undefined || typeof choice.effortLevel === "string") &&
       (choice.fastMode === undefined || typeof choice.fastMode === "boolean")
     ) {
-      const effortLevel = storedEffort(choice.harnessId, choice.modelId, choice.effortLevel);
-      return {
-        harnessId: choice.harnessId,
-        modelId: choice.modelId,
-        ...(effortLevel ? { effortLevel } : {}),
-        ...(choice.fastMode !== undefined ? { fastMode: choice.fastMode } : {}),
-      };
+      const parsed = parseRuntimeChoice(choice, choice.effortLevel !== undefined);
+      if (!parsed.ok) throw new NonRetryableTurnError(parsed.message);
+      return parsed.choice;
     }
   }
   return undefined;

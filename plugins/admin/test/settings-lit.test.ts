@@ -24,8 +24,10 @@ const models = {
   baseModelOptions: [{ id: "a", name: "Alpha" }],
   harnessDefault: "pi",
   harnessOptions: ["pi", "codex"],
-  modelsByHarness: { pi: [{ id: "a", name: "Alpha" }], codex: [{ id: "b", name: "Beta" }] },
-  thinkingLevelsByHarness: { pi: ["auto", "high"], codex: ["low"] },
+  modelsByHarness: {
+    pi: [{ id: "a", name: "Alpha", effortLevels: ["auto", "high"] }],
+    codex: [{ id: "b", name: "Beta", effortLevels: ["auto", "low"] }],
+  },
   runtime: { harnessId: "pi", modelId: "a", effortLevel: "high", fastMode: true },
   fastModeHarnessIds: ["pi"],
   fastModeModelIds: ["a"],
@@ -173,7 +175,6 @@ test("runtime reasoning choices follow the selected model and keep an unset leve
           { id: "b", effortLevels: ["auto", "high"] },
         ],
       },
-      thinkingLevelsByHarness: { pi: ["auto", "adaptive", "default", "high"] },
       runtime: { harnessId: "pi", modelId: "a", effortLevel: "auto" },
     };
     dom.window.eval("settingsUI.load(" + JSON.stringify(data) + ',"org:test","runtime")');
@@ -213,10 +214,7 @@ test("runtime reasoning choices follow the selected model and keep an unset leve
     dom.window.eval(
       'settingsUI.states.get("runtime").context.modelsByHarness.pi = [{id:"b"}]; settingsUI.states.get("runtime").changed()',
     );
-    assert.deepEqual(choices(), [
-      ["auto", "Not set"],
-      ["high", "High"],
-    ]);
+    assert.deepEqual(choices(), [["auto", "Not set"]]);
   } finally {
     dom.window.close();
   }

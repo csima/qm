@@ -15,7 +15,6 @@ import {
   modelProviderAvailabilityFor,
   resolveModel,
   parseRuntimeChoice,
-  storedEffort,
   type ParsedRuntimeChoice,
   selectableBaseModels,
   ALL_PROVIDERS_AVAILABLE,
@@ -587,9 +586,7 @@ export const ADMIN_RESOURCES: readonly AdminResource[] = [
           {
             harnessId,
             modelId,
-            effortLevel:
-              effortLevel ??
-              (base.modelId === modelId ? storedEffort(harnessId, modelId, base.effortLevel) : base.effortLevel),
+            effortLevel: effortLevel ?? base.effortLevel,
             ...(typeof base.fastMode === "boolean"
               ? {
                   fastMode: base.fastMode && harnessSupportsFastMode(harnessId) && fastModeModelIds().includes(modelId),

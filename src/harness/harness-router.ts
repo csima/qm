@@ -7,7 +7,6 @@ import {
   modelSupportedByHarness,
   resolveModel,
   parseEffort,
-  storedEffort,
   effortNotOfferedMessage,
   modelUnavailableReason,
   type EffortLevel,
@@ -115,9 +114,14 @@ function resolvedEffort(
   requested: string | undefined,
   inherited: StoredRuntime | undefined,
 ): EffortLevel | undefined {
-  if (requested === undefined) return storedEffort(target.harnessId, target.modelId, inherited?.effortLevel);
-  const effort = parseEffort(target.harnessId, target.modelId, requested);
-  if (!effort) throw new NonRetryableTurnError(effortNotOfferedMessage(target.harnessId, target.modelId, requested));
+  const sameRuntime = inherited?.harnessId === target.harnessId && inherited.modelId === target.modelId;
+  const level = requested ?? (sameRuntime ? inherited.effortLevel : undefined);
+  if (level === undefined) return undefined;
+  const effort = parseEffort(target.harnessId, target.modelId, level);
+  if (!effort)
+    throw new NonRetryableTurnError(
+      effortNotOfferedMessage(target.harnessId, target.modelId, level, requested === undefined),
+    );
   return effort;
 }
 

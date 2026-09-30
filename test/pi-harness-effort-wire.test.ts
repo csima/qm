@@ -119,20 +119,21 @@ for (const [modelId, upper, allowed] of [
     t.after(() => harness.turns.close?.());
     // Repeat turns in the same conversation with different effort selections.
     for (const [effortLevel, expected] of [
-      ["max", upper],
+      ["max", null],
       ["medium", "medium"],
       ["low", "low"],
       ["high", "high"],
-      ["minimal", modelId === "gpt-5" ? "minimal" : "low"],
-      ["off", modelId === "gpt-5" ? "minimal" : "none"],
-      ["xhigh", upper],
+      ["minimal", modelId === "gpt-5" ? "minimal" : null],
+      ["off", modelId === "gpt-5" ? null : "none"],
+      ["xhigh", modelId === "gpt-5" ? null : upper],
       ["auto", "medium"],
       ["default", undefined],
     ]) {
       await t.test(effortLevel!, async () => {
         let seq = 0;
         sendTool = effortLevel === "default";
-        const result = await harness.turns.runTurn({
+        const sent = bodies.length;
+        const turn = harness.turns.runTurn({
           session: { id: `effort-${modelId}` } as HarnessTurnInput["session"],
           input: "hello",
           systemPrompt: "Reply ok.",
@@ -145,6 +146,12 @@ for (const [modelId, upper, allowed] of [
           recordModelCall: () => {},
           cancel: AbortSignal.timeout(10_000),
         });
+        if (expected === null) {
+          await assert.rejects(turn, new RegExp(`effort ${effortLevel} isn't available on pi/${modelId}`));
+          assert.equal(bodies.length, sent);
+          return;
+        }
+        const result = await turn;
         assert.equal(result.reply, "ok");
         assert.equal(bodies.at(-1)?.reasoning?.effort, expected);
         if (effortLevel === "default") {

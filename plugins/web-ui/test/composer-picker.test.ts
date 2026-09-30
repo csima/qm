@@ -22,6 +22,12 @@ function model(id: string, label: string, provider = "anthropic"): ModelMetadata
     contextWindow: 100_000,
     maxTokens: 4096,
     fastMode: true,
+    effortLevelsByHarness: {
+      pi: ["auto", "low", "medium", "high", "xhigh", "max"],
+      claude: ["auto", "low", "medium", "high", "xhigh", "max", "ultracode"],
+      codex: ["auto", "low", "medium", "high", "xhigh", "max", "ultra"],
+      opencode: ["auto"],
+    },
   };
 }
 

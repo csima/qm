@@ -110,25 +110,6 @@ export function effortNotOfferedMessage(harnessId: HarnessId, modelId: string, l
   return `effort ${level} isn't available on ${harnessId}/${modelId}${carried ? "; pass an effort" : ""} (valid: ${levels})`;
 }
 
-const droppedStoredEfforts = new Set<string>();
-
-export function storedEffort(
-  harnessId: HarnessId,
-  modelId: string,
-  level: string | undefined,
-): EffortLevel | undefined {
-  if (level === undefined) return undefined;
-  const effort = parseEffort(harnessId, modelId, level);
-  const key = `${harnessId}/${modelId}/${level}`;
-  if (!effort && !droppedStoredEfforts.has(key)) {
-    droppedStoredEfforts.add(key);
-    console.warn(
-      `[runtime] stored ${effortNotOfferedMessage(harnessId, modelId, level)}; running unset until next save`,
-    );
-  }
-  return effort;
-}
-
 export type ParsedRuntimeChoice = { ok: true; choice: RuntimeChoice } | { ok: false; error: string; message: string };
 
 export function parseRuntimeChoice(

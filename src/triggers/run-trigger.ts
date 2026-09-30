@@ -12,7 +12,6 @@ import type { IdentityService } from "../identity/identity-service.ts";
 import type { DeliveryStore } from "../delivery/delivery-store.ts";
 import type { IdempotencyStore } from "../idempotency/idempotency-store.ts";
 import { turnModelOptions } from "../core/turn-options.ts";
-import { storedEffort } from "../model/pi-models.ts";
 import { userFacingFailureClause } from "../core/failure-copy.ts";
 import { principalDestination, reachEnqueue } from "../reach/reach.ts";
 import { consentRequiredRecipient, recipientConsentSatisfied } from "./trigger-store.ts";
@@ -337,9 +336,7 @@ export async function runTrigger(deps: TriggerDeps, spec: TriggerSpec): Promise<
         ...turnModelOptions({
           triggered: true,
           surface: spec.surface,
-          thinkingLevel:
-            (spec.runtime && storedEffort(spec.runtime.harnessId, spec.runtime.modelId, spec.runtime.effortLevel)) ??
-            spec.thinkingLevel,
+          thinkingLevel: spec.runtime?.effortLevel ?? spec.thinkingLevel,
           fastMode: spec.fastMode ?? spec.runtime?.fastMode,
         }),
         ...(spec.model ? { model: spec.model } : {}),

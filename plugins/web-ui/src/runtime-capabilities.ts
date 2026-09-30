@@ -35,6 +35,6 @@ export function defaultEffortForModel(model: Model<Api> | undefined): EffortLeve
   const provider = String(model?.provider ?? model?.api ?? "").toLowerCase();
   const levels = (model as { effortLevelsByHarness?: Record<string, readonly string[]> } | undefined)
     ?.effortLevelsByHarness;
-  const offersLow = !levels || Object.values(levels).some((offered) => offered.includes("low"));
+  const offersLow = Object.values(levels ?? {}).some((offered) => offered.includes("low"));
   return provider.includes("anthropic") && offersLow ? "low" : "auto";
 }

@@ -3,8 +3,16 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { AddressInfo } from "node:net";
 import { clampThinkingLevel } from "@earendil-works/pi-ai";
-import { parseRuntimeChoice, resolveModel, storedEffort, thinkingLevelsForHarness } from "../src/model/pi-models.ts";
+import {
+  THINKING_LEVELS,
+  modelSupportedByHarness,
+  parseRuntimeChoice,
+  resolveModel,
+  thinkingLevelsForHarness,
+} from "../src/model/pi-models.ts";
+import { builtInModelCatalog } from "../src/model/model-catalog.ts";
 import { codexReasoningEffort } from "../src/harness/codex-harness.ts";
+import { applyTurnEffort } from "../src/harness/pi-harness.ts";
 import { resolveRuntimeChoice } from "../src/harness/harness-router.ts";
 import { createRuntimeService } from "../src/harness/runtime-control.ts";
 import { recoveredRuntime } from "../src/harness/runtime-recovery.ts";
@@ -95,8 +103,7 @@ test("the runtime tool rejects invalid efforts, including one carried over to a 
   assert.equal(config.getRuntimeSelection(SCOPE)?.effortLevel, "ultra");
 });
 
-test("explicit turn and sessions-open efforts are rejected; a carried one that does not fit runs unset", (t) => {
-  t.mock.method(console, "warn", () => {});
+test("turn and sessions-open overrides reject an unoffered effort and swap to a new runtime without inheriting one", () => {
   const config = createMemoryConfigStore("default-org");
   config.setApprovedHarnesses(["pi", "claude", "codex"]);
   config.setRuntimeSelection(
@@ -122,27 +129,26 @@ test("explicit turn and sessions-open efforts are rejected; a carried one that d
   );
 });
 
-test("a stored effort from before this check runs unset, warns once, and is replaced on the next save", async (t) => {
-  const warnings: string[] = [];
-  t.mock.method(console, "warn", (message: string) => warnings.push(message));
+test("a saved effort the model no longer offers fails the turn by name until an offered effort is saved", async () => {
   const config = createMemoryConfigStore("default-org");
   config.setApprovedHarnesses(["pi", "codex"]);
-  const legacy = { harnessId: "codex" as const, modelId: "gpt-5.6-luna", effortLevel: "ultra" };
-  config.setRuntimeSelection(SCOPE, legacy as ReturnType<typeof runtimeChoice>);
+  const stale = { harnessId: "pi" as const, modelId: "claude-opus-5-5", effortLevel: "ultracode" };
+  config.setRuntimeSelection(SCOPE, stale as ReturnType<typeof runtimeChoice>);
   const fallback = { harnessId: "pi" as const, modelId: "claude-opus-5-5" };
-  for (let i = 0; i < 3; i++)
-    assert.deepEqual(resolveRuntimeChoice(config, ORG, SCOPE, fallback), {
-      harnessId: "codex",
-      modelId: "gpt-5.6-luna",
-    });
-  assert.equal(storedEffort("codex", "gpt-5.6-luna", "ultra"), undefined);
-  assert.equal(warnings.length, 1);
-  assert.match(warnings[0]!, /stored effort ultra isn't available on codex\/gpt-5.6-luna/);
+  assert.throws(() => resolveRuntimeChoice(config, ORG, SCOPE, fallback), {
+    message: `effort ultracode isn't available on pi/claude-opus-5-5; pass an effort (valid: ${valid("pi", "claude-opus-5-5")})`,
+  });
   const service = createRuntimeService({ config, harnessId: "pi" }, { authorizesCapabilityScope: async () => true });
   const claims = { actorId: "alice", scopeId: SCOPE, liveActor: true, exp: Date.now() + 60_000 } as const;
-  const active = resolveRuntimeChoice(config, ORG, SCOPE, fallback);
-  assert.equal((await service(claims, active, { action: "set", fastMode: false, lifetime: "scope" })).ok, true);
-  assert.equal(config.getRuntimeSelection(SCOPE)?.effortLevel, "auto");
+  const active = { harnessId: "pi" as const, modelId: "claude-opus-5-5" };
+  const fixed = await service(claims, active, { action: "set", effort: "xhigh", lifetime: "scope" });
+  assert.equal(fixed.ok, true);
+  assert.deepEqual(resolveRuntimeChoice(config, ORG, SCOPE, fallback), {
+    harnessId: "pi",
+    modelId: "claude-opus-5-5",
+    effortLevel: "xhigh",
+    fastMode: false,
+  });
 });
 
 test("the web picker, admin settings and cron writers reject an effort the model does not offer", async () => {
@@ -191,8 +197,7 @@ test("the web picker, admin settings and cron writers reject an effort the model
   }
 });
 
-test("a recovered legacy handoff keeps its harness and model and drops only the effort", (t) => {
-  t.mock.method(console, "warn", () => {});
+test("a recovered handoff whose effort the model no longer offers fails instead of running without it", () => {
   const entry = {
     type: "tool_result",
     payload: {
@@ -202,9 +207,56 @@ test("a recovered legacy handoff keeps its harness and model and drops only the 
       runtimeHandoff: { choice: { harnessId: "codex", modelId: "gpt-6-luna", effortLevel: "ultra", fastMode: false } },
     },
   } as unknown as SessionEntry;
-  assert.deepEqual(recoveredRuntime([entry], "run", "alice"), {
-    harnessId: "codex",
-    modelId: "gpt-6-luna",
-    fastMode: false,
+  assert.throws(() => recoveredRuntime([entry], "run", "alice"), {
+    message: `effort ultra isn't available on codex/gpt-6-luna; pass an effort (valid: ${valid("codex", "gpt-6-luna")})`,
   });
+});
+
+test("every selectable effort resolves to exactly itself, and every other level is refused", () => {
+  const config = createMemoryConfigStore("default-org");
+  config.setApprovedHarnesses(["pi", "claude", "codex"]);
+  const fallback = { harnessId: "pi" as const, modelId: "claude-opus-5-5" };
+  let checked = 0;
+  for (const harnessId of ["pi", "claude", "codex"] as const)
+    for (const { id: modelId } of builtInModelCatalog().filter(({ id }) => modelSupportedByHarness(id, harnessId))) {
+      const offered = thinkingLevelsForHarness(harnessId, modelId);
+      for (const level of THINKING_LEVELS) {
+        const saved = () => {
+          config.setRuntimeSelection(SCOPE, { harnessId, modelId, effortLevel: level } as ReturnType<
+            typeof runtimeChoice
+          >);
+          return resolveRuntimeChoice(config, ORG, SCOPE, fallback);
+        };
+        const requested = () =>
+          resolveRuntimeChoice(config, ORG, SCOPE, fallback, { harnessId, modelId, effortLevel: level });
+        for (const resolve of [saved, requested]) {
+          checked++;
+          if (offered.includes(level)) assert.equal(resolve().effortLevel, level, `${harnessId}/${modelId} ${level}`);
+          else assert.throws(resolve, /isn't available on/, `${harnessId}/${modelId} ${level}`);
+        }
+        if (harnessId === "pi" && offered.includes(level) && !["auto", "default", "adaptive"].includes(level))
+          assert.equal(clampThinkingLevel(resolveModel(modelId)!, level as never), level, `pi/${modelId} ${level}`);
+        if (harnessId === "codex" && offered.includes(level) && level !== "auto")
+          assert.equal(codexReasoningEffort(level), level, `codex/${modelId} ${level}`);
+      }
+    }
+  assert.ok(checked > 200);
+});
+
+test("Pi refuses an effort the model does not offer instead of clamping it to a neighbor", () => {
+  const session = (modelId: string) => ({
+    state: { model: resolveModel(modelId), thinkingLevel: "high" },
+    setThinkingLevel(level: string) {
+      this.state.thinkingLevel = level;
+    },
+  });
+  const astra = session("gpt-6-astra");
+  assert.throws(() => applyTurnEffort(astra as never, "ultracode"), /effort ultracode isn't a Pi effort level/);
+  assert.throws(() => applyTurnEffort(astra as never, "ultra"), /effort ultra isn't a Pi effort level/);
+  const opus46 = session("claude-opus-4-6");
+  assert.throws(() => applyTurnEffort(opus46 as never, "xhigh"), /effort xhigh isn't available on pi\/claude-opus-4-6/);
+  assert.equal(astra.state.thinkingLevel, "high");
+  assert.equal(opus46.state.thinkingLevel, "high");
+  applyTurnEffort(astra as never, "max");
+  assert.equal(astra.state.thinkingLevel, "max");
 });
