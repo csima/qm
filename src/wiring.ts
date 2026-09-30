@@ -1661,7 +1661,7 @@ export function buildApp(
       : undefined;
   const buildDeployProvider: Record<Config["deployProvider"], () => DeployProvider> = {
     aws: buildAwsDeploy,
-    docker: () => createDockerDeployProvider({ dataRoot: join(config.dataDir, "docker-deploy-data") }),
+    docker: createDockerDeployProvider,
     fly: () =>
       createFlyDeployProvider({
         ...config.flyDeploy,
