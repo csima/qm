@@ -17,7 +17,7 @@ import {
 import { sandboxScopeName } from "../src/sandbox/exec-sandbox-base.ts";
 import { createLocalWorkspaceStore } from "../src/workspace/workspace-store.ts";
 import { execFailureDetail, supportsProcessSessions, supportsBlobStaging } from "../src/sandbox/sandbox.ts";
-import { createMemorySnapshotStore } from "../src/sandbox/home-snapshot.ts";
+import { createMemorySnapshotStore, type SnapshotBookkeeping } from "../src/sandbox/home-snapshot.ts";
 import { sleep } from "../src/util/async.ts";
 import { createMemoryBlobTransferStore } from "../src/persistence/blob-transfer.ts";
 import { scopeId } from "../src/types.ts";
@@ -312,14 +312,38 @@ test("an unchanged home is not checkpointed once its state is known", async () =
   assert.deepEqual(fake.checkpoints(h.id), ["v1", "v2"]);
 });
 
-test("a checkpoint failure is reported and never fails the teardown", async () => {
-  const events: Array<{ code: string }> = [];
-  const s = make({ onError: (e: { code: string }) => events.push(e) });
-  const h = await s.provision(layers);
-  fake.fail502(h.id);
-  fake.unhealthy(h.id, "checkpoint store offline");
-  await s.teardown(h);
-  assert.ok(fake.checkpoints(h.id).length <= 1);
+test("a stuck checkpoint backs off instead of retrying every teardown, shared across cores", async (t) => {
+  const events: Array<{ code: string; message: string }> = [];
+  const checkpointBooks = createMemoryMap<SnapshotBookkeeping>();
+  const advisoryLock = createMemoryAdvisoryLock();
+  const onError = (e: { code: string; message: string }) => events.push(e);
+  const coreA = make({ checkpointIntervalMs: 1, checkpointBooks, advisoryLock, onError });
+  const coreB = make({ checkpointIntervalMs: 1, checkpointBooks, advisoryLock, onError });
+  const h = await coreA.provision(layers);
+  fake.collideCheckpoints(h.id, true);
+  const attempts = () => fake.calls.filter((c) => c.method === "POST" && c.path.endsWith("/checkpoint")).length;
+  const now = Date.now();
+  t.mock.timers.enable({ apis: ["Date"], now });
+  for (let i = 0; i < 10; i++) await (i % 2 ? coreB : coreA).teardown(h);
+  assert.equal(attempts(), 1, "one failure holds off every later teardown on either core");
+  assert.equal(events.filter((e) => e.code === "checkpoint_failed").length, 1);
+  assert.match(events[0]!.message, /file exists/);
+  t.mock.timers.setTime(now + 6 * 60_000);
+  await coreB.teardown(h, { homeUnchanged: true });
+  assert.equal(attempts(), 2, "a failed checkpoint leaves the home dirty, so a quiet turn retries it");
+  t.mock.timers.setTime(now + 8 * 60_000);
+  await coreA.teardown(h);
+  assert.equal(attempts(), 2, "the second failure doubles the wait");
+  fake.collideCheckpoints(h.id, false);
+  t.mock.timers.setTime(now + 20 * 60_000);
+  await coreA.teardown(h);
+  assert.deepEqual(fake.checkpoints(h.id), ["v1"], "recovery checkpoints again");
+  assert.deepEqual(await checkpointBooks.get(h.id), {
+    lastSnapshotMs: now + 20 * 60_000,
+    homeDirty: false,
+    snapshotFailures: undefined,
+    snapshotRetryAtMs: undefined,
+  });
 });
 
 test("computerStatus reports checkpoint recovery and a healthy machine whose shell has stopped answering", async () => {

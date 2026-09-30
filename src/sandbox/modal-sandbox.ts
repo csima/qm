@@ -37,7 +37,10 @@ import {
   createMemorySnapshotStore,
   HOME_SNAPSHOT_PRUNE,
   snapshotDue,
+  snapshotFailed,
+  snapshotSucceeded,
   type HomeSnapshotStore,
+  type SnapshotBookkeeping,
 } from "./home-snapshot.ts";
 import type {
   AgentComputerProfile,
@@ -63,7 +66,7 @@ const swallowGone = (error: unknown): void => {
 };
 const SNAPSHOT_PRUNE = ["./.qm-hydrated", ...HOME_SNAPSHOT_PRUNE];
 
-export interface StoredModalSandbox {
+export interface StoredModalSandbox extends SnapshotBookkeeping {
   sandboxId: string;
   hydrationPending?: boolean;
   nativeSnapshotId?: string;
@@ -72,10 +75,8 @@ export interface StoredModalSandbox {
   recoveryError?: string;
   snapshotGeneration?: number;
   createdAtMs: number;
-  lastSnapshotMs?: number;
   lastSnapshotAttemptMs?: number;
   lastActivityMs?: number;
-  homeDirty?: boolean;
   orgId?: string;
 }
 
@@ -192,8 +193,7 @@ export function createModalSandbox(workspace: WorkspaceStore, opts: ModalSandbox
                 nativeSnapshotExpiresAtMs: snapshot.expiresAtMs,
                 recoveryError: undefined,
                 lastSnapshotAttemptMs: undefined,
-                lastSnapshotMs: capturedAtMs,
-                homeDirty: false,
+                ...snapshotSucceeded(capturedAtMs),
               }
             : current,
         );
@@ -209,7 +209,7 @@ export function createModalSandbox(workspace: WorkspaceStore, opts: ModalSandbox
       }
     } else {
       await homeSnapshots.snapshotHome(scope, session);
-      await store.merge(scope, { lastSnapshotMs: Date.now(), homeDirty: false });
+      await store.merge(scope, snapshotSucceeded());
     }
   }
 
@@ -929,7 +929,9 @@ export function createModalSandbox(workspace: WorkspaceStore, opts: ModalSandbox
             await store.merge(scope, { lastActivityMs: Date.now() });
           } catch (e) {
             reportError("sandbox_snapshot", "teardown_snapshot_failed", errMessage(e), scope);
-            await store.merge(scope, { lastActivityMs: Date.now() }).catch(() => undefined);
+            await store
+              .merge(scope, { ...snapshotFailed(stored, snapshotIntervalMs(stored)), lastActivityMs: Date.now() })
+              .catch(() => undefined);
           }
         } else {
           await store.merge(scope, { lastActivityMs: Date.now() }).catch(() => undefined);

@@ -618,6 +618,7 @@ test("legacy pause preserves dirty home after failed portable checkpoint and ret
   await first.teardown(resumed);
   assert.equal((await store.get(scope))?.homeDirty, true);
   portable.failWrites(false);
+  await store.merge(scope, { snapshotRetryAtMs: 1 });
   const unused = await first.provision(layers);
   await first.teardown(unused, { homeUnchanged: true });
   assert.equal(portable.puts(), 2);

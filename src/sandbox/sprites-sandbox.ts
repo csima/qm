@@ -25,6 +25,8 @@ import {
   createHomeSnapshotOps,
   HOME_SNAPSHOT_PRUNE,
   snapshotDue,
+  snapshotFailed,
+  snapshotSucceeded,
   type HomeSnapshotStore,
   type SnapshotBookkeeping,
 } from "./home-snapshot.ts";
@@ -127,6 +129,7 @@ export interface SpritesSandboxOptions extends BlobStagingOptions {
   checkpointIntervalMs?: number;
   snapshots?: HomeSnapshotStore;
   initializationStore?: DurableMap<{ pending: boolean }>;
+  checkpointBooks?: DurableMap<SnapshotBookkeeping>;
   advisoryLock?: AdvisoryLock;
   extraTools?: string[];
   credentialPaths?: CredentialPathSpec[];
@@ -161,7 +164,7 @@ export function createSpritesSandbox(workspace: WorkspaceStore, opts: SpritesSan
   const resourcesApplied = new Set<string>();
   const egressPolicyByName = new Map<string, string>();
   const pressureEpisodes = new Set<string>();
-  const checkpointBooks = new Map<string, SnapshotBookkeeping>();
+  const checkpointBooks = opts.checkpointBooks ?? createMemoryMap<SnapshotBookkeeping>();
 
   const reportError = (category: string, code: string, message: string, scopeLabel?: string): void => {
     try {
@@ -417,25 +420,28 @@ export function createSpritesSandbox(workspace: WorkspaceStore, opts: SpritesSan
 
   async function checkpointIfDue(name: string, tdOpts?: TeardownOptions): Promise<void> {
     await requireInitialized(name);
-    const book = checkpointBooks.get(name) ?? {};
-    checkpointBooks.set(name, book);
-    if (!tdOpts?.homeUnchanged) book.homeDirty = true;
-    if (!snapshotDue(book, tdOpts, checkpointIntervalMs)) return;
-    try {
-      await createCheckpoint(name);
-      book.lastSnapshotMs = Date.now();
-      book.homeDirty = false;
-    } catch (e) {
-      reportError("sandbox_snapshot", "checkpoint_failed", errMessage(e), base.scopeFor(name));
+    const stored = (await checkpointBooks.get(name)) ?? {};
+    const book = tdOpts?.homeUnchanged || stored.homeDirty ? stored : { ...stored, homeDirty: true };
+    if (!snapshotDue(book, tdOpts, checkpointIntervalMs)) {
+      if (book !== stored) await checkpointBooks.put(name, book);
+      return;
     }
+    const outcome = await createCheckpoint(name).then(
+      () => snapshotSucceeded(),
+      (e) => {
+        reportError("sandbox_snapshot", "checkpoint_failed", errMessage(e), base.scopeFor(name));
+        return snapshotFailed(book, checkpointIntervalMs);
+      },
+    );
+    await checkpointBooks.put(name, { ...book, ...outcome });
   }
 
-  const forget = (name: string): void => {
+  const forget = async (name: string): Promise<void> => {
     ensured.delete(name);
     resourcesApplied.delete(name);
     pressureEpisodes.delete(name);
     egressPolicyByName.delete(name);
-    checkpointBooks.delete(name);
+    await checkpointBooks.delete(name).catch((e) => swallow("sprites-sandbox: forget checkpoint book", e));
   };
 
   const base = createExecSandboxBase({
@@ -482,7 +488,7 @@ export function createSpritesSandbox(workspace: WorkspaceStore, opts: SpritesSan
           ensured.add(name);
           return { coldStart: !hydrated };
         } catch (e) {
-          forget(name);
+          await forget(name);
           reportError("sandbox_hydrate", "hydrate_failed", errMessage(e), scope);
           await deleteSprite(name).catch((deleteErr) =>
             swallow("sprites-sandbox: delete after failed hydrate", deleteErr),
@@ -593,7 +599,7 @@ export function createSpritesSandbox(workspace: WorkspaceStore, opts: SpritesSan
         withLifecycle(name, async () => {
           if (!(await initializationStore.get(name))?.pending) await exportHome(name, scopeId);
           await deleteSprite(name);
-          forget(name);
+          await forget(name);
         }),
       );
     },
@@ -658,7 +664,7 @@ export function createSpritesSandbox(workspace: WorkspaceStore, opts: SpritesSan
       return base.provisionQueue(`restart:${name}`, () =>
         withLifecycle(name, async () => {
           await requireInitialized(name);
-          forget(name);
+          await forget(name);
           const s = sprite(name);
           const restartFailure = await s.restart().then(
             () => undefined,
