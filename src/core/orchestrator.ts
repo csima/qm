@@ -2800,6 +2800,9 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
               }
             : {}),
           ...(strictReadOnly ? {} : { attach: attachStaging.attach }),
+          ...(!strictReadOnly && conversation.kind === "dm"
+            ? { deliverShareToRequester: attachStaging.attach, requesterScopeId: personalScope(actor.id) }
+            : {}),
           ...(external || strictReadOnly || !deps.keychain
             ? {}
             : {

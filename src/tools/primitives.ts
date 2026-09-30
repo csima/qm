@@ -522,6 +522,8 @@ export interface ToolContextDeps {
   webhookPublicUrl?: string;
   surface?: SurfaceToolDeps;
   attach?: AttachFiles;
+  deliverShareToRequester?: AttachFiles;
+  requesterScopeId?: ScopeId;
   sessionSyscalls?: SessionSyscalls;
 }
 
@@ -1054,6 +1056,7 @@ export function createToolContext(deps: ToolContextDeps): ToolContext {
                 swallow("tools: persist of outbound file artifact failed", e);
               }
             }
+            let sharedToRequester = false;
             for (const s of share!) {
               const granteeScopeId = s.scope === "org" ? orgScopeId : s.scope;
               if (!granteeScopeId) throw new Error('cannot resolve "org" — no org scope is mounted in this session');
@@ -1075,6 +1078,18 @@ export function createToolContext(deps: ToolContextDeps): ToolContext {
                 scopeLabel: granteeScopeId,
               });
               shared.push({ scope: granteeScopeId, permission });
+              if (
+                deps.deliverShareToRequester &&
+                deps.requesterScopeId &&
+                granteeScopeId === deps.requesterScopeId
+              ) {
+                sharedToRequester = true;
+              }
+            }
+            if (sharedToRequester && deps.deliverShareToRequester) {
+              await deps
+                .deliverShareToRequester([path])
+                .catch((e) => swallow("tools: requester delivery of shared file failed", e));
             }
           }
           return { shared };
