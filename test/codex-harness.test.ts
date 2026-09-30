@@ -1810,7 +1810,7 @@ test(
         experimentalRawEvents: true,
         environments: [],
         config: {
-          web_search: "disabled",
+          web_search: "live",
           features: {
             shell_tool: false,
             unified_exec: false,
