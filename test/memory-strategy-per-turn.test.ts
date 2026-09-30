@@ -6,7 +6,12 @@ import { join } from "node:path";
 import { createLocalWorkspaceStore } from "../src/workspace/workspace-store.ts";
 import { createMemoryService, readMemory } from "../src/memory/memory-service.ts";
 import { createMemoryStrategy, parseMemoryStrategyKind } from "../src/memory/strategy.ts";
-import { createPerTurnStrategy, MEMORY_EXTRACTION_PROMPT, parseFacts } from "../src/memory/strategies/per-turn.ts";
+import {
+  createPerTurnStrategy,
+  MEMORY_EXTRACTION_PROMPT,
+  parseFacts,
+  extractFacts,
+} from "../src/memory/strategies/per-turn.ts";
 import { createMockHarness } from "../src/harness/mock-harness.ts";
 import type { HarnessModelUtilities } from "../src/harness/harness.ts";
 
@@ -61,6 +66,23 @@ test("parseFacts: bullets in, NONE/empty/prose out", () => {
   assert.deepEqual(parseFacts("none"), []);
   assert.deepEqual(parseFacts(""), []);
   assert.deepEqual(parseFacts("-"), []);
+});
+
+test("parseFacts: [personal]/[project] tags are stripped from the fact text", () => {
+  assert.deepEqual(parseFacts("- Prefers terse replies [personal]\n- Ships in Q4 [project]"), [
+    "Prefers terse replies",
+    "Ships in Q4",
+  ]);
+});
+
+test("extractFacts: personal[] marks [personal] true, [project] false, and untagged true", async () => {
+  const harness: HarnessModelUtilities = {
+    oneShot: () =>
+      Promise.resolve("- Prefers terse replies [personal]\n- Ships in Q4 [project]\n- Owns the billing service"),
+  };
+  const { facts, personal } = await extractFacts(harness, [{ input: "hi", reply: "hello" }]);
+  assert.deepEqual(facts, ["Prefers terse replies", "Ships in Q4", "Owns the billing service"]);
+  assert.deepEqual(personal, [true, false, true]);
 });
 
 test("per-turn swallows extraction failures and captures nothing", async () => {

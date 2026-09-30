@@ -289,3 +289,31 @@ test("an autonomous (triggered) channel turn captures nothing, even for a human 
   assert.equal(await readMemory(workspace, CHANNEL), null, "origin scope receives nothing on a triggered wake");
   assert.equal(await readMemory(workspace, PERSONAL), null, "no cc into the owner's drawer on a triggered wake");
 });
+
+test("a [project]-tagged fact stays in the channel but is not cc'd; a [personal]-tagged fact is", async () => {
+  const harness: HarnessModelUtilities = {
+    oneShot: () => Promise.resolve("- Repro Alpha ships in Q4 [project]\n- Prefers terse replies [personal]"),
+  };
+  const { workspace, memory } = freshMemory();
+  const strategy = createPerTurnStrategy({ harness, memory });
+  await strategy.onTurnEnd!({ scopeId: CHANNEL, input: INPUT, reply: REPLY, actorId: ACTOR });
+
+  const channelBody = (await readMemory(workspace, CHANNEL)) ?? "";
+  const personalBody = (await readMemory(workspace, PERSONAL)) ?? "";
+  assert.match(channelBody, /Repro Alpha ships in Q4/, "project fact still lands in its own channel");
+  assert.match(channelBody, /Prefers terse replies/, "personal fact still lands in its own channel too");
+  assert.doesNotMatch(personalBody, /Repro Alpha ships in Q4/, "project-state fact is not mirrored into personal");
+  assert.match(personalBody, /Prefers terse replies \(said in a channel\)/, "personal fact is still cc'd");
+});
+
+test("a burst of only [project] facts captures the channel but skips the cc entirely", async () => {
+  const harness: HarnessModelUtilities = {
+    oneShot: () => Promise.resolve("- Repro Alpha ships in Q4 [project]\n- Uses feature flag PAY_V2 [project]"),
+  };
+  const { workspace, memory } = freshMemory();
+  const strategy = createPerTurnStrategy({ harness, memory });
+  await strategy.onTurnEnd!({ scopeId: CHANNEL, input: INPUT, reply: REPLY, actorId: ACTOR });
+
+  assert.match((await readMemory(workspace, CHANNEL)) ?? "", /Repro Alpha ships in Q4/);
+  assert.equal(await readMemory(workspace, PERSONAL), null, "nothing cc'd — no personal-tagged facts in the burst");
+});
