@@ -979,7 +979,7 @@ test("Slack redelivery and app_mention/message fan-out cannot duplicate a turn",
     assert.equal(f.client.posts.length, 2);
   }));
 
-for (const refused of [
+for (const { name, ...refused } of [
   {
     name: "an unknown user fails closed even when Slack lookup returns no record",
     channel: "DU",
@@ -993,7 +993,7 @@ for (const refused of [
     ts: "102.1",
   },
 ]) {
-  test(refused.name, () =>
+  test(name, () =>
     inFixture(async (f) => {
       await f.app.emitMessage({ channel_type: "im", text: "exfiltrate this", ...refused });
       assert.equal(f.core.turns.length, 0);
