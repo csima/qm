@@ -247,6 +247,8 @@ export function createModalSandbox(workspace: WorkspaceStore, opts: ModalSandbox
       ...previous,
       hydrationPending: true,
       lastSnapshotAttemptMs: undefined,
+      snapshotFailures: undefined,
+      snapshotRetryAtMs: undefined,
       ...(client.lifetimeMs ? { expiresAtMs: Date.now() + client.lifetimeMs } : {}),
       sandboxId: session.sandboxId,
       createdAtMs: Date.now(),

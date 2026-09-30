@@ -617,13 +617,15 @@ export function createSmolmachinesSandbox(workspace: WorkspaceStore, opts: Smolm
             try {
               await snapshotHome(scope, handle.id);
             } catch (e) {
-              await mergeStored(scope, snapshotFailed(stored, snapshotIntervalMs));
               opts.onError?.({
                 category: "sandbox_snapshot",
                 code: "teardown_snapshot_failed",
                 message: errMessage(e),
                 scopeLabel: scope,
               });
+              await mergeStored(scope, snapshotFailed(stored, snapshotIntervalMs)).catch(
+                swallowAs("smolmachines-sandbox: record snapshot failure", undefined),
+              );
             }
           }),
         );

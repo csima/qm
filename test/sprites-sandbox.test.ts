@@ -346,6 +346,34 @@ test("a stuck checkpoint backs off instead of retrying every teardown, shared ac
   });
 });
 
+test("a replacement sprite starts with a fresh checkpoint schedule, and a broken book store never fails teardown", async () => {
+  const checkpointBooks = createMemoryMap<SnapshotBookkeeping>();
+  const s = make({ checkpointIntervalMs: 1, checkpointBooks });
+  const h = await s.provision(layers);
+  fake.collideCheckpoints(h.id, true);
+  await s.teardown(h);
+  assert.equal((await checkpointBooks.get(h.id))?.snapshotFailures, 1);
+  fake.collideCheckpoints(h.id, false);
+  const gone = await fetch(`${fake.baseUrl}/v1/sprites/${h.id}`, {
+    method: "DELETE",
+    headers: { authorization: `Bearer ${FAKE_SPRITES_TOKEN}` },
+  });
+  assert.ok(gone.ok, "the sprite is deleted out of band");
+  const nextCore = make({ checkpointIntervalMs: 1, checkpointBooks });
+  const replacement = await nextCore.provision(layers);
+  await nextCore.teardown(replacement);
+  assert.deepEqual(
+    fake.checkpoints(replacement.id),
+    ["v1"],
+    "the new sprite is not held back by the old one's failure",
+  );
+  const broken = createMemoryMap<SnapshotBookkeeping>();
+  broken.get = () => Promise.reject(new Error("db down"));
+  broken.put = () => Promise.reject(new Error("db down"));
+  const t = make({ checkpointIntervalMs: 1, checkpointBooks: broken });
+  await t.teardown(await t.provision(layers));
+});
+
 test("computerStatus reports checkpoint recovery and a healthy machine whose shell has stopped answering", async () => {
   const h = await sandbox.provision(layers);
   const fresh = await sandbox.computerStatus!(scope);

@@ -651,7 +651,9 @@ export function createE2bSandbox(workspace: WorkspaceStore, opts: E2bSandboxOpti
         await snapshotHome(scope, session);
       } catch (e) {
         reportError("sandbox_snapshot", "teardown_snapshot_failed", errMessage(e), scope);
-        await store.merge(scope, snapshotFailed(stored, snapshotIntervalMs));
+        await store
+          .merge(scope, snapshotFailed(stored, snapshotIntervalMs))
+          .catch(swallowAs("e2b-sandbox: record snapshot failure", undefined));
       }
     }
     if (tdOpts?.keepWarm) {

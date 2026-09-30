@@ -6,7 +6,7 @@ import { createMemoryMap, type DurableMap } from "../persistence/durable-map.ts"
 import { createMemoryAdvisoryLock, type AdvisoryLock } from "../persistence/advisory-lock.ts";
 import type { WorkspaceStore } from "../workspace/workspace-store.ts";
 import { jitteredBackoffMs, retryAfterMs, withAbort, withTimeout } from "../util/async.ts";
-import { swallow, errMessage } from "../util/errors.ts";
+import { swallow, swallowAs, errMessage } from "../util/errors.ts";
 import { shq } from "../util/shell.ts";
 import { createExecProcessSessions, processSessionDir, type ExecProcessIo } from "./exec-process-session.ts";
 import {
@@ -420,10 +420,13 @@ export function createSpritesSandbox(workspace: WorkspaceStore, opts: SpritesSan
 
   async function checkpointIfDue(name: string, tdOpts?: TeardownOptions): Promise<void> {
     await requireInitialized(name);
-    const stored = (await checkpointBooks.get(name)) ?? {};
+    const stored =
+      (await checkpointBooks.get(name).catch(swallowAs("sprites-sandbox: read checkpoint book", null))) ?? {};
     const book = tdOpts?.homeUnchanged || stored.homeDirty ? stored : { ...stored, homeDirty: true };
+    const save = (next: SnapshotBookkeeping): Promise<void> =>
+      checkpointBooks.put(name, next).catch(swallowAs("sprites-sandbox: save checkpoint book", undefined));
     if (!snapshotDue(book, tdOpts, checkpointIntervalMs)) {
-      if (book !== stored) await checkpointBooks.put(name, book);
+      if (book !== stored) await save(book);
       return;
     }
     const outcome = await createCheckpoint(name).then(
@@ -433,15 +436,17 @@ export function createSpritesSandbox(workspace: WorkspaceStore, opts: SpritesSan
         return snapshotFailed(book, checkpointIntervalMs);
       },
     );
-    await checkpointBooks.put(name, { ...book, ...outcome });
+    await save({ ...book, ...outcome });
   }
 
-  const forget = async (name: string): Promise<void> => {
+  const resetCheckpointBook = (name: string): Promise<void> =>
+    checkpointBooks.delete(name).catch(swallowAs("sprites-sandbox: reset checkpoint book", undefined));
+
+  const forget = (name: string): void => {
     ensured.delete(name);
     resourcesApplied.delete(name);
     pressureEpisodes.delete(name);
     egressPolicyByName.delete(name);
-    await checkpointBooks.delete(name).catch((e) => swallow("sprites-sandbox: forget checkpoint book", e));
   };
 
   const base = createExecSandboxBase({
@@ -481,14 +486,17 @@ export function createSpritesSandbox(workspace: WorkspaceStore, opts: SpritesSan
         }
         const scope = base.scopeFor(name);
         try {
-          if (!exists) await attempt(`create ${name}`, () => client.createSprite(name, { waitForCapacity: true }));
+          if (!exists) {
+            await resetCheckpointBook(name);
+            await attempt(`create ${name}`, () => client.createSprite(name, { waitForCapacity: true }));
+          }
           await applyResources(name);
           const hydrated = homeSnapshots && scope ? await homeSnapshots.hydrateHome(scope, name) : false;
           await initializationStore.delete(name);
           ensured.add(name);
           return { coldStart: !hydrated };
         } catch (e) {
-          await forget(name);
+          forget(name);
           reportError("sandbox_hydrate", "hydrate_failed", errMessage(e), scope);
           await deleteSprite(name).catch((deleteErr) =>
             swallow("sprites-sandbox: delete after failed hydrate", deleteErr),
@@ -599,7 +607,8 @@ export function createSpritesSandbox(workspace: WorkspaceStore, opts: SpritesSan
         withLifecycle(name, async () => {
           if (!(await initializationStore.get(name))?.pending) await exportHome(name, scopeId);
           await deleteSprite(name);
-          await forget(name);
+          forget(name);
+          await resetCheckpointBook(name);
         }),
       );
     },
@@ -664,7 +673,8 @@ export function createSpritesSandbox(workspace: WorkspaceStore, opts: SpritesSan
       return base.provisionQueue(`restart:${name}`, () =>
         withLifecycle(name, async () => {
           await requireInitialized(name);
-          await forget(name);
+          forget(name);
+          await resetCheckpointBook(name);
           const s = sprite(name);
           const restartFailure = await s.restart().then(
             () => undefined,
