@@ -1,10 +1,10 @@
 import { replayableRequest } from "../core/orchestrator/turn-helpers.ts";
 import {
   createSlackSessionStatus,
-  type SlackStatusActivity,
   type SlackSessionStatus,
   type SlackSessionStatusState,
 } from "../slack/session-status.ts";
+import type { SessionStore } from "../sessions/session-store.ts";
 import type { FeatureFlagStore } from "../feature-flags.ts";
 import { decideDeploymentAccess } from "../slack/deploy-access.ts";
 import type { IdentityService } from "../identity/identity-service.ts";
@@ -178,7 +178,8 @@ export interface SlackCoreClientDeps {
   keychainApprovals?: KeychainApprovals;
   taskAcknowledgements?: DurableMap<TaskAckState>;
   sessionStatus?: DurableMap<SlackSessionStatusState>;
-  statusActivity?: SlackStatusActivity;
+  statusSessions?: Pick<SessionStore, "getByThread" | "childrenOf">;
+  publicWebUrl?: string;
   featureFlags?: FeatureFlagStore;
   app: App;
   config: ScopedConfigStore;
@@ -260,15 +261,15 @@ export function createSlackCoreClient(deps: SlackCoreClientDeps): SlackCoreClien
     ...(deps.taskAcknowledgements
       ? { taskAcknowledgements: createTaskAcknowledgements(deps.taskAcknowledgements, lease, deps) }
       : {}),
-    ...(deps.sessionStatus && deps.featureFlags
+    ...(deps.sessionStatus && deps.featureFlags && deps.statusSessions
       ? {
           sessionStatus: createSlackSessionStatus(
             deps.sessionStatus,
             lease,
             deps.runs,
+            deps.statusSessions,
             deps.featureFlags,
-            Date.now,
-            deps.statusActivity,
+            deps.publicWebUrl,
           ),
         }
       : {}),

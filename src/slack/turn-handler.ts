@@ -596,7 +596,7 @@ export function createTurnHandler(deps: {
             : {
                 onReplying: () => {
                   if (acknowledges) startAck();
-                  if (queuedRunId && replyThreadTs) deps.onEngaged?.(queuedRunId, inc.channel, replyThreadTs);
+                  if (queuedRunId) deps.onEngaged?.(queuedRunId, inc.channel, replyThreadTs);
                 },
               }),
           onQueued: async (runId) => {

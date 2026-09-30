@@ -6,7 +6,6 @@ export const FEATURE_NAMES = [
   "persistent_subagents",
   "responsive_spine",
   "inbox_loops",
-  "slack_loading_indicator",
   "external_app_sharing",
 ] as const;
 export type FeatureName = (typeof FEATURE_NAMES)[number];

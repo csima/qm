@@ -1,7 +1,7 @@
 import { isObj } from "../util/objects.ts";
 import { LRUCache } from "lru-cache";
 
-export const SLACK_STATUS_TASK_PREFIX = "qm_status:";
+export const SLACK_STATUS_BLOCK_PREFIX = "qm_status:";
 
 export function isOwnStatusCard(
   message: { user?: string; bot_id?: string; blocks?: unknown[] },
@@ -15,9 +15,8 @@ export function isOwnStatusCard(
     message.blocks.some(
       (block) =>
         isObj(block) &&
-        block.type === "task_card" &&
-        typeof block.task_id === "string" &&
-        block.task_id.startsWith(SLACK_STATUS_TASK_PREFIX),
+        typeof block.block_id === "string" &&
+        block.block_id.startsWith(SLACK_STATUS_BLOCK_PREFIX),
     ),
   );
 }
