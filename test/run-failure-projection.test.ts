@@ -26,6 +26,7 @@ for (const backend of ["memory", "postgres"] as const) {
         state: "ok" | "result-failed" | "failed" | "pending",
         at: number,
         privateSessionMessage = false,
+        resultText = "ok",
       ) => {
         now = at;
         const thread = ref(name);
@@ -46,7 +47,7 @@ for (const backend of ["memory", "postgres"] as const) {
             await runs.complete(
               run.id,
               leased.leaseToken,
-              state === "ok" ? { status: "ok", reply: "ok" } : { status: "failed", reason: "failure in result" },
+              state === "ok" ? { status: "ok", reply: resultText } : { status: "failed", reason: resultText },
             );
         }
         return run.id;
@@ -76,6 +77,15 @@ for (const backend of ["memory", "postgres"] as const) {
         await put("pending", "pending", at + 1);
         await put("literal_'%_", "failed", at);
         await put("not-requested", "failed", at);
+        const unicodeRefs: string[] = [];
+        for (const [name, text] of [
+          ["nul", "before\u0000after"],
+          ["surrogate", "before\ud800after"],
+        ] as const) {
+          await put(`${name}-ok`, "ok", at, false, text);
+          await put(`${name}-failed`, "result-failed", at, false, text);
+          unicodeRefs.push(ref(`${name}-ok`), ref(`${name}-failed`));
+        }
         const refs = [
           "recovered",
           "clock-reversed",
@@ -88,7 +98,9 @@ for (const backend of ["memory", "postgres"] as const) {
           "pending",
           "literal_'%_",
           "missing",
-        ].map(ref);
+        ]
+          .map(ref)
+          .concat(unicodeRefs);
         const expected = new Set<string>();
         for (const thread of refs) {
           const run = await runs.latestForThread(thread);
@@ -96,7 +108,18 @@ for (const backend of ["memory", "postgres"] as const) {
         }
         assert.deepEqual(
           expected,
-          new Set(["clock-reversed", "tie-failure", "result", "status", "private-failure", "literal_'%_"].map(ref)),
+          new Set(
+            [
+              "clock-reversed",
+              "tie-failure",
+              "result",
+              "status",
+              "private-failure",
+              "literal_'%_",
+              "nul-failed",
+              "surrogate-failed",
+            ].map(ref),
+          ),
         );
         assert.deepEqual(await runs.latestFailedThreads([...refs, refs[0]!], new AbortController().signal), expected);
         assert.deepEqual(await runs.latestFailedThreads([]), new Set());
