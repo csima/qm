@@ -569,8 +569,7 @@ export function createModelPicker<T>(bindings: ModelPickerBindings<T>) {
                     ? html`<div class="loadout-divider"></div>
                         ${loadoutHarnessControl(selected)}
                         ${
-                          harnessSupportsEffort(selected.harnessId) &&
-                          effortLevelsForHarness(selected.harnessId, selected.model).length
+                          harnessSupportsEffort(selected.harnessId)
                             ? html`<div class="loadout-submenu-anchor">
                                 <button
                                   class="loadout-setting ${loadoutSection === "effort" ? "open" : ""}"
