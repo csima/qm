@@ -1299,3 +1299,23 @@ test("scheduled and manual fires use the saved runtime; clearing it restores inh
   assert.equal(calls[2]?.thinkingLevel, undefined);
   assert.equal(calls[2]?.fastMode, undefined);
 });
+
+test("a fire that throws is journaled as failed, not left running", async () => {
+  const { crons, scheduler } = harness(async () => {
+    throw new Error("substrate down");
+  });
+  const cron = await crons.create({
+    schedule: { everyMs: 60_000 },
+    action: "doomed",
+    owner: "U1",
+    createdBy: "U1",
+    ownerScopeId: scopeId("personal", "U1"),
+  });
+  const r = await scheduler.runNow(cron.id);
+  assert.ok(r.started);
+  await r.settled;
+  const { runs: log } = await crons.listFires(cron.id);
+  assert.equal(log.length, 1);
+  assert.equal(log[0]!.status, "failed");
+  assert.match(log[0]!.note ?? "", /substrate down/);
+});

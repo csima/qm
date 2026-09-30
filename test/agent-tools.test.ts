@@ -3100,3 +3100,23 @@ test("background process guidance reflects the configured sandbox token lifetime
   assert.match(unlimited, /does not expire those turn tokens/);
   assert.doesNotMatch(unlimited, /turn tokens expire \d+ hours/);
 });
+
+test("a blocking command approval terminates the agent loop and flags pausedOnApproval", async () => {
+  const pauseTC: ToolContext = {
+    ...fakeToolContext(),
+    async execute() {
+      const { NeedsApproval } = await import("../src/tools/primitives.ts");
+      throw new NeedsApproval("git push --force", "force push needs approval");
+    },
+  };
+  const ref: ToolContextRef = { current: pauseTC, pendingApprovals: [], scopeLabel: "org:default-org" };
+  const [execute] = createAgentTools(ref);
+  const r = (await callWith(execute, "c1", { command: "git push --force" })) as {
+    terminate?: boolean;
+    content: Array<{ text?: string }>;
+  };
+  assert.equal(r.terminate, true, "the tool result must stop the loop — a paused turn, not a narrated block");
+  assert.match(r.content[0]!.text ?? "", /needs human approval/);
+  assert.equal(ref.pausedOnApproval, true, "the harness flag rides to the orchestrator's blocksInput");
+  assert.equal(ref.pendingApprovals!.length, 1);
+});
