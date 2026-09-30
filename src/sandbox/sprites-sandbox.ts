@@ -725,6 +725,7 @@ export function createSpritesSandbox(workspace: WorkspaceStore, opts: SpritesSan
           if (tdOpts?.destroy) {
             if (!(await initializationStore.get(handle.id))?.pending)
               await exportHome(handle.id, base.scopeFor(handle.id) ?? handle.id);
+            await resetCheckpointBook(handle.id);
           } else await checkpointIfDue(handle.id, tdOpts);
         }
         return base.teardown(handle, tdOpts);

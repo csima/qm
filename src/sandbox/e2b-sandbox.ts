@@ -182,6 +182,8 @@ export function createE2bSandbox(workspace: WorkspaceStore, opts: E2bSandboxOpti
             sandboxId: session.sandboxId,
             createdAtMs: Date.now(),
             nativePause: info?.onTimeout === "pause",
+            snapshotFailures: undefined,
+            snapshotRetryAtMs: undefined,
           });
           return adopt(session);
         } catch (err) {
@@ -217,6 +219,8 @@ export function createE2bSandbox(workspace: WorkspaceStore, opts: E2bSandboxOpti
           preservationState: "running",
           preservationError: undefined,
           recoveryError: undefined,
+          snapshotFailures: undefined,
+          snapshotRetryAtMs: undefined,
         });
         return adopt(session);
       }
