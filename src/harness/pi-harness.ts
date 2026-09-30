@@ -1740,7 +1740,6 @@ export function createPiHarness(opts?: PiHarnessOptions): Harness {
       if (agent) {
         const prior = agent.onPayload;
         agent.onPayload = async (payload, model) => {
-          ref.abortSignal?.throwIfAborted();
           if (ref.handoffRequested) throw new TurnHandedOff();
           ref.modelCalls = (ref.modelCalls ?? 0) + 1;
           (ref.modelDispatch ??= []).push({
@@ -1778,7 +1777,6 @@ export function createPiHarness(opts?: PiHarnessOptions): Harness {
               swallow("pi: llm request capture", e);
             }
           }
-          ref.abortSignal?.throwIfAborted();
           if (ref.handoffRequested) throw new TurnHandedOff();
           return finalPayload;
         };

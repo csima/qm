@@ -26,7 +26,7 @@ const { buildApp } = await import("../src/wiring.ts");
 
 for (const mode of ["retry", "handoff"] as const) {
   test(`a ${mode} hides its synthetic trigger but not real steer intake in entries, tape, or activity`, async () => {
-    const built = buildApp(testConfig());
+    const built = buildApp(testConfig({ sessionTapeMode: "shadow" }));
     const request: TurnRequest = {
       surface: "test",
       actor: { externalId: "U1" },

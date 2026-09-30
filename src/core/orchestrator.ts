@@ -3193,6 +3193,32 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         const resume = partial && partial.workEntries > 0 ? partial : null;
         if (partial) {
           const recoveryEntries = await deps.sessions.getEntries(session.id, { sinceSeq: partial.userSeq });
+          const surfaceCalls = recoveryEntries.filter(
+            (entry) => entry.type === "tool_call" && isObj(entry.payload) && entry.payload.tool === surfaceName,
+          );
+          const post = surfaceCalls.length === 1 ? surfaceCalls[0] : undefined;
+          const payload = post?.payload;
+          if (
+            post &&
+            isObj(payload) &&
+            payload.action === "post" &&
+            typeof payload.callId === "string" &&
+            payload.ts === undefined &&
+            !payload.broadcast &&
+            !payload.files &&
+            defaultDestination &&
+            input.runId &&
+            deps.deliveries
+          ) {
+            const key = postKeys.key(defaultDestination, 0);
+            const receipts = await deps.deliveries.listBySourceSession(session.id, conversation.threadRef);
+            if (receipts.some((receipt) => receipt.idempotencyKey === key))
+              recoveryEntries.splice(recoveryEntries.indexOf(post) + 1, 0, {
+                ...post,
+                type: "tool_result",
+                payload: { callId: payload.callId },
+              });
+          }
           const recoveryTape = await deps.sessions.getTape(session.id);
           const turnStart = recoveryTape.findLastIndex(
             (row) => row.entrySeq === partial.userSeq && row.kind === "message",

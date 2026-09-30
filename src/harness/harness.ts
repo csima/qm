@@ -268,8 +268,8 @@ export function defineHarness(
       const retire = () => {
         if (!input.cancel?.aborted) closed = true;
       };
-      if (input.cancel?.aborted) return { reply: "", stopped: true };
-      if (input.handoffDeadline?.aborted) return { reply: "", handedOff: true };
+      if (input.handoffDeadline?.aborted)
+        return input.cancel?.aborted ? { reply: "", stopped: true } : { reply: "", handedOff: true };
       input.handoffDeadline?.addEventListener("abort", retire, { once: true });
       const write = async <T>(operation: () => Promise<T>): Promise<T> => {
         if (closed) throw new TurnHandedOff();

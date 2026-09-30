@@ -51,6 +51,32 @@ test("a retried turn does not re-post: the same position dedups against the deli
   );
 });
 
+test("an outbox receipt cannot complete a later unsafe call reusing the post ID", async () => {
+  const built = freshApp();
+  const req = channelTurn("!post-lost-result already enqueued", { idempotencyKey: "reused-post-id" });
+  await assert.rejects(built.app.turn(req), /boom/);
+  const session = (await built.sessions.getByThread("ch:C9:t1"))!;
+  const { lease } = await built.sessions.acquireLease(session.id);
+  assert.ok(lease);
+  await built.sessions.append(lease, {
+    type: "tool_call",
+    payload: { tool: "execute", callId: "mock-lost-post", replay: "unsafe" },
+    scopeLabel: session.scopeId,
+  });
+  await built.sessions.releaseLease(lease);
+  await assert.rejects(built.app.turn(req), /previous worker stopped before recording the outcome of execute/);
+});
+
+test("a missing outbox receipt never permits retrying an uncertain post", async () => {
+  const built = freshApp();
+  built.deliveries.enqueue = async () => {
+    throw new Error("outbox unavailable");
+  };
+  const req = channelTurn("!post-lost-result not enqueued", { idempotencyKey: "no-outbox-receipt" });
+  await assert.rejects(built.app.turn(req), /boom/);
+  await assert.rejects(built.app.turn(req), /previous worker stopped before recording the outcome of slack/);
+});
+
 test("a resumed turn's NEW post after a completed one is delivered, not swallowed by the dedup", async () => {
   const built = freshApp();
   const req = channelTurn("!post-then-boom first update|second update", { idempotencyKey: "dedup-resume-1" });
