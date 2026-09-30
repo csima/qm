@@ -72,7 +72,7 @@ test("runtime rejects unsupported effort and fast mode instead of silently dropp
   assert.deepEqual(await service(claims, active, { action: "set", harness: "opencode" }), {
     ok: false,
     error: "effort_not_supported",
-    message: "effort high isn't available on opencode/claude-opus-5; pass an effort (valid: auto)",
+    message: "effort high isn't available on opencode/claude-opus-5; choose another effort (valid: auto)",
   });
   assert.deepEqual(await service(claims, active, { action: "set", model: "claude-sonnet-5", fastMode: true }), {
     ok: false,

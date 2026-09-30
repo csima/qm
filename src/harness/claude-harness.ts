@@ -498,7 +498,7 @@ export function createClaudeHarness(opts: ClaudeHarnessOptions = {}): Harness {
           ? {
               settings: {
                 ...(fast ? { fastMode: true, fastModePerSessionOptIn: true } : {}),
-                ...(ultracode ? { ultracode: true } : {}),
+                ...(ultracode ? { enableWorkflows: true, ultracode: true } : {}),
               },
             }
           : {}),

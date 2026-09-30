@@ -693,7 +693,10 @@ test("Claude Code receives every catalog model's offered effort exactly, with Ul
       assert.equal(capturedOptions.model, modelId);
       const expected: Record<string, string | undefined> = { auto: undefined, ultracode: "xhigh" };
       assert.equal(capturedOptions.effort, level in expected ? expected[level] : level, `${modelId} ${level}`);
-      assert.deepEqual(capturedOptions.settings, level === "ultracode" ? { ultracode: true } : undefined);
+      assert.deepEqual(
+        capturedOptions.settings,
+        level === "ultracode" ? { enableWorkflows: true, ultracode: true } : undefined,
+      );
     }
 });
 

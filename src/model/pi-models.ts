@@ -39,7 +39,6 @@ export const THINKING_LEVELS = [
 ] as const;
 const EFFORT_TIERS = ["low", "medium", "high", "xhigh", "max"] as const;
 type EffortTier = (typeof EFFORT_TIERS)[number];
-const CLIENT_TIERS: Partial<Record<HarnessId, string[]>> = { codex: ["ultra"], claude: ["ultracode"] };
 export const HARNESS_IDS = ["pi", "opencode", "codex", "claude", "mock"] as const;
 export type HarnessId = (typeof HARNESS_IDS)[number];
 
@@ -75,14 +74,8 @@ function clientTier(harnessId: HarnessId, modelId: string): "ultra" | "ultracode
   return undefined;
 }
 
-export function thinkingLevelsForHarness(harnessId: HarnessId, modelId?: string): readonly string[] {
+export function thinkingLevelsForHarness(harnessId: HarnessId, modelId: string): readonly string[] {
   if (!["pi", "claude", "codex"].includes(harnessId)) return ["auto"];
-  if (!modelId) {
-    const extra = CLIENT_TIERS[harnessId] ?? ["default", "adaptive"];
-    return THINKING_LEVELS.filter(
-      (level) => level === "auto" || (EFFORT_TIERS as readonly string[]).includes(level) || extra.includes(level),
-    );
-  }
   if (harnessId !== "pi" && !modelSupportedByHarness(modelId, harnessId)) return ["auto"];
   const model = resolveModel(modelId);
   const modes =
@@ -107,7 +100,7 @@ export function parseEffort(harnessId: HarnessId, modelId: string, level: unknow
 
 export function effortNotOfferedMessage(harnessId: HarnessId, modelId: string, level: string, carried = false): string {
   const levels = thinkingLevelsForHarness(harnessId, modelId).join(", ");
-  return `effort ${level} isn't available on ${harnessId}/${modelId}${carried ? "; pass an effort" : ""} (valid: ${levels})`;
+  return `effort ${level} isn't available on ${harnessId}/${modelId}${carried ? "; choose another effort" : ""} (valid: ${levels})`;
 }
 
 export type ParsedRuntimeChoice = { ok: true; choice: RuntimeChoice } | { ok: false; error: string; message: string };
@@ -201,8 +194,6 @@ const GPT_56_CLONE = {
   maxTokens: 128_000,
   thinkingLevelMap: { max: "max" },
 } as const;
-const ANTHROPIC_EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
-const OPENAI_EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
 
 export const MODEL_REGISTRY: readonly ModelEntry[] = [
   {
@@ -211,7 +202,7 @@ export const MODEL_REGISTRY: readonly ModelEntry[] = [
     fastMode: true,
     webui: true,
     base: true,
-    efforts: ANTHROPIC_EFFORTS,
+    efforts: EFFORT_TIERS,
     clone: {
       template: "claude-opus-4-8",
       thinkingLevelMap: { off: null },
@@ -229,7 +220,7 @@ export const MODEL_REGISTRY: readonly ModelEntry[] = [
     fastMode: false,
     webui: true,
     base: true,
-    efforts: ANTHROPIC_EFFORTS,
+    efforts: EFFORT_TIERS,
     clone: {
       template: "claude-fable-5",
       input: 10,
@@ -246,7 +237,7 @@ export const MODEL_REGISTRY: readonly ModelEntry[] = [
     fastMode: false,
     webui: true,
     base: true,
-    efforts: ANTHROPIC_EFFORTS,
+    efforts: EFFORT_TIERS,
   },
   {
     id: "claude-opus-5",
@@ -254,7 +245,7 @@ export const MODEL_REGISTRY: readonly ModelEntry[] = [
     fastMode: true,
     webui: true,
     base: true,
-    efforts: ANTHROPIC_EFFORTS,
+    efforts: EFFORT_TIERS,
     clone: {
       template: "claude-opus-4-8",
       input: 5,
@@ -270,7 +261,25 @@ export const MODEL_REGISTRY: readonly ModelEntry[] = [
     fastMode: true,
     webui: true,
     base: true,
-    efforts: ANTHROPIC_EFFORTS,
+    efforts: EFFORT_TIERS,
+  },
+  {
+    id: "claude-sonnet-5-5",
+    name: "Claude Sonnet 5.5",
+    fastMode: false,
+    webui: true,
+    base: true,
+    efforts: EFFORT_TIERS,
+    clone: {
+      template: "claude-opus-4-8",
+      thinkingLevelMap: { off: null },
+      input: 2,
+      output: 10,
+      cacheRead: 0.2,
+      cacheWrite: 2.5,
+      contextWindow: 1_000_000,
+      maxTokens: 128_000,
+    },
   },
   {
     id: "claude-sonnet-5",
@@ -278,7 +287,7 @@ export const MODEL_REGISTRY: readonly ModelEntry[] = [
     fastMode: false,
     webui: true,
     base: true,
-    efforts: ANTHROPIC_EFFORTS,
+    efforts: EFFORT_TIERS,
   },
   {
     id: "claude-haiku-4-5",
@@ -296,7 +305,7 @@ export const MODEL_REGISTRY: readonly ModelEntry[] = [
     fastMode: true,
     webui: true,
     base: true,
-    efforts: OPENAI_EFFORTS,
+    efforts: EFFORT_TIERS,
     codexUltra: true,
     clone: {
       ...GPT_56_CLONE,
@@ -313,7 +322,7 @@ export const MODEL_REGISTRY: readonly ModelEntry[] = [
     fastMode: true,
     webui: true,
     base: true,
-    efforts: OPENAI_EFFORTS,
+    efforts: EFFORT_TIERS,
     codexUltra: true,
     clone: {
       ...GPT_56_CLONE,
@@ -330,7 +339,7 @@ export const MODEL_REGISTRY: readonly ModelEntry[] = [
     fastMode: true,
     webui: true,
     base: true,
-    efforts: OPENAI_EFFORTS,
+    efforts: EFFORT_TIERS,
     auxiliary: true,
     clone: {
       ...GPT_56_CLONE,
@@ -347,10 +356,11 @@ export const MODEL_REGISTRY: readonly ModelEntry[] = [
     fastMode: true,
     webui: true,
     base: true,
-    efforts: OPENAI_EFFORTS,
+    efforts: EFFORT_TIERS,
     codexUltra: true,
     clone: {
       ...GPT_56_CLONE,
+      thinkingLevelMap: { ...GPT_56_CLONE.thinkingLevelMap, off: null },
       input: 10,
       output: 50,
       cacheRead: 1,
@@ -365,15 +375,34 @@ export const MODEL_REGISTRY: readonly ModelEntry[] = [
     fastMode: false,
     webui: true,
     base: true,
-    efforts: OPENAI_EFFORTS,
+    efforts: EFFORT_TIERS,
     request: { model: "gpt-6-astra", service_tier: "ultrafast" },
     clone: {
       ...GPT_56_CLONE,
+      thinkingLevelMap: { ...GPT_56_CLONE.thinkingLevelMap, off: null },
       input: 60,
       output: 300,
       cacheRead: 6,
       cacheWrite: 75,
       tiers: [{ inputTokensAbove: 272_000, input: 120, output: 450, cacheRead: 12, cacheWrite: 150 }],
+    },
+  },
+  {
+    id: "gpt-6.1-sol",
+    buttonLabel: "6.1 Sol",
+    name: "GPT-6.1 Sol",
+    fastMode: true,
+    webui: true,
+    base: true,
+    efforts: EFFORT_TIERS,
+    clone: {
+      ...GPT_56_CLONE,
+      thinkingLevelMap: { off: null, minimal: null, max: "max" },
+      input: 2,
+      output: 10,
+      cacheRead: 0.1,
+      cacheWrite: 2.5,
+      tiers: [{ inputTokensAbove: 272_000, input: 4, output: 15, cacheRead: 0.2, cacheWrite: 5 }],
     },
   },
   {
@@ -383,7 +412,7 @@ export const MODEL_REGISTRY: readonly ModelEntry[] = [
     fastMode: true,
     webui: true,
     base: true,
-    efforts: OPENAI_EFFORTS,
+    efforts: EFFORT_TIERS,
     codexUltra: true,
     clone: {
       ...GPT_56_CLONE,
@@ -400,7 +429,7 @@ export const MODEL_REGISTRY: readonly ModelEntry[] = [
     fastMode: true,
     webui: true,
     base: true,
-    efforts: OPENAI_EFFORTS,
+    efforts: EFFORT_TIERS,
     clone: {
       ...GPT_56_CLONE,
       input: 0.1,
@@ -416,7 +445,7 @@ export const MODEL_REGISTRY: readonly ModelEntry[] = [
     fastMode: false,
     webui: false,
     base: false,
-    efforts: ANTHROPIC_EFFORTS,
+    efforts: EFFORT_TIERS,
   },
   {
     id: "claude-opus-4-6",

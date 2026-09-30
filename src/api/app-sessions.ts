@@ -15,6 +15,7 @@ import { entryWithinTenure, transcriptEntries, windowedTranscript } from "../ses
 import { createTranscriptSource } from "../harness/tape-projection.ts";
 import { appendCoverageImport } from "../harness/replay.ts";
 import { swallowAs } from "../util/errors.ts";
+import { latestGoalRecord } from "../harness/goal.ts";
 import { SEARCH_HIT_LIMIT, entrySearchText, searchSnippet, searchTerms } from "../sessions/entry-search.ts";
 import { supportsProcessSessions } from "../sandbox/sandbox.ts";
 import { processIsGone } from "../sandbox/process-poll.ts";
@@ -52,6 +53,8 @@ function tailWindowLimit(window?: TranscriptWindow): number | undefined {
 function coversTailWindow(entries: readonly { type: string }[], tailTurns: number): boolean {
   return entries.filter((e) => e.type === "user").length >= tailTurns;
 }
+
+const GOAL_LOOKBACK_ENTRIES = 2000;
 
 export function createSessionMethods(
   deps: AppDeps,
@@ -439,6 +442,24 @@ export function createSessionMethods(
         const run = await deps.runs.latestForThread(s.threadRef);
         if (run?.status === "failed" || run?.result?.status === "failed") failedChildren.add(s.id);
       }
+      const goals = new Map<
+        string,
+        { objective: string; activeMs: number; runningSince?: number; floor?: Record<string, number> }
+      >();
+      for (const s of sessions) {
+        if (!workingThreadRefs.has(s.threadRef)) continue;
+        const since = Math.max(0, (await deps.sessions.latestEntrySeq(s.id)) - GOAL_LOOKBACK_ENTRIES);
+        const goal = latestGoalRecord(await deps.sessions.getEntries(s.id, { sinceSeq: since }));
+        if (!goal) continue;
+        const runningSince = (await deps.runs.latestForThread(s.threadRef))?.startedAt ?? undefined;
+        if (goal.status === "active")
+          goals.set(s.id, {
+            objective: goal.objective,
+            activeMs: goal.activeMs ?? 0,
+            ...(runningSince ? { runningSince: Math.max(runningSince, goal.createdAt) } : {}),
+            ...(goal.floor ? { floor: { ...goal.floor } } : {}),
+          });
+      }
       if (
         workingThreadRefs.size === 0 &&
         waiting.size === 0 &&
@@ -456,6 +477,7 @@ export function createSessionMethods(
         ...(jobCounts.has(s.threadRef) ? { backgroundJobs: jobCounts.get(s.threadRef)! } : {}),
         ...(watchCounts.has(s.threadRef) ? { watches: watchCounts.get(s.threadRef)! } : {}),
         ...(cronCounts.has(s.threadRef) ? { crons: cronCounts.get(s.threadRef)! } : {}),
+        ...(goals.has(s.id) ? { goal: goals.get(s.id)! } : {}),
       }));
     },
 

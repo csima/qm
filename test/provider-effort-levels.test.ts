@@ -80,7 +80,7 @@ test("the runtime tool rejects invalid efforts, including one carried over to a 
     {
       ok: false,
       error: "effort_not_supported",
-      message: `effort ultracode isn't available on codex/gpt-6-astra; pass an effort (valid: ${valid("codex", "gpt-6-astra")})`,
+      message: `effort ultracode isn't available on codex/gpt-6-astra; choose another effort (valid: ${valid("codex", "gpt-6-astra")})`,
     },
   );
   assert.deepEqual(
@@ -103,7 +103,7 @@ test("the runtime tool rejects invalid efforts, including one carried over to a 
   assert.equal(config.getRuntimeSelection(SCOPE)?.effortLevel, "ultra");
 });
 
-test("turn and sessions-open overrides reject an unoffered effort and swap to a new runtime without inheriting one", () => {
+test("turn and sessions-open overrides reject an effort the target does not offer, explicit or carried", () => {
   const config = createMemoryConfigStore("default-org");
   config.setApprovedHarnesses(["pi", "claude", "codex"]);
   config.setRuntimeSelection(
@@ -115,10 +115,12 @@ test("turn and sessions-open overrides reject an unoffered effort and swap to a 
     () => resolveRuntimeChoice(config, ORG, SCOPE, fallback, { effortLevel: "ultra" }),
     /effort ultra isn't available on claude\/claude-opus-5-5 \(valid: /,
   );
-  assert.deepEqual(resolveRuntimeChoice(config, ORG, SCOPE, fallback, { harnessId: "codex", modelId: "gpt-6-astra" }), {
-    harnessId: "codex",
-    modelId: "gpt-6-astra",
-  });
+  assert.throws(
+    () => resolveRuntimeChoice(config, ORG, SCOPE, fallback, { harnessId: "codex", modelId: "gpt-6-astra" }),
+    {
+      message: `effort ultracode isn't available on codex/gpt-6-astra; choose another effort (valid: ${valid("codex", "gpt-6-astra")})`,
+    },
+  );
   assert.deepEqual(
     resolveRuntimeChoice(config, ORG, SCOPE, fallback, {
       harnessId: "codex",
@@ -136,7 +138,7 @@ test("a saved effort the model no longer offers fails the turn by name until an 
   config.setRuntimeSelection(SCOPE, stale as ReturnType<typeof runtimeChoice>);
   const fallback = { harnessId: "pi" as const, modelId: "claude-opus-5-5" };
   assert.throws(() => resolveRuntimeChoice(config, ORG, SCOPE, fallback), {
-    message: `effort ultracode isn't available on pi/claude-opus-5-5; pass an effort (valid: ${valid("pi", "claude-opus-5-5")})`,
+    message: `effort ultracode isn't available on pi/claude-opus-5-5; choose another effort (valid: ${valid("pi", "claude-opus-5-5")})`,
   });
   const service = createRuntimeService({ config, harnessId: "pi" }, { authorizesCapabilityScope: async () => true });
   const claims = { actorId: "alice", scopeId: SCOPE, liveActor: true, exp: Date.now() + 60_000 } as const;
@@ -197,7 +199,7 @@ test("the web picker, admin settings and cron writers reject an effort the model
   }
 });
 
-test("a recovered handoff whose effort the model no longer offers fails instead of running without it", () => {
+test("a recovered handoff keeps its effort, and resolving it fails when the model no longer offers it", () => {
   const entry = {
     type: "tool_result",
     payload: {
@@ -207,9 +209,14 @@ test("a recovered handoff whose effort the model no longer offers fails instead 
       runtimeHandoff: { choice: { harnessId: "codex", modelId: "gpt-6-luna", effortLevel: "ultra", fastMode: false } },
     },
   } as unknown as SessionEntry;
-  assert.throws(() => recoveredRuntime([entry], "run", "alice"), {
-    message: `effort ultra isn't available on codex/gpt-6-luna; pass an effort (valid: ${valid("codex", "gpt-6-luna")})`,
-  });
+  const recovered = recoveredRuntime([entry], "run", "alice");
+  assert.deepEqual(recovered, { harnessId: "codex", modelId: "gpt-6-luna", effortLevel: "ultra", fastMode: false });
+  const config = createMemoryConfigStore("default-org");
+  config.setApprovedHarnesses(["pi", "codex"]);
+  assert.throws(
+    () => resolveRuntimeChoice(config, ORG, SCOPE, { harnessId: "pi", modelId: "claude-opus-5-5" }, recovered),
+    { message: `effort ultra isn't available on codex/gpt-6-luna (valid: ${valid("codex", "gpt-6-luna")})` },
+  );
 });
 
 test("every selectable effort resolves to exactly itself, and every other level is refused", () => {

@@ -113,6 +113,7 @@ import { errMessage } from "../util/errors.ts";
 import { createGrindMeter, meterGrindCall } from "./grind.ts";
 import {
   createFloorCapPolicy,
+  bankGoalTurn,
   enforceGoal,
   goalFloorUnmet,
   goalPausedNote,
@@ -2034,8 +2035,7 @@ export function createPiHarness(opts?: PiHarnessOptions): Harness {
               const usage = piUsageToCallUsage(u, stepModel, entry.ref.fast);
               meterGrindCall(grindMeter, usage, stepModel?.id ?? effectiveModel);
               const meteredGoal = entry.ref.goal;
-              if (meteredGoal && (meteredGoal.status === "active" || meteredGoal.status === "complete"))
-                meterGoalCall(meteredGoal, usage);
+              if (meteredGoal?.status === "active") meterGoalCall(meteredGoal, usage);
               callStats.push({
                 ttftMs: curStart !== undefined && curFirst !== undefined ? curFirst - curStart : null,
                 durationMs: curStart !== undefined ? end - curStart : null,
@@ -2220,7 +2220,6 @@ export function createPiHarness(opts?: PiHarnessOptions): Harness {
           const rawRemainingCapMs = floorCap.remainingCapMs;
           const raceCapMs = floorCap.raceCapMs;
           const extendCapMs = floorCap.extendMs;
-          let grindWaiverNote = "";
           const attemptRefusalFallback = async (refusal: string): Promise<boolean> => {
             if (userAborted || turn.cancel?.aborted) return false;
             const fromId = (entry.agentSession.model as { id?: string } | undefined)?.id;
@@ -2282,16 +2281,11 @@ export function createPiHarness(opts?: PiHarnessOptions): Harness {
               !userAborted &&
               !turn.cancel?.aborted
             ) {
-              const goalResult = await enforceGoal({
+              wallClock = await enforceGoal({
                 goal: goalAfterPrompt,
                 meter: grindMeter,
                 outcome: wallClock,
                 ok: "ok" as const,
-                toolCalls: () =>
-                  entry.agentSession.messages
-                    .slice(messagesBefore)
-                    .filter((message) => contentHasToolUse((message as { role?: string; content?: unknown }).content))
-                    .length,
                 blocked: () =>
                   userAborted ||
                   !!turn.cancel?.aborted ||
@@ -2317,8 +2311,6 @@ export function createPiHarness(opts?: PiHarnessOptions): Harness {
                   });
                 },
               });
-              wallClock = goalResult.outcome;
-              grindWaiverNote = goalResult.waiverNote;
             }
             if (wallClock === "ok" && !entry.ref.runtimeHandoff && !userAborted && !turn.cancel?.aborted) {
               const refusal = providerRefusalError(entry.agentSession, messagesBefore);
@@ -2416,6 +2408,7 @@ export function createPiHarness(opts?: PiHarnessOptions): Harness {
           }
           if (entry.ref.runtimeHandoff && !userAborted && !turn.cancel?.aborted) {
             if (entry.ref.goal) {
+              bankGoalTurn(entry.ref.goal, grindMeter.startedAt);
               const goalEntry = await turn.emit({
                 type: "system",
                 payload: goalSnapshotPayload(entry.ref.goal),
@@ -2450,6 +2443,7 @@ export function createPiHarness(opts?: PiHarnessOptions): Harness {
                 g.status = "paused";
                 g.updatedAt = Date.now();
               }
+              bankGoalTurn(g, grindMeter.startedAt);
               const goalEntry = await turn.emit({
                 type: "system",
                 payload: goalSnapshotPayload(g),
@@ -2486,6 +2480,7 @@ export function createPiHarness(opts?: PiHarnessOptions): Harness {
 
           if (entry.ref.goal) {
             const g = entry.ref.goal;
+            bankGoalTurn(g, grindMeter.startedAt);
             const goalEntry = await turn.emit({
               type: "system",
               payload: goalSnapshotPayload(g),
@@ -2495,9 +2490,8 @@ export function createPiHarness(opts?: PiHarnessOptions): Harness {
             if (g.status === "complete") entry.ref.goal = null;
           }
           const closingText = recoveryDead ? "" : (piLastAssistantTextOrThrow(entry.agentSession) ?? "");
-          const closingTextWithWaiver = [closingText, grindWaiverNote].filter(Boolean).join("\n\n");
           // A stall auto-waive stays visible even when the final stop attempt was a silent finish.
-          const reply = entry.ref.silentRequested && !grindWaiverNote ? "" : closingTextWithWaiver;
+          const reply = entry.ref.silentRequested ? "" : closingText;
           const finalEntry = await turn.emit({
             type: "assistant",
             payload: { text: reply },

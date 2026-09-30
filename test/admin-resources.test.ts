@@ -720,7 +720,7 @@ test("admin runtime saves reasoning level and fast mode with the default model",
     assert.equal(carried.status, 400);
     assert.match(
       JSON.stringify(await carried.json()),
-      /effort xhigh isn't available on pi\/claude-haiku-4-5; pass an effort/,
+      /effort xhigh isn't available on pi\/claude-haiku-4-5; choose another effort/,
     );
     assert.equal((await srv.built.config.getRuntimeSelectionDurable("org:default-org"))?.modelId, "claude-opus-5");
     const explicit = await fetch(`${srv.base}/v1/admin/scopes/org:default-org/base-model`, {

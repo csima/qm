@@ -3748,9 +3748,9 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
     name: "finish_silently",
     label: "finish_silently",
     description:
-      "End this turn immediately with no closing reply. Use on surface turns after posting or when " +
-      "choosing not to reply, and on scheduled background fires with nothing worth reporting. " +
-      "Keeps the audit log and any messages already posted. Do not write a closing status line. " +
+      "Ends this turn silently. Use on surface turns when choosing not to reply at all, and on " +
+      "scheduled background fires with nothing worth reporting. After posting a reply, just stop; " +
+      "this is not needed. Keeps the audit log and any messages already posted. " +
       "On a direct human turn without surface tools this does nothing — just answer.",
     parameters: Type.Object({
       reason: Type.Optional(
@@ -3841,13 +3841,39 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
     },
   });
 
+  const GOAL_EVIDENCE_FILES = 5;
+  const GOAL_EVIDENCE_FILE_CHARS = 20_000;
+  async function goalEvidenceFiles(
+    tc: typeof ref.current,
+    paths: readonly string[] | undefined,
+    signal?: AbortSignal,
+  ): Promise<string[]> {
+    const out: string[] = [];
+    for (const path of (paths ?? []).slice(0, GOAL_EVIDENCE_FILES)) {
+      const content = tc
+        ? await tc.read(path, signal).then(
+            (r) => r.content,
+            () => null,
+          )
+        : null;
+      let body = content ?? "[missing: no such file]";
+      if (body.length > GOAL_EVIDENCE_FILE_CHARS)
+        body = `${body.slice(0, GOAL_EVIDENCE_FILE_CHARS)}\n[truncated at ${GOAL_EVIDENCE_FILE_CHARS} of ${body.length} chars]`;
+      out.push(`<file path="${path.replace(/"/g, "")}">\n${body}\n</file>`);
+    }
+    return out;
+  }
+
   const createGoal = defineTool({
     name: "create",
     label: "create",
     description:
-      "Register a goal for this session — ONLY when the user explicitly asks for sustained, self-directed work " +
-      '("grind on X for 30 minutes", "keep going until the tests are green", "work through this list"); never infer ' +
-      "one from an ordinary request. Once registered the harness enforces it: trying to end a reply while the goal " +
+      "Register a goal for this session when the user explicitly asks for sustained, self-directed work " +
+      '("grind on X for 30 minutes", "do 20 minutes of research", "keep going until the tests are green"); never infer ' +
+      "one from an ordinary request. A request that names a duration or amount of work IS such a request: create the goal " +
+      "FIRST, before doing any of the work, with the floor set to exactly the amount the user named (20 minutes = " +
+      "minMs 1200000; never subtract time already spent). Do this even when the task looks hard, slow or impossible: " +
+      "the user asked for the effort, so create the goal and spend it rather than explaining why you will stop. Once registered the harness enforces it: trying to end a reply while the goal " +
       "is active (or while a work floor is unmet) is answered with a keep-going prompt, not a hard stop. Only the user can stop it; " +
       'when the work is verifiably done, request completion (goal action update "complete"); a fresh verifier decides. ' +
       "Fails if an unfinished goal exists.",
@@ -3891,7 +3917,6 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
           objective: p.objective,
           ...(p.floor ? { floor: p.floor } : {}),
           ...(p.token_cap !== undefined ? { capTokens: p.token_cap } : {}),
-          source: "tool",
         });
       } catch (e) {
         return recordCoreAuthoredResult(
@@ -3935,7 +3960,8 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
     description:
       'Request completion of the goal. Set to "complete" only when the objective has actually been achieved and no ' +
       "required work remains. Do not mark a goal complete merely because its budget is nearly exhausted or because " +
-      "you are stopping work. An independent fresh-context verifier reads only the objective and your note and " +
+      "you are stopping work. An independent fresh-context verifier reads only the objective, your note, and any " +
+      "workspace files you name in `files` (the harness reads them for it — name deliverables, never paste them into the note), and " +
       "decides; if it rejects, the goal stays active and its reasons come back to you. You cannot block, pause, or " +
       "resume a goal; only the user stops it.",
     parameters: Type.Object({
@@ -3943,9 +3969,15 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
       note: Type.String({
         description: "The concrete evidence (commands, output, results, links) that proves the objective is achieved.",
       }),
+      files: Type.Optional(
+        Type.Array(Type.String(), {
+          maxItems: GOAL_EVIDENCE_FILES,
+          description: "Workspace paths of the deliverables; the verifier reads them directly.",
+        }),
+      ),
     }),
     async execute(callId, params) {
-      const p = params as { note: string };
+      const p = params as { note: string; files?: string[] };
       await recordCall(callId, {
         tool: "goal",
         action: "update",
@@ -3961,8 +3993,21 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
           true,
         );
       }
+      if (goal.floor) {
+        const state = grindState(goal.floor, goalFloorMeter(goal, ref.goalMeter ?? createGrindMeter()));
+        if (!state.met)
+          return recordCoreAuthoredResult(
+            callId,
+            { tool: "goal", action: "update", error: "floor_unmet", goal },
+            text(
+              `The work floor is not met yet (${state.text}); the goal stays active and cannot be completed before then. Keep working: verify the result more deeply, harden it, or go further on the objective.`,
+            ),
+            true,
+          );
+      }
+      const evidence = [p.note ?? "", ...(await goalEvidenceFiles(ref.current, p.files, ref.abortSignal))].join("\n");
       const verdict = ref.verifyGoal
-        ? await ref.verifyGoal(goal.objective, p.note ?? "").catch((e: unknown) => ({
+        ? await ref.verifyGoal(goal.objective, evidence).catch((e: unknown) => ({
             complete: false,
             reasons: `the verifier failed (${errMessage(e)}); request completion again`,
           }))
@@ -3978,25 +4023,13 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
         );
       }
       delete goal.verifierFeedback;
-      let floorNote = "";
-      if (goal.floor) {
-        const meter = ref.goalMeter;
-        if (meter) {
-          const { grindState } = await import("./grind.ts");
-          const state = grindState(goal.floor, goalFloorMeter(goal, meter));
-          if (!state.met)
-            floorNote = ` The work floor is not met yet (${state.text}); expect keep-going prompts until it is — spend them on adjacent, genuinely useful work.`;
-        }
-      }
       goal.status = "complete";
       goal.updatedAt = Date.now();
       goal.completionNote = p.note;
       return recordCoreAuthoredResult(
         callId,
         { tool: "goal", action: "update", goal },
-        text(
-          `The verifier accepted completion; the goal is complete. Report the outcome (and evidence) to the user.${floorNote}`,
-        ),
+        text(`The verifier accepted completion; the goal is complete. Report the outcome (and evidence) to the user.`),
       );
     },
   });
@@ -4112,7 +4145,7 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
     name: "runtime",
     label: "runtime",
     description:
-      "Inspect or change your model, harness, reasoning effort, and fast mode. Use get to see the actual active runtime, saved defaults, and available choices. Use set for requests such as 'switch to Astra and do this'. A successful change stops this runtime and resumes the unfinished task on the selected runtime with saved tool results. Omitted settings are preserved. lifetime defaults to task (this user request or cron fire, including retries); scope changes the default for future requests in this scope too and requires a live user. Cron fires may change only their task runtime; the next fire keeps its configured runtime. inherit returns to the scope default, or clears the scope override when lifetime is scope. Never guess capabilities or claim you cannot switch before using this tool. Call a change by itself, after other tools finish.",
+      "Inspect or change your model, harness, reasoning effort, and fast mode. Use get to see the actual active runtime, saved defaults, and available choices. Use set for requests such as 'switch to Astra and do this'. A successful change stops this runtime and resumes the unfinished task on the selected runtime with saved tool results. Omitted settings are preserved; an effort the new harness and model do not offer is an error, so pass one. lifetime defaults to task (this user request or cron fire, including retries); scope changes the default for future requests in this scope too and requires a live user. Cron fires may change only their task runtime; the next fire keeps its configured runtime. inherit returns to the scope default, or clears the scope override when lifetime is scope. Never guess capabilities or claim you cannot switch before using this tool. Call a change by itself, after other tools finish.",
     parameters: Type.Object({
       action: Type.Union([Type.Literal("get"), Type.Literal("set"), Type.Literal("inherit")]),
       model: Type.Optional(Type.String({ description: "Model ID or exact display name from get, such as Astra." })),
@@ -4129,14 +4162,7 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
     async execute(callId, params) {
       const request = params as RuntimeRequest;
       await recordCall(callId, { tool: "runtime", ...request });
-      if (
-        request.action !== "get" &&
-        ref.goal &&
-        (ref.goal.status === "active" ||
-          ref.goal.status === "paused" ||
-          (ref.goal.floor &&
-            !grindState(ref.goal.floor, goalFloorMeter(ref.goal, ref.goalMeter ?? createGrindMeter())).met))
-      ) {
+      if (request.action !== "get" && ref.goal && (ref.goal.status === "active" || ref.goal.status === "paused")) {
         return recordCoreAuthoredResult(
           callId,
           { tool: "runtime", error: "goal_in_progress" },

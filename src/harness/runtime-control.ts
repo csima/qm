@@ -3,7 +3,7 @@ import type { App } from "../api/app.ts";
 import { runtimeConfigBody, webuiModelEnabled, type RuntimeDeps } from "../api/runtime-config.ts";
 import { livePersonCapability } from "../api/artifact-share.ts";
 import { parseScopeId } from "../types.ts";
-import { isHarnessId, parseRuntimeChoice, thinkingLevelsForHarness } from "../model/pi-models.ts";
+import { isHarnessId, parseRuntimeChoice } from "../model/pi-models.ts";
 
 export function createRuntimeService(deps: RuntimeDeps, app: Pick<App, "authorizesCapabilityScope">): RuntimeService {
   return async (
@@ -39,9 +39,6 @@ export function createRuntimeService(deps: RuntimeDeps, app: Pick<App, "authoriz
         ok: true,
         active,
         ...snapshot,
-        effortLevelsByHarness: Object.fromEntries(
-          snapshot.approvedHarnesses.map((id) => [id, thinkingLevelsForHarness(id)]),
-        ),
         taskLifetime:
           "The current request or cron fire, including retries and runtime handoffs. Future requests and fires use their configured defaults.",
       };

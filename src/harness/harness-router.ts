@@ -19,6 +19,7 @@ import { NON_INTERACTIVE_THINKING_LEVEL, NON_INTERACTIVE_FAST_MODE } from "../co
 import { NonRetryableTurnError } from "../core/turn-error.ts";
 import { createGrindMeter } from "./grind.ts";
 import {
+  bankGoalTurn,
   enforceGoal,
   goalSnapshotPayload,
   latestGoalRecord,
@@ -74,12 +75,11 @@ async function runTurnEnforcingGoal(
       (remaining !== undefined && remaining < GOAL_ROUND_MIN_WALL_MS)
     );
   };
-  const enforced = await enforceGoal<"ok" | "halted">({
+  await enforceGoal<"ok" | "halted">({
     goal,
     meter,
     outcome: blocked() ? "halted" : "ok",
     ok: "ok",
-    toolCalls: () => emitted.filter((entry) => entry.type === "tool_call").length,
     blocked,
     beforePrompt: () => {
       console.error(`[goal] continuation session=${input.session.id} harness=${harnessId} turns=${meter.turns}`);
@@ -101,10 +101,9 @@ async function runTurnEnforcingGoal(
     goal.status = "paused";
     goal.updatedAt = Date.now();
   }
+  bankGoalTurn(goal, startedAt);
   await dispatched.emit({ type: "system", payload: goalSnapshotPayload(goal), scopeLabel: input.scopeLabel });
-  if (!enforced.waiverNote) return result;
-  await dispatched.emit({ type: "assistant", payload: { text: enforced.waiverNote }, scopeLabel: input.scopeLabel });
-  return { ...result, reply: [result.reply, enforced.waiverNote].filter(Boolean).join("\n\n") };
+  return result;
 }
 
 type StoredRuntime = { harnessId: string; modelId: string; effortLevel?: string; fastMode?: boolean };
@@ -114,8 +113,7 @@ function resolvedEffort(
   requested: string | undefined,
   inherited: StoredRuntime | undefined,
 ): EffortLevel | undefined {
-  const sameRuntime = inherited?.harnessId === target.harnessId && inherited.modelId === target.modelId;
-  const level = requested ?? (sameRuntime ? inherited.effortLevel : undefined);
+  const level = requested ?? inherited?.effortLevel;
   if (level === undefined) return undefined;
   const effort = parseEffort(target.harnessId, target.modelId, level);
   if (!effort)
