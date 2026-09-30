@@ -5,6 +5,10 @@ import type { CronStore } from "../cron/cron-store.ts";
 import { boundLoopCron } from "./authority.ts";
 import { samePerson } from "../directory/person.ts";
 import type { Loop, LoopItem, LoopOutput, TurnRequest, TurnResult } from "../types.ts";
+import { TurnHandedOff } from "../core/turn-error.ts";
+import { createMemoryMap, type DurableMap } from "../persistence/durable-map.ts";
+import { createMemoryAdvisoryLock, type AdvisoryLock } from "../persistence/advisory-lock.ts";
+import type { LoopFireProgress } from "./runner.ts";
 import { runTrigger, type TriggerDeps, type TriggerOutcome } from "../triggers/run-trigger.ts";
 import { reachEnqueue } from "../reach/reach.ts";
 import { hashId } from "../util/crypto.ts";
@@ -19,6 +23,7 @@ import {
   DEFAULT_MAX_ATTEMPTS,
   DuplicateLoopFireError,
   runLoopFire,
+  LoopFireDeferred,
   type CapturedArtifact,
   type FireSummary,
   type IntakeCandidate,
@@ -31,9 +36,21 @@ import { evaluateSuccess, type SuccessCheckResult, type SuccessVerdict } from ".
 import { ledgerState } from "./ledger-view.ts";
 import { adapterForItem } from "./sources/index.ts";
 
+export interface LoopFireContinuation {
+  loopId: string;
+  fireKey: string;
+  cronId?: string;
+  options?: { enumerate?: boolean };
+  progress: LoopFireProgress;
+  stages: Record<string, TriggerOutcome>;
+  result?: LoopFireResult;
+  createdAt: number;
+}
+
 export interface LoopFireDeps {
   admittedWork?: AdmittedWork;
-  lock?: import("../persistence/advisory-lock.ts").AdvisoryLock;
+  continuations?: DurableMap<LoopFireContinuation>;
+  lock?: AdvisoryLock;
   loops: LoopStore;
   crons?: Pick<CronStore, "get">;
   samePerson?: (a: string, b: string) => Promise<boolean>;
@@ -44,6 +61,7 @@ export interface LoopFireDeps {
 }
 
 interface LoopFireResult {
+  deferred?: boolean;
   status: TurnResult["status"];
   note?: string;
   summary?: FireSummary;
@@ -390,14 +408,19 @@ function shipPrompt(loop: Loop, output: LoopOutput, note?: string): string {
 
 export function createLoopFireService(deps: LoopFireDeps): LoopFireService {
   const admitted = <T>(work: () => Promise<T>): Promise<T> => deps.admittedWork?.run(work) ?? work();
+  const continuations = deps.continuations ?? createMemoryMap<LoopFireContinuation>();
+  const lock = deps.lock ?? createMemoryAdvisoryLock();
   async function stageTurn(
     loop: Loop,
     fireKey: string,
     threadRef: string,
     input: string,
     actorId?: string,
-    options?: LoopFollowUpOptions,
+    options?: LoopFollowUpOptions & { continuation?: LoopFireContinuation; replayCommitted?: boolean },
   ): Promise<TriggerOutcome> {
+    const continuation = options?.continuation;
+    const cached = continuation?.stages[fireKey];
+    if (cached) return cached;
     let cron;
     try {
       const bound = await boundLoopCron(loop, deps.crons);
@@ -415,7 +438,8 @@ export function createLoopFireService(deps: LoopFireDeps): LoopFireService {
     ) {
       return { authzFailed: true, ran: false, note: "only the owner may direct a privileged loop turn" };
     }
-    return runTrigger(deps.trigger, {
+    const outcome = await runTrigger(deps.trigger, {
+      ...(continuation || options?.replayCommitted ? { replayCommitted: true } : {}),
       ...cronTriggerAuthority(cron ?? loop),
       input,
       fireKey,
@@ -427,6 +451,11 @@ export function createLoopFireService(deps: LoopFireDeps): LoopFireService {
       ...(typeof options?.fastMode === "boolean" ? { fastMode: options.fastMode } : {}),
       ...(options?.attachments?.length ? { attachments: options.attachments } : {}),
     });
+    if (continuation && (outcome.ran || outcome.authzFailed)) {
+      continuation.stages[fireKey] = outcome;
+      await continuations.put(continuation.fireKey, continuation);
+    }
+    return outcome;
   }
 
   function stageFailure(stage: string, outcome: TriggerOutcome): { error: Error; userMessage: string } | null {
@@ -499,7 +528,16 @@ export function createLoopFireService(deps: LoopFireDeps): LoopFireService {
     options?: { enumerate?: boolean },
   ): Promise<LoopFireResult> {
     try {
-      const work = () => fireAdmitted(loopId, fireKey, cronId, options);
+      const execute = () =>
+        lock.withLock(`loop-lifecycle:${loopId}`, () => fireAdmitted(loopId, fireKey, cronId, options));
+      const work = async () =>
+        (await (lock.tryWithLock
+          ? lock.tryWithLock(`loop-fire:${fireKey}`, execute)
+          : lock.withLock(`loop-fire:${fireKey}`, execute))) ?? {
+          status: "silent" as const,
+          deferred: true,
+          note: "fire already running",
+        };
       return await admitted(work);
     } catch (error) {
       if (error instanceof WorkAdmissionClosed) return { status: "refused", note: error.message };
@@ -513,16 +551,40 @@ export function createLoopFireService(deps: LoopFireDeps): LoopFireService {
     cronId?: string,
     options?: { enumerate?: boolean },
   ): Promise<LoopFireResult> {
-    const loop = await deps.loops.get(loopId);
-    if (!loop) return { status: "failed", note: "loop not found" };
+    const saved = await continuations.get(fireKey);
+    if (saved && saved.loopId !== loopId) return { status: "failed", note: "loop fire identity mismatch" };
+    if (saved?.result) return saved.result;
+    const current = await deps.loops.get(loopId);
+    if (!current) return { status: "failed", note: "loop not found" };
     try {
-      await boundLoopCron(loop, deps.crons, cronId);
+      await boundLoopCron(current, deps.crons, saved?.cronId ?? cronId);
     } catch (e) {
       return { status: "failed", note: errMessage(e) };
     }
-    if (loop.state === "enabled" && (await deps.trigger.idempotency.committed(`${fireKey}:intake`))) {
-      return { status: "silent", note: "duplicate fire key" };
-    }
+    if (!isRunnable(current))
+      return { status: "silent" as const, note: "loop is not runnable", ...(saved ? { deferred: true } : {}) };
+    if (!saved && (await deps.trigger.idempotency.committed(`${fireKey}:intake`)))
+      return { status: "silent" as const, note: "duplicate fire key" };
+    const continuation = saved ?? { loopId, fireKey, cronId, options, progress: {}, stages: {}, createdAt: Date.now() };
+    await continuations.put(fireKey, continuation);
+    const result = await fireContinued(loopId, fireKey, continuation).catch((error) => {
+      if (error instanceof LoopFireDeferred) return { status: "silent" as const, deferred: true, note: error.message };
+      throw error;
+    });
+    if (result.deferred) return result;
+    continuation.result = result;
+    await continuations.put(fireKey, continuation);
+    return result;
+  }
+
+  async function fireContinued(
+    loopId: string,
+    fireKey: string,
+    continuation: LoopFireContinuation,
+  ): Promise<LoopFireResult> {
+    const loop = await deps.loops.get(loopId);
+    if (!loop) return { status: "failed", note: "loop not found" };
+    const options = continuation.options;
     const threadRef = loopFireThreadRef(loopId, fireKey);
     if ((loop.surface === "inbox" || loop.surface?.startsWith("inbox:")) && options?.enumerate !== false) {
       if (!isRunnable(loop)) return { status: "silent", note: "loop is not runnable" };
@@ -533,10 +595,13 @@ export function createLoopFireService(deps: LoopFireDeps): LoopFireService {
           `${fireKey}:sync`,
           threadRef,
           loop.surface === "inbox" ? renderInboxSyncTask(loop.id) : renderSourceInboxTask(loop.id, loop.sources![0]!),
+          undefined,
+          { continuation },
         );
         if (!outcome.ran && !outcome.authzFailed) return { status: "silent", note: "duplicate fire key" };
         failure = stageFailure("inbox sync", outcome)?.error.message;
       } catch (error) {
+        if (error instanceof TurnHandedOff) throw error;
         failure = errMessage(error);
       }
       await deps.loops.recordFireOutcome(loopId, failure !== undefined);
@@ -555,7 +620,9 @@ export function createLoopFireService(deps: LoopFireDeps): LoopFireService {
         {
           enumerate: async () => {
             if (options?.enumerate === false) return [];
-            const outcome = await stageTurn(loop, `${fireKey}:intake`, threadRef, intakePrompt(loop));
+            const outcome = await stageTurn(loop, `${fireKey}:intake`, threadRef, intakePrompt(loop), undefined, {
+              continuation,
+            });
             if (!outcome.ran && !outcome.authzFailed) throw new DuplicateLoopFireError("duplicate fire key");
             const failure = stageFailure("intake", outcome);
             if (failure) throw failure.error;
@@ -567,6 +634,8 @@ export function createLoopFireService(deps: LoopFireDeps): LoopFireService {
               `${fireKey}:work:${item.id}:${item.attempts}`,
               threadRef,
               workPrompt(loop, item, guidance),
+              undefined,
+              { continuation },
             );
             const failure = stageFailure("work", outcome);
             if (failure) throw failure.error;
@@ -591,6 +660,8 @@ export function createLoopFireService(deps: LoopFireDeps): LoopFireService {
               `${fireKey}:judge:${item.id}:${attempt}`,
               threadRef,
               judgePrompt(loop, item),
+              undefined,
+              { continuation },
             );
             const failure = stageFailure("judge", outcome);
             if (failure) throw failure.error;
@@ -613,12 +684,12 @@ export function createLoopFireService(deps: LoopFireDeps): LoopFireService {
           ship: async ({ output }) => shipOutput(loop.id, output.id, loop.owner, "auto-shipped by policy", true),
         },
         grants,
+        { fireKey, progress: continuation.progress, save: () => continuations.put(fireKey, continuation) },
       );
     } catch (e) {
+      if (e instanceof TurnHandedOff) throw e;
       if (e instanceof DuplicateLoopFireError) return { status: "silent", note: "duplicate fire key" };
-      await deps.loops.recordFireOutcome(loopId, true);
-      await applyGovernor(loopId);
-      return { status: "failed", note: errMessage(e) };
+      throw e;
     }
 
     if (!summary.ran) return { status: "silent", note: "loop is not runnable" };
@@ -648,7 +719,10 @@ export function createLoopFireService(deps: LoopFireDeps): LoopFireService {
     if (output.state === "shipped") return output;
     const decisionItemId = output.itemId;
     const decisionToken = await deps.items.acquireDecision(decisionItemId);
-    if (!decisionToken) return null;
+    if (!decisionToken) {
+      if (requireAuto) throw new LoopFireDeferred("waiting for the item decision lease");
+      return null;
+    }
     try {
       output = await deps.outputs.get(outputId);
       if (!output || output.loopId !== loopId) return null;
@@ -665,10 +739,14 @@ export function createLoopFireService(deps: LoopFireDeps): LoopFireService {
         if (shipped) await settleItem(loopId, shipped.itemId);
         return shipped;
       }
-      const claimed = await deps.outputs.claimShipping(outputId);
-      if (!claimed) return null;
-      const claimToken = claimed.claimToken!;
       const fireKey = `loop:${loopId}:ship:${outputId}`;
+      const resuming = output.state === "shipping" && (!output.shipFireKey || output.shipFireKey === fireKey);
+      const claimed = resuming ? output : await deps.outputs.claimShipping(outputId);
+      if (!claimed) {
+        if (requireAuto) throw new LoopFireDeferred("waiting for the output shipping lease");
+        return null;
+      }
+      const claimToken = claimed.claimToken!;
       if (!(await deps.outputs.beginShipAttempt(outputId, claimToken, fireKey))) return null;
       const outcome = await stageTurn(
         loop,
@@ -676,6 +754,7 @@ export function createLoopFireService(deps: LoopFireDeps): LoopFireService {
         loopFireThreadRef(loopId, fireKey),
         shipPrompt(loop, claimed, note),
         actorId,
+        { replayCommitted: resuming },
       );
       if (!outcome.ran && !outcome.authzFailed && (await deps.outputs.get(outputId))?.shipFireKey === fireKey) {
         return deps.outputs.markUnconfirmed(outputId, claimToken);
@@ -735,6 +814,10 @@ export function createLoopFireService(deps: LoopFireDeps): LoopFireService {
   }
 
   async function sweepStale(now: number): Promise<void> {
+    for (const [key, continuation] of await continuations.entries()) {
+      if (!continuation.result) await fire(continuation.loopId, continuation.fireKey);
+      else if (now - continuation.createdAt > 14 * 24 * 60 * 60_000) await continuations.delete(key);
+    }
     for (const loop of await deps.loops.list()) {
       if (
         loop.state === "enabled" &&
@@ -811,10 +894,7 @@ export function createLoopFireService(deps: LoopFireDeps): LoopFireService {
   }
 
   return {
-    fire: (loopId, fireKey, cronId, options) =>
-      deps.lock
-        ? deps.lock.withLock(`loop-lifecycle:${loopId}`, () => fire(loopId, fireKey, cronId, options))
-        : fire(loopId, fireKey, cronId, options),
+    fire,
     shipOutput: (...args) => admitted(() => shipOutput(...args)),
     returnOutput,
     sweepStale,

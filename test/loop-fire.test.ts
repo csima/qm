@@ -2,6 +2,10 @@ import { createAdmittedWork } from "../src/util/admitted-work.ts";
 import { renderInboxSyncTask } from "../src/loops/inbox-loop.ts";
 import { createCronStore, type CreateCronInput } from "../src/cron/cron-store.ts";
 import { createScheduler } from "../src/cron/scheduler.ts";
+import { TurnHandedOff } from "../src/core/turn-error.ts";
+import { createMemoryAdvisoryLock } from "../src/persistence/advisory-lock.ts";
+import { createMemoryMap } from "../src/persistence/durable-map.ts";
+import type { LoopFireContinuation } from "../src/loops/loop-fire.ts";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createLoopFireService } from "../src/loops/loop-fire.ts";
@@ -52,29 +56,46 @@ function service(
   const deliveries = fakeDeliveries();
   const turns: TurnRequest[] = [];
   const idempotency = createIdempotencyStore();
-  const fire = createLoopFireService({
-    admittedWork: overrides?.admittedWork,
-    crons,
-    samePerson: overrides?.samePerson,
+  const continuations = createMemoryMap<LoopFireContinuation>();
+  const lock = createMemoryAdvisoryLock();
+  const recreate = () =>
+    createLoopFireService({
+      continuations,
+      lock,
+      admittedWork: overrides?.admittedWork,
+      crons,
+      samePerson: overrides?.samePerson,
+      loops,
+      items,
+      outputs,
+      grants,
+      trigger: {
+        deliveries: deliveries.store as never,
+        idempotency,
+        identity: fakeIdentity() as never,
+        run: async (req): Promise<TurnResult> => {
+          const run = async (): Promise<TurnResult> => {
+            turns.push(req);
+            if (overrides?.turnResult) return overrides.turnResult;
+            return { status: "ok", reply: await respond(req), sessionId: `s${turns.length}` };
+          };
+          return overrides?.admittedWork ? overrides.admittedWork.run(run) : run();
+        },
+      },
+    });
+  return {
     loops,
+    crons,
     items,
     outputs,
     grants,
-    trigger: {
-      deliveries: deliveries.store as never,
-      idempotency,
-      identity: fakeIdentity() as never,
-      run: async (req): Promise<TurnResult> => {
-        const run = async (): Promise<TurnResult> => {
-          turns.push(req);
-          if (overrides?.turnResult) return overrides.turnResult;
-          return { status: "ok", reply: await respond(req), sessionId: `s${turns.length}` };
-        };
-        return overrides?.admittedWork ? overrides.admittedWork.run(run) : run();
-      },
-    },
-  });
-  return { loops, crons, items, outputs, grants, fire, turns, deliveries, idempotency };
+    fire: recreate(),
+    recreate,
+    continuations,
+    turns,
+    deliveries,
+    idempotency,
+  };
 }
 
 const base = { owner: "josh", createdBy: "josh", ownerScopeId: scopeId("personal", "josh") };
@@ -979,4 +1000,171 @@ test("a failed followup rejects so the composer can retain uploaded attachments"
   );
   assert.equal(s.turns[0]?.attachments?.[0]?.blobId, "test-blob");
   assert.equal((await s.items.get(item.id))?.thread?.at(-1)?.role, "system");
+});
+for (const interruptedStage of ["work", "judge", "ship"]) {
+  test(`a new loop service resumes a handed-off ${interruptedStage} stage without redoing completed stages`, async () => {
+    let interrupted = false;
+    const s = service((req) => {
+      if (stage(req) === interruptedStage && !interrupted) {
+        interrupted = true;
+        throw new TurnHandedOff();
+      }
+      return HAPPY(req);
+    });
+    const loop = await makeLoop(s.loops, { shipActions: [{ action: "open_pr", gate: "auto" }] });
+    await assert.rejects(s.fire.fire(loop.id, "handoff"), TurnHandedOff);
+    const held = (await s.items.byLoop(loop.id))[0]!;
+    assert.equal(held.attempts, 1);
+    const result = await s.recreate().fire(loop.id, "handoff");
+    assert.notEqual(result.status, "failed");
+    assert.equal((await s.items.get(held.id))?.attempts, 1);
+    assert.equal((await s.items.get(held.id))?.status, "shipped");
+    assert.equal(s.turns.filter((req) => stage(req) === "intake").length, 1);
+    assert.equal(s.turns.filter((req) => stage(req) === "work").length, interruptedStage === "work" ? 2 : 1);
+  });
+}
+
+test("pausing suspends a loop continuation until it is enabled again", async () => {
+  let interrupted = false;
+  const s = service((req) => {
+    if (stage(req) === "work" && !interrupted) {
+      interrupted = true;
+      throw new TurnHandedOff();
+    }
+    return HAPPY(req);
+  });
+  const loop = await makeLoop(s.loops);
+  await assert.rejects(s.fire.fire(loop.id, "paused-handoff"), TurnHandedOff);
+  await s.loops.setState(loop.id, "paused");
+  const calls = s.turns.length;
+  await s.recreate().sweepStale(Date.now());
+  assert.equal(s.turns.length, calls);
+  assert.equal((await s.continuations.get("paused-handoff"))?.result, undefined);
+  await s.loops.setState(loop.id, "enabled");
+  await s.recreate().sweepStale(Date.now());
+  assert.equal((await s.items.byLoop(loop.id))[0]?.status, "ready");
+});
+
+test("a transient item read failure does not finalize or strand a handed-off loop", async () => {
+  let interrupted = false;
+  const s = service((req) => {
+    if (stage(req) === "work" && !interrupted) {
+      interrupted = true;
+      throw new TurnHandedOff();
+    }
+    return HAPPY(req);
+  });
+  const loop = await makeLoop(s.loops);
+  await assert.rejects(s.fire.fire(loop.id, "read-failure"), TurnHandedOff);
+  const get = s.items.get;
+  s.items.get = async () => {
+    throw new Error("database unavailable");
+  };
+  await assert.rejects(s.recreate().fire(loop.id, "read-failure"), /database unavailable/);
+  assert.equal((await s.continuations.get("read-failure"))?.result, undefined);
+  s.items.get = get;
+  await s.recreate().fire(loop.id, "read-failure");
+  assert.equal((await s.items.byLoop(loop.id))[0]?.status, "ready");
+});
+
+for (const recovery of ["decision lease", "unconfirmed output"]) {
+  test(`loop recovery preserves a pending ${recovery}`, async () => {
+    let interrupted = false;
+    const s = service((req) => {
+      if (stage(req) === "ship" && !interrupted) {
+        interrupted = true;
+        throw new TurnHandedOff();
+      }
+      return HAPPY(req);
+    });
+    const loop = await makeLoop(s.loops, { shipActions: [{ action: "open_pr", gate: "auto" }] });
+    await assert.rejects(s.fire.fire(loop.id, "crash"), TurnHandedOff);
+    const item = (await s.items.byLoop(loop.id))[0]!;
+    const output = (await s.outputs.byItem(item.id))[0]!;
+    if (recovery === "decision lease") {
+      const token = await s.items.acquireDecision(item.id);
+      assert.ok(token);
+      const deferred = await s.recreate().fire(loop.id, "crash");
+      assert.equal(deferred.deferred, true);
+      assert.equal((await s.continuations.get("crash"))?.result, undefined);
+      assert.equal((await s.items.get(item.id))?.status, "ready");
+      await s.items.releaseDecision(item.id, token);
+      await s.recreate().fire(loop.id, "crash");
+      assert.equal((await s.items.get(item.id))?.status, "shipped");
+    } else {
+      await s.outputs.markUnconfirmed(output.id, output.claimToken!);
+      await s.recreate().fire(loop.id, "crash");
+      assert.equal((await s.items.get(item.id))?.status, "ready");
+      assert.equal((await s.outputs.get(output.id))?.state, "unconfirmed");
+      await s.recreate().shipOutput(loop.id, output.id, loop.owner);
+      assert.equal((await s.items.get(item.id))?.status, "shipped");
+    }
+    assert.equal(s.turns.filter((req) => stage(req) === "work").length, 1);
+  });
+}
+
+test("a recovering Loop cannot advance until the outgoing fire releases its lifecycle lock", async () => {
+  const entered = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  let handoff = true;
+  const s = service(async (request) => {
+    if (stage(request) === "work" && handoff) {
+      entered.resolve();
+      await release.promise;
+      handoff = false;
+      throw new TurnHandedOff();
+    }
+    return HAPPY(request);
+  });
+  const loop = await makeLoop(s.loops);
+  const running = s.fire.fire(loop.id, "concurrent-handoff");
+  const rejected = assert.rejects(running, TurnHandedOff);
+  await entered.promise;
+  const before = s.turns.length;
+  assert.equal((await s.recreate().fire(loop.id, "concurrent-handoff")).deferred, true);
+  await s.recreate().sweepStale(Date.now());
+  assert.equal(s.turns.length, before);
+  release.resolve();
+  await rejected;
+  assert.equal((await s.loops.get(loop.id))?.consecutiveFailedFires ?? 0, 0);
+  await s.recreate().sweepStale(Date.now());
+  assert.equal((await s.items.byLoop(loop.id))[0]?.attempts, 1);
+  assert.equal((await s.items.byLoop(loop.id))[0]?.status, "ready");
+});
+
+test("a Loop resumes its later item without recounting or reworking completed held items", async () => {
+  let workCount = 0;
+  const s = service((request) => {
+    if (stage(request) === "intake") return '```json\n[{"sourceKey":"one"},{"sourceKey":"two"}]\n```';
+    if (stage(request) === "work" && ++workCount === 2) throw new TurnHandedOff();
+    return HAPPY(request);
+  });
+  const loop = await makeLoop(s.loops);
+  await assert.rejects(s.fire.fire(loop.id, "two-items"), TurnHandedOff);
+  const result = await s.recreate().fire(loop.id, "two-items");
+  const items = await s.items.byLoop(loop.id);
+  assert.equal(items.length, 2);
+  assert.ok(items.every((item) => item.attempts === 1 && item.status === "ready"));
+  assert.equal(workCount, 3);
+  assert.equal(result.summary?.worked, 2);
+  assert.equal(result.summary?.ready.length, 2);
+  assert.equal(new Set(result.summary?.ready).size, 2);
+});
+
+test("handed-off inbox synchronization is resumed rather than recorded as a failed fire", async () => {
+  let handoff = true;
+  const s = service(() => {
+    if (handoff) {
+      handoff = false;
+      throw new TurnHandedOff();
+    }
+    return "Synced";
+  });
+  const loop = await makeLoop(s.loops, { surface: "inbox" });
+  await assert.rejects(s.fire.fire(loop.id, "inbox-handoff"), TurnHandedOff);
+  assert.equal((await s.loops.get(loop.id))?.consecutiveFailedFires ?? 0, 0);
+  await s.recreate().sweepStale(Date.now());
+  assert.equal((await s.continuations.get("inbox-handoff"))?.result?.status, "silent");
+  assert.equal(s.turns.length, 2);
+  assert.equal(s.turns[0]?.idempotencyKey, s.turns[1]?.idempotencyKey);
 });

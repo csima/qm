@@ -5,6 +5,7 @@ import { createKeychainApprovals, type KeychainApprovals } from "./credentials/k
 import { asObject } from "./harness/codex-auth-file.ts";
 import { flushErrorReporting, startTiming } from "../plugins/chassis/src/error-reporting.ts";
 import type { TimingStatus } from "../plugins/chassis/src/timing.ts";
+import { createHandoff } from "./runs/handoff.ts";
 import { createProductAnalytics } from "./util/product-analytics.ts";
 import { resolveTurnOrigin } from "./core/turn-origin.ts";
 import { createAdmittedWork } from "./util/admitted-work.ts";
@@ -424,7 +425,7 @@ import { createSlackInstallationStore, type SlackInstallationStore } from "./sur
 export interface Runtime {
   start(): void;
   startBackground(): void;
-  stopBackgroundClaims(): Promise<void>;
+  stopBackgroundClaims(requestedAt?: number): Promise<void>;
   setBackgroundAdmission(check: () => boolean): void;
   stopBackground(): Promise<void>;
   backgroundDrained(): Promise<void>;
@@ -572,6 +573,7 @@ export function buildApp(
     modelVerificationProbe?: typeof probeModel;
   } = {},
 ): BuiltApp {
+  const handoff = createHandoff();
   let backgroundAdmission = () => !config.backgroundDeploymentId;
   let noteAdmitted = () => {};
   const admittedWork = createAdmittedWork({
@@ -2019,7 +2021,11 @@ export function buildApp(
     ? (sessionId: string): string | undefined =>
         uuidId.test(sessionId) ? adminSessionUrl(recoveryAdminBase, sessionId) : undefined
     : undefined;
-  wireRunResultDeliveries(runs, deliveries, tasks, recoveryAdminUrlFor, sessions);
+  const runResultDeliveries = wireRunResultDeliveries(runs, deliveries, tasks, recoveryAdminUrlFor, sessions);
+  const runDeliverySweeper = createSweeper(() => runResultDeliveries.sweep(), 1_000, {
+    label: "run-deliveries",
+    immediate: true,
+  });
   const idempotency = createIdempotencyStore(artifactMap<IdempotencyRecord>("idempotency"));
   const skillFetcher = createGitFetcher(
     keychain
@@ -2118,6 +2124,7 @@ export function buildApp(
   const app = createApp({
     externalSlackPolicies: config.externalSlackPolicies,
     admittedWork,
+    handoff,
     ...(pgArtifactMap ? { resourceSearch: createPostgresResourceSearch(pgArtifactMap.pool) } : {}),
     swarms,
     identity,
@@ -2406,6 +2413,7 @@ export function buildApp(
     admittedWork,
     crons,
     samePerson: (a, b) => app.samePerson(a, b),
+    continuations: artifactMap("loop_fire_continuations"),
     lock: advisoryLock,
     loops: loopStore,
     items: loopItems,
@@ -2449,9 +2457,10 @@ export function buildApp(
     keychain && askResolution ? createAskExpirySweep({ keychain, fire: askResolution, auditLog }) : undefined;
   let ingressMaintenance: Promise<void> | undefined;
   const scheduler = createScheduler({
+    pendingFires: artifactMap("cron_fire_continuations"),
+    lock: advisoryLock,
     admittedWork,
     requireQueueStart: Boolean(config.backgroundDeploymentId),
-    lock: advisoryLock,
     crons,
     deliveries,
     idempotency,
@@ -2598,6 +2607,7 @@ export function buildApp(
   const workers: Worker[] = Array.from({ length: Math.max(1, config.workers) }, () =>
     createWorker({
       admittedWork,
+      handoff,
       runs,
       orchestrator,
       leaseTtlMs,
@@ -2673,6 +2683,7 @@ export function buildApp(
   function startBackground(): void {
     if (backgroundRunning) return;
     backgroundRunning = true;
+    handoff.reset();
     admittedWork.resume();
     drain.start();
     const generation = ++backgroundGeneration;
@@ -2709,6 +2720,7 @@ export function buildApp(
       orphanedSignalSweeper.start();
       sessionReturnSweeper.start();
       approvalDeliverySweeper.start();
+      runDeliverySweeper.start();
     };
     if (backgroundStopping)
       void backgroundClaimsStopping.then(startPeriodic).catch(swallowAs("wiring: periodic resume failed", undefined));
@@ -2738,6 +2750,7 @@ export function buildApp(
       orphanedSignalSweeper.stop(),
       sessionReturnSweeper.stop(),
       approvalDeliverySweeper.stop(),
+      runDeliverySweeper.stop(),
       ...workers.map((worker) => worker.stopClaims()),
     ];
     backgroundClaimsStopping = Promise.all(stopping).then(() => {});
@@ -2759,7 +2772,9 @@ export function buildApp(
     setBackgroundAdmission(check) {
       backgroundAdmission = check;
     },
-    async stopBackgroundClaims() {
+    async stopBackgroundClaims(requestedAt = Date.now()) {
+      handoff.request(Math.max(0, requestedAt + config.backgroundHandoffGraceMs - Date.now()));
+      for (const worker of workers) void worker.stopClaims();
       void stopBackground().catch(swallowAs("wiring: background drain failed", undefined));
       await Promise.all([backgroundClaimsStopping, ...workers.map((worker) => worker.stopClaims())]);
     },
@@ -2772,6 +2787,9 @@ export function buildApp(
       await Promise.all(workers.map((w) => w.releaseInFlight()));
     },
     async stop() {
+      handoff.request(Math.min(config.backgroundHandoffGraceMs, Math.max(0, config.shutdownDrainMs - 1_000)));
+      for (const worker of workers)
+        worker.requestHandoff(Math.min(config.backgroundHandoffGraceMs, Math.max(0, config.shutdownDrainMs - 1_000)));
       await stopBackground();
       await Promise.all([
         withTimeout(() => admittedWork.drained(), config.shutdownDrainMs, "admitted work drain").catch(

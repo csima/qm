@@ -1,3 +1,4 @@
+import { uncertainToolCalls } from "../harness/tool-replay.ts";
 import { externalSlackRequestAllowed, currentExternalSlackRun } from "../resolution/external-slack.ts";
 import { externalTools } from "./orchestrator/external-tools.ts";
 import { memoryBoundedEntries, memoryContextPayload, nextMemoryContext } from "../memory/context-boundary.ts";
@@ -129,6 +130,7 @@ import {
   lastImportLacksScopes,
   lintFold,
   rehydrateFoldImages,
+  tapeEndsAtCommittedStep,
   tapeEventsEntitled,
   tapeNeedsInterruptHeal,
 } from "../harness/tape-fold.ts";
@@ -166,7 +168,13 @@ import {
 import { errMessage, reportFailure, swallow, swallowAs } from "../util/errors.ts";
 import { isObj } from "../util/objects.ts";
 import { absoluteAppLinks, headSlice, jsonbSafeStringify } from "../util/text.ts";
-import { NonRetryableTurnError, TitleRejected, turnFailureMessage, type TurnFailurePayload } from "./turn-error.ts";
+import {
+  NonRetryableTurnError,
+  TitleRejected,
+  TurnHandedOff,
+  turnFailureMessage,
+  type TurnFailurePayload,
+} from "./turn-error.ts";
 import { personKey, samePerson } from "../directory/person.ts";
 import { sleep } from "../util/async.ts";
 import { hashId } from "../util/crypto.ts";
@@ -1995,6 +2003,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         provisionResource,
         provisionOwnerAuth,
         useSkill,
+        restoreSkillFiles,
         provisionForReach,
         reclaimBox,
         provisionPending,
@@ -3056,7 +3065,9 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
               ) &&
               participantHistorySeqs === undefined;
             let fold = eligible ? await rehydrateTape(foldTape(rows)) : undefined;
+            let interrupted = false;
             if (eligible && rows.length && fold && tapeNeedsInterruptHeal(rows, fold)) {
+              interrupted = true;
               const interrupt = await deps.sessions.appendTape(lease, {
                 kind: "context_event",
                 payload: { event: "interrupt" },
@@ -3066,7 +3077,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
               fold = healFoldInterrupt(fold, interrupt.createdAt);
             }
             const serve = eligible && !!fold?.length && lintFold(fold).ok;
-            return { rows, serve, covered, fold };
+            return { rows, serve, covered, fold, interrupted };
           } catch (e) {
             swallow("tape: read/heal", e);
             return undefined;
@@ -3180,6 +3191,29 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           String((pausedTurnUserEntry.payload as { text?: string } | null)?.text ?? "").trim() === input.text.trim();
         const partial = isRetry ? (recordedTurn ?? findTrailingPartialTurn(visibleHistory, input.text)) : null;
         const resume = partial && partial.workEntries > 0 ? partial : null;
+        if (partial) {
+          const recoveryEntries = await deps.sessions.getEntries(session.id, { sinceSeq: partial.userSeq });
+          const recoveryTape = await deps.sessions.getTape(session.id);
+          const turnStart = recoveryTape.findLastIndex(
+            (row) => row.entrySeq === partial.userSeq && row.kind === "message",
+          );
+          const uncertain = uncertainToolCalls(recoveryEntries, turnStart < 0 ? [] : recoveryTape.slice(turnStart));
+          if (uncertain.length)
+            throw new NonRetryableTurnError(
+              `The previous worker stopped before recording the outcome of ${uncertain.join(", ")}. It may still be running or may have completed. I stopped rather than repeat it; check the original operation before continuing.`,
+            );
+          await restoreSkillFiles(visibleHistory.filter((entry) => entry.seq > partial.userSeq));
+        }
+        const seamlessResume =
+          !!partial &&
+          history === visibleHistory &&
+          !releasedToolOutput &&
+          !recordedTurn?.answer &&
+          !input.approval &&
+          !!tapeRows?.serve &&
+          !tapeRows.interrupted &&
+          (!resume || (tapeRows.fold?.at(-1) as { role?: string } | undefined)?.role !== "user") &&
+          tapeEndsAtCommittedStep(tapeRows.fold);
         if (partial)
           postKeys.seed(
             completedSurfaceEnqueues(
@@ -3204,11 +3238,14 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
               : `attempt ${input.attempt}; re-running turn at seq ${partial.userSeq} (no recorded work to resume)`,
           });
           console.error(
-            `[orchestrator] turn.resume attempt=${input.attempt} thread=${conversation.threadRef} userSeq=${partial.userSeq} workEntries=${partial.workEntries}`,
+            `[orchestrator] turn.resume attempt=${input.attempt} thread=${conversation.threadRef} userSeq=${partial.userSeq} workEntries=${partial.workEntries} seamless=${seamlessResume}`,
           );
         }
-        let turnInput = partial ? resumeNote({ backgroundJobs: !!backgroundBroker, workRecorded: !!resume }) : baseText;
-        if (partial && !history.some((entry) => entry.seq === partial.userSeq))
+        const resumeInput = seamlessResume
+          ? ""
+          : resumeNote({ backgroundJobs: !!backgroundBroker, workRecorded: !!resume });
+        let turnInput = partial ? resumeInput : baseText;
+        if (partial && !seamlessResume && !history.some((entry) => entry.seq === partial.userSeq))
           turnInput += `\nCurrent request (continue from recorded work; do not restart):\n${baseText}`;
         if (releasedToolOutput) {
           turnInput = `The human released quarantined tool output recorded in the conversation. Continue the original task using that output. The tool action already ran; do not repeat it. Original task: ${baseText}`;
@@ -3659,6 +3696,9 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
             ...(codexTurnAuth ? { codexAuth: codexTurnAuth } : {}),
             ...(input.runId ? { runId: input.runId } : {}),
             cancel: turnAbort.signal,
+            ...(input.handoff ? { handoff: input.handoff } : {}),
+            ...(input.handoffDeadline ? { handoffDeadline: input.handoffDeadline } : {}),
+            ...(seamlessResume && !continuation ? { continueTurn: true } : {}),
             input: harnessInput,
             ...(!partial && messageTs ? { triggerTs: messageTs } : {}),
             ...(!partial && entryTs ? { entryTs } : {}),
@@ -3906,7 +3946,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
                 usage[key] += segment.cacheUsage[key];
           };
           addUsage();
-          while (segment.runtimeHandoff && !segment.stopped && !turnAbort.signal.aborted) {
+          while (segment.runtimeHandoff && !segment.stopped && !segment.handedOff && !turnAbort.signal.aborted) {
             if (++runtimeHandoffs > 8) throw new NonRetryableTurnError("Too many runtime changes in one task");
             if (effectiveTurnWallClockMs && Date.now() - turnStart >= effectiveTurnWallClockMs)
               throw new NonRetryableTurnError("The task reached its wall-clock limit during runtime handoff");
@@ -3966,6 +4006,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
             modelCalls += segment.modelCalls ?? 0;
             addUsage();
           }
+          if (segment.handedOff) throw new TurnHandedOff();
           return {
             ...segment,
             ...(segment.reply ? { reply: absoluteAppLinks(segment.reply, deps.publicWebUrl) } : {}),
@@ -4417,6 +4458,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         await deps.errors?.flush();
         return finalResult;
       } catch (err) {
+        if (err instanceof TurnHandedOff) throw err;
         if (err instanceof ProjectRosterChanged) {
           return {
             status: "refused",

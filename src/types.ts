@@ -431,6 +431,7 @@ export interface LoopItem {
   actionResult?: string;
   claimedAt?: number;
   claimToken?: string;
+  claimFireKey?: string;
   decisionAt?: number;
   decisionToken?: string;
   createdAt: number;

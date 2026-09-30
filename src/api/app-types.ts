@@ -1,6 +1,7 @@
 import type { ExternalSlackPolicies } from "../resolution/external-slack.ts";
 import type { InviteMailer } from "../admin/invite-email.ts";
 import type { DeploymentInvitation } from "../deploy/email-access.ts";
+import type { Handoff } from "../runs/handoff.ts";
 import type { AdmittedWork } from "../util/admitted-work.ts";
 import type { EventBus } from "../util/event-bus.ts";
 import type { RunStreamEvent } from "../runs/run-stream-events.ts";
@@ -618,6 +619,7 @@ export interface App {
 export interface AppDeps {
   externalSlackPolicies?: ExternalSlackPolicies;
   admittedWork?: AdmittedWork;
+  handoff?: Handoff;
   resourceSearch?: ResourceSearchStore;
   swarms?: SwarmService;
   identity: IdentityService;

@@ -961,3 +961,28 @@ test("cron runtime rejects malformed settings and tasks that would ignore them",
   const cron = await store.create({ ...base, schedule: { everyMs: 60_000 }, runtime });
   await assert.rejects(store.update(cron.id, { action: "" }), /runtime overrides require/);
 });
+
+test("recovering an older fire cannot rewind a newer claimed slot", async () => {
+  const store = createCronStore();
+  const cron = await store.create({ ...base, schedule: { everyMs: 60_000 } });
+  const first = cron.nextFireAt!;
+  assert.equal(await store.claimSlot(cron.id, first, first), true);
+  assert.equal(await store.claimSlot(cron.id, first + 60_000, first + 60_000), true);
+  await store.markFired(cron.id, first, first);
+  const current = await store.get(cron.id);
+  assert.equal(current?.lastFiredAt, first + 60_000);
+  assert.equal(current?.nextFireAt, first + 120_000);
+});
+
+test("stranded sweep preserves resumable fires without hiding unrelated stranded fires", async () => {
+  const store = createCronStore();
+  const cron = await store.create({ ...base, schedule: { everyMs: 60_000 } });
+  for (const fireKey of ["resumable", "stranded"]) {
+    await store.beginFire(cron.id, { fireKey, threadRef: fireKey, firedAt: 1, status: "running" });
+  }
+  assert.equal(await store.sweepStrandedFires(Date.now(), ["resumable"]), 1);
+  const { runs } = await store.listFires(cron.id);
+  assert.equal(runs.find((run) => run.fireKey === "resumable")?.status, "running");
+  assert.equal(runs.find((run) => run.fireKey === "resumable")?.endedAt, undefined);
+  assert.equal(runs.find((run) => run.fireKey === "stranded")?.status, "failed");
+});

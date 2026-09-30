@@ -48,6 +48,16 @@ A process records `admitted` before starting background resources. The desired d
 
 `drained` means the process's admitted background work has finished. Releasing ownership and making a deployment safe to replace are separate gates. Do not terminate a relinquished but undrained process merely to meet a rollout time target.
 
+Relinquishing requests a handoff from both background workers and admitted synchronous turns. The current tool can finish and commit its result, after which the harness yields instead of starting another model step. The run lease returns to the queue with the handoff counted separately from retry attempts, so repeated deployments do not exhaust a healthy run's retry budget. `BACKGROUND_HANDOFF_GRACE_MS` defaults to 120 seconds. The ownership transition stores the retirement time on each admitted member, so every retiring replica uses the same deadline even when it observes the transition later. A rollback does not extend a retiring generation’s deadline. At the deadline, the harness aborts remaining provider work and refuses new tool dispatch. A later shutdown may shorten that deadline; returning leadership creates fresh signals without cancelling the retiring generation's deadline.
+
+Pi resumes a clean native tape with `continue()`, without another user message or interruption note. Incomplete replay-safe reads may use the existing hidden recovery note. Started tool calls record a replay policy before execution; automatic recovery requires both the recorded policy and current fixed tool semantics to allow replay. Writes, arbitrary shell commands, client tools, MCP calls, and unknown operations default to unsafe. An unsafe call with no known result stops recovery with an explicit uncertain-outcome error instead of dispatching it again. Committed skill loads restore their files at the recorded paths before continuation, only when the currently authorized skill and pack contents match the recorded fingerprint. Changed or revoked skills fail closed. Other provider adapters honor handoff and deadline signals but retain their existing transcript reconstruction and recovery-note behavior. Claude’s MCP bridge does not receive the native provider tool-call ID from the installed SDK; if handoff interrupts the native result echo, a completed bridge operation can therefore be conservatively reported as uncertain. This candidate does not claim seamless Claude recovery in that window. A tool that exceeds the grace may keep running remotely after the local turn exits. Late local callbacks are fenced; an uncertain unsafe outcome is not automatically replayed. Reattaching foreground sandbox executions by durable process ID is not implemented; this change does not claim exactly-once execution for uncommitted external effects.
+
+Loop fires persist their batch and completed intake, work, and judge outcomes. Recovery resumes the same item attempt and shipping fire key without rerunning completed stages or spending another item attempt. Busy decision leases defer recovery; outputs awaiting confirmation remain reviewable. Cron journals retain the original fire specification and key across handoff or infrastructure failure, including manually fired crons. Completed runs retain a durable delivery-pending marker until their outbox delivery and failure-transcript backfill have been handled. The delivery sweeper retries missed terminal callbacks without waiting for a busy session lease.
+
+**Rollout blocker:** sandbox reclamation still joins pending provisioning, credential scrubbing, temporary-file removal, and ephemeral-computer destruction before releasing the session lease. An unresponsive provider in that cleanup path can exceed the handoff deadline. This implementation does not skip credential cleanup or claim a hard end-to-end deployment bound; that requires separately recoverable cleanup before rollout.
+
+The two-minute window belongs to the ownership handoff before infrastructure termination. A direct OS shutdown can shorten it to the configured shutdown drain budget; it does not extend the container platform’s stop timeout. Deploy controllers must request ownership handoff before terminating tasks.
+
 Database errors or an expired local validity watchdog fence new local work. They do not establish durable relinquishment or authorize another deployment to bypass an outstanding member.
 
 ## Terminated processes
@@ -117,7 +127,7 @@ to resume their existing claim loop.
 Synchronous turns and manually started cron callbacks are admitted work too. A
 paused deployment refuses new synchronous execution while still accepting durable
 asynchronous submissions for the active workers. Accepted turns, scheduled
-callbacks, and their nested work keep running with their existing leases; their
-completion is part of the deployment's drain acknowledgment. Resuming ownership
-restores synchronous admission without restarting or canceling those calls.
+callbacks, and their nested work retain their leases until completion or handoff;
+that settlement is part of the deployment's drain acknowledgment. Resuming ownership
+restores synchronous admission with a fresh handoff generation.
 Task protection also counts admitted foreground work while the process drains.

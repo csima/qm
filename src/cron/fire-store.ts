@@ -13,7 +13,7 @@ export interface CronFireStore {
 
   beginExclusive(cronId: string, entry: CronFireLogEntry, staleRunningMs: number): Promise<BeginFireResult>;
 
-  sweepStranded(now: number, staleRunningMs: number, note: string): Promise<number>;
+  sweepStranded(now: number, staleRunningMs: number, note: string, pendingFireKeys?: string[]): Promise<number>;
 
   pruneEnded(opts: { endedBefore: number; keepPerCron: number }): Promise<number>;
   backfill(cronId: string, entries: readonly CronFireLogEntry[]): Promise<void>;
@@ -59,11 +59,12 @@ export function createMemoryCronFireStore(): CronFireStore {
       fires.set(entry.fireKey, { ...entry });
       return { begun: true };
     },
-    async sweepStranded(now, staleRunningMs, note) {
+    async sweepStranded(now, staleRunningMs, note, pendingFireKeys = []) {
       let swept = 0;
       for (const fires of byCron.values()) {
         for (const [fireKey, entry] of fires) {
-          if (entry.status !== "running" || now - entry.firedAt < staleRunningMs) continue;
+          if (entry.status !== "running" || now - entry.firedAt < staleRunningMs || pendingFireKeys.includes(fireKey))
+            continue;
           fires.set(fireKey, { ...entry, status: "failed", endedAt: now, note });
           swept += 1;
         }
@@ -258,12 +259,12 @@ export function createPostgresCronFireStore(connectionString: string): CronFireS
         return { begun: true };
       });
     },
-    async sweepStranded(now, staleRunningMs, note) {
+    async sweepStranded(now, staleRunningMs, note, pendingFireKeys = []) {
       const result = await query(
         `UPDATE cron_fires
             SET status = 'failed', ended_at = $1, note = $2
-          WHERE status = 'running' AND fired_at <= $3`,
-        [now, pgTextSafe(note), now - staleRunningMs],
+          WHERE status = 'running' AND fired_at <= $3 AND NOT (fire_key = ANY($4::text[]))`,
+        [now, pgTextSafe(note), now - staleRunningMs, pendingFireKeys],
       );
       return result.rowCount;
     },

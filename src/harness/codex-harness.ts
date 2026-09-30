@@ -1,10 +1,11 @@
+import { prepareHarnessInput } from "./harness.ts";
 import { documentsFallbackText } from "../core/document-inputs.ts";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createHash } from "node:crypto";
 import { CONFIG_DEFAULTS, type Config } from "../config.ts";
-import { NonRetryableTurnError } from "../core/turn-error.ts";
+import { TurnHandedOff, NonRetryableTurnError } from "../core/turn-error.ts";
 import { DEFAULT_CODEX_MODEL_ID, modelSupportedByHarness } from "../model/pi-models.ts";
 import { startSignalPoll, type RunSignalStore } from "../runs/run-signal-store.ts";
 import type { TaskStatus, TaskStore } from "../tasks/task-store.ts";
@@ -776,6 +777,7 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
 
   const runPrompt = async (turn: HarnessTurnInput, toolsEnabled = true): Promise<HarnessTurnResult> => {
     if (turn.cancel?.aborted) return { reply: "", stopped: true };
+    if (turn.handoffDeadline?.aborted) return { reply: "", handedOff: true };
     setupUsers += 1;
     let setupUserReleased = false;
     const releaseSetupUser = () => {
@@ -802,6 +804,9 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
       authAcquireAbort.abort();
       rejectSetup(error);
     };
+    const onSetupHandoff = () => stopSetup(new TurnHandedOff());
+    if (turn.handoffDeadline?.aborted) onSetupHandoff();
+    else turn.handoffDeadline?.addEventListener("abort", onSetupHandoff, { once: true });
     const onSetupCancel = () => stopSetup(setupCancelled);
     turn.cancel?.addEventListener("abort", onSetupCancel, { once: true });
     const setupTimer = wallMs > 0 ? setTimeout(() => stopSetup(setupTimedOut), wallMs) : undefined;
@@ -809,6 +814,7 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
       setupSettled = true;
       if (setupTimer) clearTimeout(setupTimer);
       turn.cancel?.removeEventListener("abort", onSetupCancel);
+      turn.handoffDeadline?.removeEventListener("abort", onSetupHandoff);
       releaseSetupUser();
     };
     const awaitSetup = <T>(operation: Promise<T>): Promise<T> => Promise.race([operation, setupStop]);
@@ -877,6 +883,7 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
         await closeEphemeral();
         finishSetup();
         if (error === setupCancelled) return { reply: "", stopped: true };
+        if (error instanceof TurnHandedOff) return { reply: "", handedOff: true };
         throw error;
       }
     } else {
@@ -890,6 +897,7 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
         finishSetup();
         await closeIdleRuntime();
         if (error === setupCancelled) return { reply: "", stopped: true };
+        if (error instanceof TurnHandedOff) return { reply: "", handedOff: true };
         throw error;
       }
     }
@@ -898,6 +906,7 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
       finishSetup();
       await closeIdleRuntime();
       if (error === setupCancelled) return { reply: "", stopped: true };
+      if (error instanceof TurnHandedOff) return { reply: "", handedOff: true };
       throw error;
     };
     try {
@@ -1057,7 +1066,9 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
       void completed.catch(() => undefined);
       inputText = [
         codexTurnInputText(turn),
-        await documentsFallbackText(turn.documents ?? [], turn.cancel, documentTextBudget),
+        await prepareHarnessInput(turn, (signal) =>
+          documentsFallbackText(turn.documents ?? [], signal, documentTextBudget),
+        ),
       ].join("\n\n");
       input = [
         userInput(inputText),
@@ -1171,9 +1182,14 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
       }
       state.stopped ||= stopped;
       toolAbort.abort();
-      if (turnId) await rt.server.request("turn/interrupt", { threadId, turnId }).catch(() => undefined);
+      if (turnId) void rt.server.request("turn/interrupt", { threadId, turnId }).catch(() => undefined);
     };
-    state.interrupt = () => interrupt(false);
+    let handedOff = false;
+    state.interrupt = () => {
+      handedOff ||=
+        ref.handoffRequested === true && !ref.pausedOnApproval && !ref.silentRequested && !ref.runtimeHandoff;
+      return interrupt(false);
+    };
     let stoppedReplySaved: Promise<void> | undefined;
     const saveStoppedReply = (): Promise<void> => {
       stoppedReplySaved ??= (async () => {
@@ -1193,6 +1209,18 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
       })();
       return stoppedReplySaved;
     };
+    const turnStartAbort = new AbortController();
+    const handoffEnd = Promise.withResolvers<never>();
+    void handoffEnd.promise.catch(() => {});
+    const onHandoffDeadline = () => {
+      handedOff = true;
+      turnStartAbort.abort();
+      handoffEnd.reject(new TurnHandedOff());
+      runtimeCleanupRequested = true;
+      void interrupt(false);
+    };
+    if (turn.handoffDeadline?.aborted) onHandoffDeadline();
+    else turn.handoffDeadline?.addEventListener("abort", onHandoffDeadline, { once: true });
     const onCancel = () => {
       runtimeCleanupRequested = true;
       void interrupt(true);
@@ -1213,12 +1241,11 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
               },
               onSteer: async (text, ts, request, acknowledge) => {
                 if (ts && recordedMessageTimestamps(turn.history).has(ts)) return;
-                const prepared = await turn.prepareSteer?.(text, request);
+                if (turn.handoff?.aborted) return false;
+                const prepared = await prepareHarnessInput(turn, async () => turn.prepareSteer?.(text, request));
                 const prompt = prepared?.text ?? text;
-                const documentText = await documentsFallbackText(
-                  prepared?.documents ?? [],
-                  turn.cancel,
-                  documentTextBudget,
+                const documentText = await prepareHarnessInput(turn, (signal) =>
+                  documentsFallbackText(prepared?.documents ?? [], signal, documentTextBudget),
                 );
                 const inputText = [prompt, documentText].filter(Boolean).join("\n\n");
                 const steer = {
@@ -1228,17 +1255,20 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
                 };
                 state.pendingSteers.push(steer);
                 try {
-                  await rt.server.request("turn/steer", {
-                    threadId,
-                    expectedTurnId: turnId,
-                    input: [
-                      userInput(inputText),
-                      ...(prepared?.images ?? []).map((image) => ({
-                        type: "image",
-                        url: `data:${image.mimeType};base64,${image.dataBase64}`,
-                      })),
-                    ],
-                  });
+                  await Promise.race([
+                    handoffEnd.promise,
+                    rt.server.request("turn/steer", {
+                      threadId,
+                      expectedTurnId: turnId,
+                      input: [
+                        userInput(inputText),
+                        ...(prepared?.images ?? []).map((image) => ({
+                          type: "image",
+                          url: `data:${image.mimeType};base64,${image.dataBase64}`,
+                        })),
+                      ],
+                    }),
+                  ]);
                 } catch (error) {
                   const index = state.pendingSteers.indexOf(steer);
                   if (index >= 0) state.pendingSteers.splice(index, 1);
@@ -1251,7 +1281,6 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
           )
         : null;
     let timer: NodeJS.Timeout | undefined;
-    const turnStartAbort = new AbortController();
     let turnStartTimedOut = false;
     const cleanupErrors: unknown[] = [];
     let turnResult: HarnessTurnResult | undefined;
@@ -1260,7 +1289,12 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
       if (turn.cancel) turnStartSignals.push(turn.cancel);
       const turnStartTimeoutMs = deadline ? Math.max(1, deadline - Date.now()) : CODEX_START_TIMEOUT_MS;
       let turnStartTimer: NodeJS.Timeout | undefined;
+      if (turn.handoff?.aborted) {
+        handedOff = true;
+        throw new TurnHandedOff();
+      }
       const response = await Promise.race([
+        handoffEnd.promise,
         rt.server.request<{ turn: CodexTurn }>(
           "turn/start",
           { threadId, input, ...(model ? { model } : {}) },
@@ -1294,6 +1328,7 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
         remainingWallMs > 0
           ? await Promise.race([
               completed,
+              handoffEnd.promise,
               new Promise<never>((_, reject) => {
                 timer = setTimeout(() => {
                   runtimeCleanupRequested = true;
@@ -1302,7 +1337,8 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
                 }, remainingWallMs);
               }),
             ])
-          : await completed;
+          : await Promise.race([completed, handoffEnd.promise]);
+      await stopSignals?.();
       if (state.tapeError) throw state.tapeError;
       if (state.modelCalls === 0) {
         state.modelCalls = 1;
@@ -1312,9 +1348,18 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
           entryCount: turn.history.length,
         });
       }
-      if (result.status === "failed" && !state.stopped && !ref.runtimeHandoff)
+      if (result.status === "failed" && !handedOff && !state.stopped && !ref.runtimeHandoff)
         throw codexProviderFailure(result.error?.message ?? "Codex turn failed");
-      if (state.stopped || turn.cancel?.aborted) {
+      if (
+        handedOff &&
+        !state.stopped &&
+        !turn.cancel?.aborted &&
+        !ref.pausedOnApproval &&
+        !ref.silentRequested &&
+        !ref.runtimeHandoff
+      ) {
+        turnResult = { reply: "", handedOff: true, modelCalls: state.modelCalls };
+      } else if (state.stopped || turn.cancel?.aborted) {
         if (turn.cancel?.aborted) runtimeCleanupRequested = true;
         await saveStoppedReply();
         turnResult = { reply: state.stoppedReply ?? "", stopped: true };
@@ -1342,10 +1387,30 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
         };
       }
     } catch (error) {
-      if (turn.cancel?.aborted) {
+      await stopSignals?.();
+      if (state.tapeError) throw state.tapeError;
+      if (
+        handedOff &&
+        !state.stopped &&
+        !turn.cancel?.aborted &&
+        !ref.pausedOnApproval &&
+        !ref.silentRequested &&
+        !ref.runtimeHandoff
+      ) {
+        turnResult = { reply: "", handedOff: true, modelCalls: state.modelCalls };
+      } else if (state.stopped || turn.cancel?.aborted) {
         runtimeCleanupRequested = true;
         await saveStoppedReply();
         turnResult = { reply: state.stoppedReply ?? "", stopped: true };
+      } else if (ref.runtimeHandoff || ref.silentRequested || ref.pausedOnApproval) {
+        turnResult = {
+          reply: "",
+          ...(ref.runtimeHandoff ? { runtimeHandoff: ref.runtimeHandoff } : {}),
+          ...(ref.silentRequested ? { silent: true } : {}),
+          ...(ref.pendingApprovals?.length ? { pendingApprovals: ref.pendingApprovals } : {}),
+          ...(ref.pausedOnApproval ? { pausedOnApproval: true } : {}),
+          modelCalls: state.modelCalls,
+        };
       } else {
         throw error;
       }
@@ -1357,6 +1422,7 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
         cleanupErrors.push(error);
       }
       turn.cancel?.removeEventListener("abort", onCancel);
+      turn.handoffDeadline?.removeEventListener("abort", onHandoffDeadline);
       for (const [taskId, status] of state.taskStatuses) {
         if (status === "pending" || status === "in_progress") {
           try {
@@ -1378,6 +1444,10 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
       await recordRequest();
     }
     if (cleanupErrors.length) throw cleanupErrors[0];
+    if (turnResult?.handedOff && state.stopped) {
+      await saveStoppedReply();
+      turnResult = { reply: state.stoppedReply ?? "", stopped: true };
+    }
     if (!turnResult) throw new Error("Codex turn did not produce a result");
     return { ...turnResult, ...(stoppedByUser ? { stoppedByUser: true as const } : {}) };
   };

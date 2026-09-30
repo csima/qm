@@ -2133,3 +2133,48 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
   assert.equal(result.reply, "denied");
   assert.equal(shared, false);
 });
+
+for (const phase of ["setup", "turn/start"]) {
+  test(`Codex handoff bounds a stuck ${phase} without a user-stop entry`, { timeout: 5_000 }, async (t) => {
+    const dir = mkdtempSync(join(tmpdir(), "qm-codex-handoff-"));
+    const harness = createCodexHarness({
+      binaryPath: phase === "setup" ? nonresponsiveCodexBinary(dir) : pendingTurnStartCodexBinary(dir),
+      env: testHarnessEnv(dir),
+      turnWallClockMs: 0,
+    });
+    t.after(async () => {
+      await harness.turns.close?.();
+      rmSync(dir, { recursive: true, force: true });
+    });
+    const deadline = new AbortController();
+    const entries: SessionEntry[] = [];
+    const scope = "org:test" as ScopeId;
+    const result = harness.turns.runTurn({
+      session: { id: "handoff" } as Session,
+      input: "hi",
+      systemPrompt: "be concise",
+      history: [],
+      tools: {} as HarnessTurnInput["tools"],
+      scopeLabel: scope,
+      orgScopeId: scope,
+      handoff: deadline.signal,
+      handoffDeadline: deadline.signal,
+      emit: async (entry) => {
+        const saved = { ...entry, sessionId: "handoff", seq: entries.length, createdAt: Date.now() } as SessionEntry;
+        entries.push(saved);
+        return saved;
+      },
+      recordModelCall: () => {},
+    });
+    const marker = phase === "setup" ? "starts" : "turn-started";
+    for (let attempt = 0; attempt < 100 && !existsSync(join(dir, marker)); attempt++)
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(existsSync(join(dir, marker)), true);
+    deadline.abort();
+    assert.equal((await result).handedOff, true);
+    assert.equal(
+      entries.some((entry) => entry.type === "assistant"),
+      false,
+    );
+  });
+}

@@ -3207,12 +3207,14 @@ test("a queued runtime change cannot mutate after cancellation while draining to
   });
   const controller = new AbortController();
   let selected = false;
+  const entered = Promise.withResolvers<void>();
   const ref: ToolContextRef = {
     abortSignal: controller.signal,
     current: {
       ...fakeToolContext(),
       runtime: async (request) => {
         if (request.action === "get") {
+          entered.resolve();
           await held;
           return { ok: true };
         }
@@ -3223,10 +3225,12 @@ test("a queued runtime change cannot mutate after cancellation while draining to
   };
   const runtime = createAgentTools(ref).find((t) => t.name === "runtime");
   const first = call(runtime, { action: "get" });
+  await entered.promise;
   const second = call(runtime, { action: "set", model: "Astra", lifetime: "scope" });
   controller.abort();
   release();
-  await Promise.all([first, second]);
+  const results = await Promise.allSettled([first, second]);
+  assert.equal(results[0]?.status, "rejected");
   assert.equal(selected, false);
   assert.equal(ref.runtimeHandoff, undefined);
 });
@@ -3793,7 +3797,13 @@ test("a client tool records the call, waits for the page, and returns its answer
   assert.equal(ret.content[0]?.text, "rows 3-5 selected");
   assert.deepEqual(ret.details, { structured: { rows: [3, 4, 5] } });
   const toolCall = emitted.find((e) => e.type === "tool_call")!.payload;
-  assert.deepEqual(toolCall, { tool: "ui__get_selection", client: true, args: { note: "hi" }, callId: "t" });
+  assert.deepEqual(toolCall, {
+    tool: "ui__get_selection",
+    client: true,
+    args: { note: "hi" },
+    callId: "t",
+    replay: "unsafe",
+  });
   const toolResult = emitted.find((e) => e.type === "tool_result")!.payload;
   assert.equal(toolResult.isError, false);
   assert.equal(toolResult.result, "rows 3-5 selected");
@@ -3827,10 +3837,13 @@ test("a client tool stops waiting when the turn is cancelled", async () => {
   const { emitted, cancel, ref } = clientToolRef();
   const [tool] = createAgentTools(ref, { clientTools: [clientTool("ui__get_selection", 60_000)] }).slice(-1);
   const pending = call(tool, {}) as Promise<{ content: Array<{ text: string }> }>;
+  while (!emitted.some((entry) => entry.type === "tool_call")) await new Promise((resolve) => setImmediate(resolve));
   cancel.abort();
-  const ret = await pending;
-  assert.match(ret.content[0]?.text ?? "", /cancelled/);
-  assert.equal(emitted.find((e) => e.type === "tool_result")!.payload.cancelled, true);
+  await assert.rejects(pending, { name: "AbortError" });
+  assert.equal(
+    emitted.some((entry) => entry.type === "tool_result"),
+    false,
+  );
 });
 
 test("context recovery drains in-flight effects, preserves an active goal, and blocks subsequent calls", async () => {
@@ -4006,4 +4019,87 @@ test("background process guidance reflects the configured sandbox token lifetime
   const unlimited = guidance({ sandboxCapabilityTtlMs: 0 });
   assert.match(unlimited, /does not expire those turn tokens/);
   assert.doesNotMatch(unlimited, /turn tokens expire \d+ hours/);
+});
+
+test("aborted turns cannot dispatch new mutating tools", async () => {
+  let mutations = 0;
+  const ref: ToolContextRef = {
+    abortSignal: AbortSignal.abort(),
+    current: {
+      ...fakeToolContext(),
+      write: async () => {
+        mutations++;
+        return { shared: [] };
+      },
+    },
+  };
+  const tool = createAgentTools(ref).find((tool) => tool.name === "files");
+  await assert.rejects(call(tool, { action: "write", path: "test.txt", data: "must not write" }), {
+    name: "AbortError",
+  });
+  assert.equal(mutations, 0);
+});
+
+test("handoff stops dispatch while its durable intent marker is being written", async () => {
+  for (const deadline of [false, true]) {
+    const markerStarted = Promise.withResolvers<void>();
+    const markerWritten = Promise.withResolvers<void>();
+    const abort = new AbortController();
+    let mutations = 0;
+    const emitted: Emitted[] = [];
+    const ref: ToolContextRef = {
+      abortSignal: abort.signal,
+      current: {
+        ...fakeToolContext(),
+        write: async () => {
+          mutations++;
+          return { shared: [] };
+        },
+      },
+      scopeLabel: "personal:U1",
+      emit: async (entry) => {
+        emitted.push(entry as Emitted);
+        if (entry.type === "tool_call") {
+          markerStarted.resolve();
+          await markerWritten.promise;
+        }
+      },
+    };
+    const tool = createAgentTools(ref).find((tool) => tool.name === "files");
+    const pending = call(tool, { action: "write", path: "x", data: "x" });
+    await markerStarted.promise;
+    ref.handoffRequested = true;
+    if (deadline) abort.abort();
+    markerWritten.resolve();
+    await assert.rejects(pending);
+    assert.equal(mutations, 0);
+    assert.equal(
+      emitted.some((entry) => entry.type === "tool_result" && entry.payload.notExecuted === true),
+      !deadline,
+    );
+  }
+});
+
+test("handoff skips the next tool in a batch without repeating the committed first effect", async () => {
+  let mutations = 0;
+  const emitted: Emitted[] = [];
+  const ref: ToolContextRef = {
+    current: {
+      ...fakeToolContext(),
+      write: async () => {
+        mutations++;
+        return { shared: [] };
+      },
+    },
+    scopeLabel: "personal:U1",
+    emit: async (entry) => {
+      emitted.push(entry as Emitted);
+      if (entry.type === "tool_result") ref.handoffRequested = true;
+    },
+  };
+  const tool = createAgentTools(ref).find((tool) => tool.name === "files");
+  await call(tool, { action: "write", path: "first", data: "first" });
+  assert.match(textOut(await call(tool, { action: "write", path: "second", data: "second" })), /not executed/);
+  assert.equal(mutations, 1);
+  assert.equal(emitted.filter((entry) => entry.type === "tool_result").length, 1);
 });

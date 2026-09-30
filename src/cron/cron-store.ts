@@ -75,7 +75,7 @@ export interface CronStore {
   setDestination(id: string, destination: Destination | undefined): Promise<void>;
   setRecipientConsent(id: string, recipientConsent: RecipientConsent): Promise<void>;
   beginFire(id: string, entry: CronFireLogEntry, opts?: { exclusive?: boolean }): Promise<BeginFireResult>;
-  sweepStrandedFires(now: number): Promise<number>;
+  sweepStrandedFires(now: number, pendingFireKeys?: string[]): Promise<number>;
   pruneFires(now: number): Promise<number>;
   recordFire(id: string, entry: CronFireLogEntry): Promise<void>;
   listFires(id: string, opts?: { limit?: number }): Promise<{ runs: CronFireLogEntry[]; total: number }>;
@@ -199,8 +199,8 @@ export function createCronStore(
       await fires.record(id, entry);
       return { begun: true };
     },
-    async sweepStrandedFires(now) {
-      return fires.sweepStranded(now, staleRunningMs, STRANDED_FIRE_NOTE);
+    async sweepStrandedFires(now, pendingFireKeys) {
+      return fires.sweepStranded(now, staleRunningMs, STRANDED_FIRE_NOTE, pendingFireKeys);
     },
     async pruneFires(now) {
       return fires.pruneEnded({ endedBefore: now - FIRE_RETENTION_MS, keepPerCron: FIRE_RETENTION_KEEP_PER_CRON });
@@ -248,14 +248,21 @@ export function createCronStore(
       return applied ? "applied" : "superseded";
     },
     async markFired(id, at, scheduledAt) {
-      const cron = await backing.get(id);
-      if (!cron) return;
-      const advanceFrom = isCalendarSchedule(cron.schedule) ? (scheduledAt ?? at) : at;
-      await backing.merge(id, {
-        lastFiredAt: at,
-        nextFireAt: advanceNextFireAt(cron.schedule, advanceFrom),
-        deferUntil: undefined,
-      });
+      const transform = (cron: Cron): Cron => {
+        if (cron.lastFiredAt !== undefined && cron.lastFiredAt >= at) return cron;
+        const advanceFrom = isCalendarSchedule(cron.schedule) ? (scheduledAt ?? at) : at;
+        return {
+          ...cron,
+          lastFiredAt: at,
+          nextFireAt: advanceNextFireAt(cron.schedule, advanceFrom),
+          deferUntil: undefined,
+        };
+      };
+      if (backing.update) await backing.update(id, transform);
+      else {
+        const cron = await backing.get(id);
+        if (cron) await backing.merge(id, transform(cron));
+      }
     },
     async claimSlot(id, scheduledAt, at) {
       let claimed = false;

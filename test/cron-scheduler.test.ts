@@ -1,3 +1,5 @@
+import { TurnHandedOff } from "../src/core/turn-error.ts";
+import type { PendingCronFire } from "../src/cron/scheduler.ts";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createScheduler } from "../src/cron/scheduler.ts";
@@ -41,16 +43,22 @@ function harness(
     }
     return { status: "ok", reply };
   };
-  const scheduler = createScheduler({
-    crons,
-    deliveries,
-    idempotency: createIdempotencyStore(),
-    identity,
-    run,
-    ...(directory ? { directory } : {}),
-    ...(maxFiresPerTick !== undefined ? { maxFiresPerTick } : {}),
-  });
-  return { crons, deliveries, calls, scheduler, identity };
+  const pendingFires = createMemoryMap<PendingCronFire>();
+  const idempotency = createIdempotencyStore();
+  const lock = createMemoryAdvisoryLock();
+  const recreate = () =>
+    createScheduler({
+      pendingFires,
+      lock,
+      crons,
+      deliveries,
+      idempotency,
+      identity,
+      run,
+      ...(directory ? { directory } : {}),
+      ...(maxFiresPerTick !== undefined ? { maxFiresPerTick } : {}),
+    });
+  return { crons, deliveries, calls, scheduler: recreate(), recreate, pendingFires, identity };
 }
 
 const member = (id: string) => ({ id, type: "internal" as const });
@@ -1960,4 +1968,94 @@ test("scheduled and manual fires use the saved runtime; clearing it restores inh
   assert.equal(calls[2]?.harness, undefined);
   assert.equal(calls[2]?.thinkingLevel, undefined);
   assert.equal(calls[2]?.fastMode, undefined);
+});
+
+test("a new scheduler resumes a manually fired cron handed off during its turn", async () => {
+  let yielded = false;
+  const h = harness(async () => {
+    if (!yielded) {
+      yielded = true;
+      throw new TurnHandedOff();
+    }
+    return { status: "ok", reply: "finished after handoff" };
+  });
+  const cron = await h.crons.create({
+    schedule: { everyMs: 43_200_000 },
+    action: "do work",
+    owner: "U1",
+    createdBy: "U1",
+    ownerScopeId: scopeId("personal", "U1"),
+  });
+  const started = await h.scheduler.runNow(cron.id);
+  assert.equal(started.started, true);
+  if (!started.started) return;
+  await started.settled;
+  assert.equal((await h.pendingFires.all()).length, 1);
+  await h.recreate().tick();
+  assert.equal((await h.pendingFires.all()).length, 0);
+  assert.equal(h.calls.length, 2);
+  assert.equal(h.calls[0]?.idempotencyKey, h.calls[1]?.idempotencyKey);
+  const logs = await h.crons.listFires(cron.id);
+  assert.equal(logs.runs[0]?.status, "ok");
+});
+
+test("recovery cannot advance a cron while its outgoing scheduler still owns the fire", async () => {
+  const entered = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  let handoff = true;
+  const h = harness(async () => {
+    if (handoff) {
+      entered.resolve();
+      await release.promise;
+      handoff = false;
+      throw new TurnHandedOff();
+    }
+    return { status: "ok", reply: "continued" };
+  });
+  const cron = await h.crons.create({
+    owner: "U1",
+    createdBy: "U1",
+    ownerScopeId: "personal:U1",
+    schedule: { everyMs: 43_200_000 },
+    action: "work",
+  });
+  const started = await h.scheduler.runNow(cron.id);
+  assert.ok(started.started);
+  await entered.promise;
+  await h.recreate().tick();
+  assert.equal(h.calls.length, 1);
+  assert.equal((await h.crons.listFires(cron.id)).runs[0]?.status, "running");
+  release.resolve();
+  await started.settled;
+  assert.equal((await h.crons.listFires(cron.id)).runs[0]?.status, "running");
+  await h.recreate().tick(Date.now() + 31_000);
+  assert.equal(h.calls.length, 2);
+  assert.equal((await h.crons.listFires(cron.id)).runs[0]?.status, "ok");
+});
+
+test("cron recovery uses current authority instead of the saved fire's grants", async () => {
+  let handoff = true;
+  const h = harness(async () => {
+    if (handoff) {
+      handoff = false;
+      throw new TurnHandedOff();
+    }
+    return { status: "ok" };
+  });
+  const cron = await h.crons.create({
+    owner: "U1",
+    createdBy: "U1",
+    ownerScopeId: "personal:U1",
+    schedule: { everyMs: 43_200_000 },
+    action: "work",
+    unattendedGrants: ["admin.sessions.read"],
+  });
+  await runNowSettled(h.scheduler, cron.id);
+  await h.crons.update(cron.id, { unattendedGrants: [] });
+  await h.recreate().tick();
+  assert.deepEqual(
+    h.calls.map((request) => request.unattendedGrants),
+    [["admin.sessions.read"], []],
+  );
+  assert.equal(h.calls[0]?.idempotencyKey, h.calls[1]?.idempotencyKey);
 });

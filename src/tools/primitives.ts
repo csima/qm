@@ -161,6 +161,7 @@ export interface SkillResult {
   sourceScopeId: ScopeId | null;
   dir?: string;
   packDir?: string;
+  fingerprint?: string;
 }
 
 interface ShareDirective {

@@ -82,7 +82,7 @@ export interface LoopItemLedger {
     options?: { includeEmailClassification?: boolean },
   ): Promise<Array<Omit<LoopItem, "proposal" | "agentDrafts" | "thread" | "sourcePayload">>>;
   queued(loopId: string, limit?: number): Promise<LoopItem[]>;
-  claim(id: string, claimedAt?: number, expectedLoopId?: string): Promise<LoopItem | null>;
+  claim(id: string, claimedAt?: number, expectedLoopId?: string, fireKey?: string): Promise<LoopItem | null>;
   acquireDecision(id: string, decisionAt?: number): Promise<string | null>;
   releaseDecision(id: string, token: string): Promise<boolean>;
   recordRun(id: string, runId: string, claimToken: string): Promise<LoopItem | null>;
@@ -491,17 +491,24 @@ export function createLoopItemLedger(
         .filter(
           (item) =>
             item.status === "queued" ||
-            (item.status === "in_progress" && (item.claimedAt ?? 0) + CLAIM_LEASE_MS <= Date.now()),
+            (!item.claimFireKey &&
+              item.status === "in_progress" &&
+              (item.claimedAt ?? 0) + CLAIM_LEASE_MS <= Date.now()),
         )
         .sort((a, b) => a.createdAt - b.createdAt);
       return limit === undefined ? queued : queued.slice(0, limit);
     },
-    async claim(id, claimedAt = Date.now(), expectedLoopId) {
+    async claim(id, claimedAt = Date.now(), expectedLoopId, fireKey) {
       const now = claimedAt;
       let applied = false;
       const after = await update(id, (item) => {
         if (expectedLoopId !== undefined && item.loopId !== expectedLoopId) return item;
-        const stale = item.status === "in_progress" && (item.claimedAt ?? 0) + CLAIM_LEASE_MS <= now;
+        if (fireKey && item.claimFireKey === fireKey) {
+          applied = item.status === "in_progress";
+          return item;
+        }
+        const stale =
+          !item.claimFireKey && item.status === "in_progress" && (item.claimedAt ?? 0) + CLAIM_LEASE_MS <= now;
         if (item.status !== "queued" && !stale) return item;
         applied = true;
         return {
@@ -510,6 +517,7 @@ export function createLoopItemLedger(
           attempts: item.attempts + 1,
           claimedAt: now,
           claimToken: randomUUID(),
+          ...(fireKey ? { claimFireKey: fireKey } : {}),
           parkedReason: undefined,
           updatedAt: now,
         };

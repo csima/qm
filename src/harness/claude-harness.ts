@@ -1,3 +1,4 @@
+import { prepareHarnessInput } from "./harness.ts";
 import { documentBlocks } from "./document-inputs.ts";
 import { randomBytes, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
@@ -21,7 +22,7 @@ import { fromJSONSchema, type ZodObject } from "zod";
 import { contentText, createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import { CONFIG_DEFAULTS, type Config } from "../config.ts";
 import { isDeliveryNote } from "../core/attachments.ts";
-import { NonRetryableTurnError } from "../core/turn-error.ts";
+import { TurnHandedOff, NonRetryableTurnError } from "../core/turn-error.ts";
 import {
   contextTokenBudgetForModel,
   getRequiredModel,
@@ -318,16 +319,19 @@ export function createClaudeHarness(opts: ClaudeHarnessOptions = {}): Harness {
 
   const runPrompt = async (turn: HarnessTurnInput, toolsEnabled = true): Promise<HarnessTurnResult> => {
     if (turn.cancel?.aborted) return { reply: "", stopped: true };
+    if (turn.handoffDeadline?.aborted) return { reply: "", handedOff: true };
     const documentTextBudget = { remaining: 100_000 };
-    const preparedDocuments = await documentBlocks(
-      turn.documents ?? [],
-      {
-        api: "anthropic-messages",
-        provider: "anthropic",
-        input: ["image"],
-      },
-      documentTextBudget,
-      turn.cancel,
+    const preparedDocuments = await prepareHarnessInput(turn, (signal) =>
+      documentBlocks(
+        turn.documents ?? [],
+        {
+          api: "anthropic-messages",
+          provider: "anthropic",
+          input: ["image"],
+        },
+        documentTextBudget,
+        signal,
+      ),
     );
     const jail = mkdtempSync(join(tmpdir(), "qm-claude-"));
     const processIdentity = claudeProcessIdentity();
@@ -434,7 +438,7 @@ export function createClaudeHarness(opts: ClaudeHarnessOptions = {}): Harness {
           : {}),
       });
     };
-    const authEnv = opts.authEnv ? await opts.authEnv() : undefined;
+    const authEnv = opts.authEnv ? await prepareHarnessInput(turn, async () => opts.authEnv!()) : undefined;
     const sdkQuery = query({
       prompt: queue,
       options: {
@@ -501,12 +505,24 @@ export function createClaudeHarness(opts: ClaudeHarnessOptions = {}): Harness {
       stopped ||= fromUser;
       interrupted = true;
       queue.close();
-      await sdkQuery.interrupt().catch(() => undefined);
       controller.abort();
+      void sdkQuery.interrupt().catch(() => undefined);
     };
     terminateProvider = () => {
+      handedOff ||=
+        ref.handoffRequested === true && !ref.pausedOnApproval && !ref.silentRequested && !ref.runtimeHandoff;
       void interrupt(false);
     };
+    let handedOff = false;
+    const handoffEnd = Promise.withResolvers<never>();
+    void handoffEnd.promise.catch(() => {});
+    const onHandoffDeadline = () => {
+      handedOff = true;
+      handoffEnd.reject(new TurnHandedOff());
+      void interrupt(false);
+    };
+    if (turn.handoffDeadline?.aborted) onHandoffDeadline();
+    else turn.handoffDeadline?.addEventListener("abort", onHandoffDeadline, { once: true });
     const onCancel = () => {
       void interrupt(false);
     };
@@ -524,18 +540,21 @@ export function createClaudeHarness(opts: ClaudeHarnessOptions = {}): Harness {
               onAbort: async () => interrupt(true),
               onSteer: async (steer, ts, request, acknowledge) => {
                 if (ts && recordedMessageTimestamps(turn.history).has(ts)) return;
-                const prepared = await turn.prepareSteer?.(steer, request);
+                if (turn.handoff?.aborted) return false;
+                const prepared = await prepareHarnessInput(turn, async () => turn.prepareSteer?.(steer, request));
                 if (settled || interrupted) return false;
                 const prompt = prepared?.text ?? steer;
                 const baseMessage = userMessage(prompt, prepared?.images);
                 const message = { ...userMessage(prompt, prepared?.images), uuid: baseMessage.uuid };
                 if (Array.isArray(message.message.content))
                   message.message.content.push(
-                    ...((await documentBlocks(
-                      prepared?.documents ?? [],
-                      { api: "anthropic-messages", provider: "anthropic", input: ["text", "image"] },
-                      documentTextBudget,
-                      turn.cancel,
+                    ...((await prepareHarnessInput(turn, (signal) =>
+                      documentBlocks(
+                        prepared?.documents ?? [],
+                        { api: "anthropic-messages", provider: "anthropic", input: ["text", "image"] },
+                        documentTextBudget,
+                        signal,
+                      ),
                     )) as unknown as typeof message.message.content),
                   );
                 if (settled || interrupted) return false;
@@ -606,8 +625,11 @@ export function createClaudeHarness(opts: ClaudeHarnessOptions = {}): Harness {
       }
     };
     try {
-      await sdkQuery.initializationResult();
+      await Promise.race([sdkQuery.initializationResult(), handoffEnd.promise]).catch((error) => {
+        if (!handedOff) throw error;
+      });
       await appendTape(stripClaudeImageBytes(userMessage(text, turn.images)), true);
+      if (turn.handoff?.aborted) return { reply: "", handedOff: true };
       queue.push(initial);
       const consume = (async () => {
         for await (const message of sdkQuery) {
@@ -768,6 +790,7 @@ export function createClaudeHarness(opts: ClaudeHarnessOptions = {}): Harness {
         await (wallMs > 0
           ? Promise.race([
               consume,
+              handoffEnd.promise,
               new Promise<never>((_, reject) => {
                 timer = setTimeout(() => {
                   void interrupt(false);
@@ -775,10 +798,21 @@ export function createClaudeHarness(opts: ClaudeHarnessOptions = {}): Harness {
                 }, wallMs);
               }),
             ])
-          : consume);
+          : Promise.race([consume, handoffEnd.promise]));
       } catch (error) {
         if ((!interrupted && !controller.signal.aborted) || error instanceof NonRetryableTurnError) throw error;
       }
+      await stopSignals?.();
+      signalsStopped = true;
+      if (
+        handedOff &&
+        !stopped &&
+        !turn.cancel?.aborted &&
+        !ref.pausedOnApproval &&
+        !ref.silentRequested &&
+        !ref.runtimeHandoff
+      )
+        return { reply: "", handedOff: true, modelCalls: Math.max(1, callUsage.size) };
       const finalResult = result as SDKResultMessage | null;
       const stoppedPartial = async (): Promise<HarnessTurnResult> => {
         const terminal = ref.runtimeHandoff || ref.silentRequested || ref.pausedOnApproval;
@@ -875,6 +909,7 @@ export function createClaudeHarness(opts: ClaudeHarnessOptions = {}): Harness {
       queue.close();
       if (!signalsStopped) await stopSignals?.();
       turn.cancel?.removeEventListener("abort", onCancel);
+      turn.handoffDeadline?.removeEventListener("abort", onHandoffDeadline);
       for (const [taskId, task] of taskStates) {
         if (task.status === "pending" || task.status === "in_progress") {
           await transitionTask(opts.tasks, taskId, task.status, "failed", turn.runId ?? turn.session.id);

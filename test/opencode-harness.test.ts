@@ -721,3 +721,44 @@ for (const surfaceTools of [false, true]) {
     assert.ok(entries.some((entry) => entry.type === "tool_result" && (entry.payload as { silent?: boolean }).silent));
   });
 }
+
+test("OpenCode fences late native history after handing off a stalled prompt", { timeout: 5_000 }, async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "qm-opencode-handoff-"));
+  const binaryPath = fakeSidecar(
+    dir,
+    "handoff",
+    `
+    if (req.method === "POST" && message) { await readBody(req); require("node:fs").writeFileSync(${JSON.stringify(join(dir, "prompt-started"))}, "yes"); return; }
+    if (req.method === "GET" && message) return json(res, [${okAssistant}]);
+  `,
+  );
+  const harness = createOpenCodeHarness({ binaryPath, turnWallClockMs: 0 });
+  t.after(async () => {
+    await harness.turns.close?.();
+    rmSync(dir, { recursive: true, force: true });
+  });
+  const deadline = new AbortController();
+  const entries: SessionEntry[] = [];
+  const turn = turnInput(entries, []);
+  const tape: unknown[] = [];
+  turn.tape = async (row) => {
+    tape.push(row);
+  };
+  turn.handoff = deadline.signal;
+  turn.handoffDeadline = deadline.signal;
+  const pending = harness.turns.runTurn(turn);
+  for (let attempt = 0; attempt < 200 && !existsSync(join(dir, "prompt-started")); attempt++)
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(existsSync(join(dir, "prompt-started")), true);
+  deadline.abort();
+  {
+    const result = await pending;
+    assert.equal(result.handedOff, true);
+    assert.equal(result.stopped, undefined);
+    assert.equal(
+      entries.some((entry) => entry.type === "assistant"),
+      false,
+    );
+    assert.equal(tape.length, 0);
+  }
+});

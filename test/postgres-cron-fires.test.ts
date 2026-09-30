@@ -299,3 +299,19 @@ test("pg cron_fires: existing legacy history and later legacy completions remain
     await client.end();
   }
 });
+
+test("pg cron_fires: stranded sweep does not close a persisted handoff continuation", { skip }, async () => {
+  const fires = createPostgresCronFireStore(URL!);
+  await fires.record("c-handoff", {
+    fireKey: "handoff-pending",
+    threadRef: "t-handoff",
+    firedAt: 1,
+    status: "running",
+  });
+  await fires.record("c-handoff", { fireKey: "handoff-orphan", threadRef: "t-orphan", firedAt: 1, status: "running" });
+  await fires.sweepStranded(Date.now(), 1_000, "stranded", ["handoff-pending"]);
+  const { runs } = await fires.listByCron("c-handoff");
+  assert.equal(runs.find((run) => run.fireKey === "handoff-pending")?.status, "running");
+  assert.equal(runs.find((run) => run.fireKey === "handoff-pending")?.endedAt, undefined);
+  assert.equal(runs.find((run) => run.fireKey === "handoff-orphan")?.status, "failed");
+});

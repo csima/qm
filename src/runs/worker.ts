@@ -1,12 +1,13 @@
+import { createHandoff, type Handoff, type HandoffSignals } from "./handoff.ts";
 import type { AdmittedWork } from "../util/admitted-work.ts";
 import { randomUUID } from "node:crypto";
 import type { ErrorLog } from "../admin/error-log.ts";
 import { conversationScope } from "../resolution/resolution-service.ts";
 import type { TurnResult } from "../types.ts";
 import type { Orchestrator } from "../core/orchestrator.ts";
-import { NonRetryableTurnError, turnFailureMessage } from "../core/turn-error.ts";
+import { NonRetryableTurnError, TurnHandedOff, turnFailureMessage } from "../core/turn-error.ts";
 import { resolveTurnOrigin } from "../core/turn-origin.ts";
-import { errorParks, type Run, type RunStore } from "./run-store.ts";
+import { claimsSpent, errorParks, type Run, type RunStore } from "./run-store.ts";
 import { errMessage, errorAlreadyReported, swallow } from "../util/errors.ts";
 import { sleep } from "../util/async.ts";
 import { retryDelay } from "./retry-delay.ts";
@@ -27,7 +28,7 @@ const CLAIM_FAIL_CRASH_CONSECUTIVE = 20;
 export async function processRun(
   deps: ProcessDeps,
   run: Run,
-  opts?: { background?: boolean; shutdown?: AbortSignal },
+  opts?: { background?: boolean; shutdown?: AbortSignal; handoff?: HandoffSignals },
 ): Promise<TurnResult> {
   const token = run.leaseToken;
   if (token === null) throw new Error(`processRun called with an unleased run ${run.id}`);
@@ -73,7 +74,7 @@ export async function processRun(
       const { turnMs } = resolveSwarmSettings({ turnMs: run.request.turnWallClockMs });
       workDeadline = setTimeout(() => cancel.abort(), turnMs);
     }
-    if (run.request.swarm && run.attempts > 3) throw new NonRetryableTurnError("swarm claim budget exhausted");
+    if (run.request.swarm && claimsSpent(run) > 3) throw new NonRetryableTurnError("swarm claim budget exhausted");
     const queueMs = run.startedAt !== null ? Math.max(0, run.startedAt - run.createdAt) : undefined;
     const result = await deps.orchestrator.handleTurn({
       ...run.request,
@@ -84,6 +85,7 @@ export async function processRun(
       finalAttempt: errorParks(run, deps.runs.maxClaims),
       background: opts?.background ?? false,
       cancel: cancel.signal,
+      ...(opts?.handoff ? { handoff: opts.handoff.requested, handoffDeadline: opts.handoff.deadline } : {}),
       ...(queueMs !== undefined ? { queueMs } : {}),
       ...(run.startedAt !== null ? { runStartedAt: run.startedAt } : {}),
     });
@@ -96,6 +98,12 @@ export async function processRun(
   } catch (err) {
     stopBeat();
     if (opts?.shutdown?.aborted) throw err;
+    if (err instanceof TurnHandedOff) {
+      if (!(await deps.runs.releaseLease(run.id, token, { handoff: true })))
+        throw new Error(`run ${run.id} lost its lease before it could be handed off`, { cause: err });
+      console.log(`[worker] run ${run.id} handed off to the incoming deployment at a committed step`);
+      throw err;
+    }
     console.error(`[worker] run ${run.id} turn failed: ${errMessage(err)}`);
     if (!errorAlreadyReported(err))
       deps.errors?.record(
@@ -118,12 +126,13 @@ export async function processRun(
     opts?.shutdown?.removeEventListener("abort", onShutdown);
     if (opts?.shutdown?.aborted)
       await deps.runs
-        .releaseLease(run.id, token)
+        .releaseLease(run.id, token, { handoff: true })
         .catch((e) => swallow(`worker: shutdown handback failed run=${run.id}; lease will expire after exit`, e));
   }
 }
 
 export interface WorkerDeps extends ProcessDeps {
+  handoff?: Handoff;
   pollMs?: number;
   recoveryPollMs?: number;
   workerId?: string;
@@ -134,6 +143,7 @@ export interface WorkerDeps extends ProcessDeps {
 
 export interface Worker {
   start(): void;
+  requestHandoff(graceMs: number): void;
   stopClaims(): Promise<void>;
   drained(): Promise<void>;
   stop(drainMs?: number): Promise<void>;
@@ -171,6 +181,7 @@ export function createWorker(deps: WorkerDeps): Worker {
   let loopDone: Promise<void> | null = null;
   let claimDone: Promise<void> | null = null;
   let inFlight: { shutdown: AbortController; done: Promise<void> } | null = null;
+  const handoff = deps.handoff ?? createHandoff();
 
   async function loop(): Promise<void> {
     let claimFailures = 0;
@@ -206,7 +217,7 @@ export function createWorker(deps: WorkerDeps): Worker {
       if (stopped || (deps.canClaim && !deps.canClaim())) {
         if (run.leaseToken !== null)
           await deps.runs
-            .releaseLease(run.id, run.leaseToken)
+            .releaseLease(run.id, run.leaseToken, { handoff: true })
             .catch((e) => swallow("worker: post-stop claim handback failed", e));
         claimed();
         claimDone = null;
@@ -225,11 +236,12 @@ export function createWorker(deps: WorkerDeps): Worker {
       claimDone = null;
       deps.onClaimed?.();
       try {
-        const work = () => processRun(deps, run, { background: true, shutdown: shutdown.signal });
+        const work = () =>
+          processRun(deps, run, { background: true, shutdown: shutdown.signal, handoff: handoff.signals() });
         if (deps.admittedWork) await deps.admittedWork.run(work);
         else await work();
       } catch (e) {
-        if (!shutdown.signal.aborted) swallow("worker: background run crashed", e);
+        if (!shutdown.signal.aborted && !(e instanceof TurnHandedOff)) swallow("worker: background run crashed", e);
       } finally {
         if (shutdown.signal.aborted)
           console.log(`[worker] shutdown settled worker=${workerId} run=${run.id} thread=${run.sessionId}`);
@@ -247,10 +259,16 @@ export function createWorker(deps: WorkerDeps): Worker {
     return claimDone ?? Promise.resolve();
   }
 
+  function requestHandoff(graceMs: number): void {
+    void stopClaims();
+    handoff.request(graceMs);
+  }
+
   return {
     start() {
       if (loopDone) return;
       stopped = false;
+      if (!deps.handoff) handoff.reset();
       unsubscribe = deps.runs.subscribeAvailable?.(notify, {
         pollMs,
         onResync: notify,
@@ -270,6 +288,7 @@ export function createWorker(deps: WorkerDeps): Worker {
       await held.done;
     },
     stopClaims,
+    requestHandoff,
     drained: () => loopDone ?? Promise.resolve(),
     async stop(drainMs = STOP_DRAIN_MS) {
       void stopClaims();
