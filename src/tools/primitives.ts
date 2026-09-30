@@ -170,6 +170,7 @@ interface ShareDirective {
 
 interface WriteResult {
   shared: Array<{ scope: ScopeId; permission: Permission }>;
+  delivery?: AttachResult;
 }
 
 interface ReachedProvenance {
@@ -1078,18 +1079,13 @@ export function createToolContext(deps: ToolContextDeps): ToolContext {
                 scopeLabel: granteeScopeId,
               });
               shared.push({ scope: granteeScopeId, permission });
-              if (
-                deps.deliverShareToRequester &&
-                deps.requesterScopeId &&
-                granteeScopeId === deps.requesterScopeId
-              ) {
-                sharedToRequester = true;
-              }
+              if (granteeScopeId === deps.requesterScopeId) sharedToRequester = true;
             }
             if (sharedToRequester && deps.deliverShareToRequester) {
-              await deps
+              const delivery = await deps
                 .deliverShareToRequester([path])
-                .catch((e) => swallow("tools: requester delivery of shared file failed", e));
+                .catch((e: unknown): AttachResult => ({ ok: false, message: errMessage(e) }));
+              return { shared, delivery };
             }
           }
           return { shared };
