@@ -196,6 +196,7 @@ import {
   createManagesArtifactHome,
   type CanReadScope,
   type CanManageScope,
+  type CanWriteScope,
   type ManagesArtifactHome,
 } from "./resolution/scope-membership.ts";
 import type { DeployGitArchive } from "./deploy/deploy-git-store.ts";
@@ -552,6 +553,7 @@ export interface BuiltApp {
   directory: DirectoryStore;
   projects: ProjectStore;
   environments: EnvironmentStore;
+  canWriteScope: CanWriteScope;
   processes?: ProcessRegistry;
   monitors: MonitorStore;
   browserSessionStore?: BrowserSessionStore;
@@ -2007,6 +2009,7 @@ export function buildApp(
     ...(config.scratchExecEnabled ? { scratchExec: true } : {}),
     directory,
     isCurrentSharedScopeMember,
+    canWriteScope,
     currentScopeMembers: createCurrentScopeMembers({ managedGroups: projects, directory, identity }, true),
     managedGroups: projects,
     ...(config.reachExecEnabled ? { reachExec: true } : {}),
@@ -2883,6 +2886,7 @@ export function buildApp(
     directory,
     projects,
     environments,
+    canWriteScope,
     ...(processes ? { processes } : {}),
     monitors,
     ...(browserSessionStore ? { browserSessionStore } : {}),
@@ -3047,6 +3051,7 @@ export function serverDeps(
     sessionShares: built.sessionShares,
     sessionShareBytes: built.sessionShareBytes,
     environments: built.environments,
+    canWriteScope: built.canWriteScope,
     sandboxMigration: built.sandboxMigration,
     sandboxResources: built.sandboxResources,
   };
