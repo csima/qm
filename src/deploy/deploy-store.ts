@@ -49,7 +49,7 @@ export function publicUrlOf(endpoint: DeployEndpoint | null | undefined): string
 
 type DeploymentStatus = "running" | "stopped" | "archived" | "crashed";
 
-export interface DeploymentCrash {
+interface DeploymentCrash {
   exitCode?: number;
   oomKilled?: boolean;
   at: number;
