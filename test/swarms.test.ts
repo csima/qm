@@ -884,3 +884,18 @@ test("an old session credential cannot attach to a replacement session on the sa
   await assert.rejects(fixture.service.spawn(fixture.caller, { requestId: "replacement", text: "Work" }), /mismatch/);
   assert.equal(await fixture.store.get(replacement.id), null);
 });
+
+test("swarm settings are fixed at creation and reject conflicting attempts", async () => {
+  const { service, caller, store } = await swarmFixture();
+  const [worker] = await service.spawn(caller, {
+    requestId: "initial",
+    text: "Work",
+    settings: { turnMs: 600_000 },
+  });
+  const swarm = (await store.get(worker!.parentId!))!;
+  assert.equal(swarm.settings.turnMs, 600_000);
+  await assert.rejects(
+    service.spawn(caller, { requestId: "second", text: "Work", settings: { turnMs: 300_000 } }),
+    /settings are only allowed on initial swarm creation/,
+  );
+});
