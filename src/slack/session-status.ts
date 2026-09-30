@@ -62,10 +62,15 @@ export function createSlackSessionStatus(
             await deleteIf(id, (row) => row.writer === writer && !row.cardTs);
             return true;
           }
-          let state = await update(id, (row) =>
-            leaseLost ? row : { ...row, writer, ...(next ? { anchorRunId: next.anchorRunId } : {}) },
-          );
+          let buried: string | undefined;
+          let state = await update(id, (row) => {
+            if (leaseLost) return row;
+            if (!next || row.anchorRunId === next.anchorRunId || !row.cardTs) return { ...row, writer };
+            buried = row.cardTs;
+            return { ...row, writer, anchorRunId: next.anchorRunId, cardTs: undefined, cardContent: undefined };
+          });
           if (!state || leaseLost || state.writer !== writer) return true;
+          if (buried) await client.apiCall("chat.delete", { channel: state.channel, ts: buried });
           const persist = async (patch: Partial<SlackSessionStatusState>) => {
             const saved = await update(id, (row) => (!leaseLost && row.writer === writer ? { ...row, ...patch } : row));
             if (!saved || leaseLost || saved.writer !== writer) return false;
