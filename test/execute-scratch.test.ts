@@ -706,20 +706,37 @@ test("reclaim removes every credential before any teardown and tears boxes down 
   assert.deepEqual(log.slice(firstTeardown, firstTeardown + 2).sort(), ["teardown:reach-box", "teardown:scoped-box"]);
 });
 
-test("reclaim waits for in-flight scratch creation before destroying its handle", async () => {
-  const ready = Promise.withResolvers<SandboxHandle>();
-  const destroyed: string[] = [];
-  const { boxes } = turnBoxes({
-    provision: () => ready.promise,
-    async teardown(handle) {
-      destroyed.push(handle.id);
+test("a provision that resolves after reclaim scrubs and releases itself without delaying reclaim", async () => {
+  const main = Promise.withResolvers<SandboxHandle>();
+  const scratch = Promise.withResolvers<SandboxHandle>();
+  const log: string[] = [];
+  const { boxes, cleanups } = turnBoxes({
+    provision: (_layers, opts) => (opts?.scratch ? scratch.promise : main.promise),
+    async removeDir(handle, dir) {
+      if (dir === ".agent-turn/s/t") log.push(`scrub:${handle.id}`);
+    },
+    async listDir() {
+      return [];
+    },
+    async teardown(handle, opts) {
+      log.push(`${opts?.destroy ? "destroy" : "teardown"}:${handle.id}`);
     },
   });
-  const provision = boxes.provisionScratch();
-  const reclaim = boxes.reclaimBox();
-  ready.resolve(scratchHandle);
-  await Promise.all([provision, reclaim]);
-  assert.deepEqual(destroyed, [scratchHandle.id]);
+  const provisioned = boxes.provision();
+  const scratched = boxes.provisionScratch();
+  await boxes.reclaimBox();
+  assert.deepEqual(log, []);
+  assert.deepEqual(JSON.parse(cleanups[0]!.detail!).deferred.sort(), ["provision", "scratch"]);
+  await assert.rejects(boxes.provision(), /already been released/);
+  await assert.rejects(boxes.provisionScratch(), /already been released/);
+  main.resolve(scopedHandle);
+  scratch.resolve(scratchHandle);
+  await assert.rejects(provisioned, /already been released/);
+  await assert.rejects(scratched, /already been released/);
+  while (log.length < 3) await new Promise((r) => setImmediate(r));
+  assert.deepEqual([...log].sort(), ["destroy:scratch-box", "scrub:scoped-box", "teardown:scoped-box"]);
+  assert.ok(log.indexOf("scrub:scoped-box") < log.indexOf("teardown:scoped-box"));
+  assert.equal(boxes.box.handle, null);
   assert.equal(boxes.scratchBox.handle, null);
 });
 
