@@ -21,7 +21,7 @@ import {
   type DeployEndpoint,
   type DeploymentVersion,
 } from "./deploy-store.ts";
-import type { DeployProfile, DeployProvider } from "./deploy-provider.ts";
+import type { DeployProfile, DeployProvider, DeployRunState } from "./deploy-provider.ts";
 import { createNoopLeaderLease, type LeaderLease } from "../persistence/leader-lease.ts";
 import { createNoopAdvisoryLock, type AdvisoryLock } from "../persistence/advisory-lock.ts";
 import { createKeyedQueue } from "../util/async.ts";
@@ -224,6 +224,27 @@ export function createDeployService(deps: DeployServiceDeps): DeployService {
     await deps.deployStore.setEndpoint(id, endpoint);
     await deps.deployStore.setStatus(id, "running");
     await deps.deployStore.setAppliedVersion(id, version);
+  };
+
+  const reconcileRunState = async (d: Deployment): Promise<Deployment> => {
+    if (d.status !== "running" || deps.provider.profile.managedScaleToZero || !deps.provider.runState) return d;
+    const version = currentVersionOf(d);
+    if (!version) return d;
+    let state: DeployRunState | null;
+    try {
+      state = await deps.provider.runState(d, version);
+    } catch (e) {
+      swallow("deploy run-state probe", e);
+      return d;
+    }
+    if (!state || state.running) return d;
+    const changed = await deps.deployStore.setCrash(d.id, d.appliedVersion, {
+      ...(state.exitCode !== undefined ? { exitCode: state.exitCode } : {}),
+      ...(state.detail ? { detail: state.detail } : {}),
+      at: Date.now(),
+    });
+    if (!changed) return d;
+    return (await deps.deployStore.get(d.id)) ?? d;
   };
 
   const liveEndpoint = async (d: Deployment): Promise<DeployEndpoint> => {
@@ -445,11 +466,13 @@ export function createDeployService(deps: DeployServiceDeps): DeployService {
     },
 
     async getDeployment(idOrName) {
-      return (await deps.deployStore.get(idOrName)) ?? (await deps.deployStore.getByName(idOrName));
+      const d = (await deps.deployStore.get(idOrName)) ?? (await deps.deployStore.getByName(idOrName));
+      return d ? reconcileRunState(d) : null;
     },
 
-    listDeployments() {
-      return deps.deployStore.list();
+    async listDeployments() {
+      const ds = await deps.deployStore.list();
+      return Promise.all(ds.map((d) => reconcileRunState(d)));
     },
 
     async rollbackDeployment(id, version, options) {
@@ -612,7 +635,9 @@ export function createDeployService(deps: DeployServiceDeps): DeployService {
           try {
             const cur = await deps.deployStore.get(d.id);
             if (!cur?.alwaysOn || cur.status !== "running") continue;
-            await liveEndpoint(cur);
+            const reconciled = await reconcileRunState(cur);
+            if (reconciled.status !== "running") continue;
+            await liveEndpoint(reconciled);
             warmed++;
           } catch (e) {
             console.error("%s", `[deploy] keep-warm failed for ${d.name ?? d.id}:`, errMessage(e));
@@ -624,7 +649,8 @@ export function createDeployService(deps: DeployServiceDeps): DeployService {
     },
 
     async reachDeployment(idOrName, principalId, opts = {}): Promise<Reach> {
-      const d = (await deps.deployStore.get(idOrName)) ?? (await deps.deployStore.getByName(idOrName));
+      const found = (await deps.deployStore.get(idOrName)) ?? (await deps.deployStore.getByName(idOrName));
+      const d = found ? await reconcileRunState(found) : null;
       if (!d || d.status !== "running" || d.endpoint == null) return { status: "not_found" };
       if (!opts.bypassAcl && !(await reachAllowed(d, principalId))) return { status: "denied" };
       const endpoint = await liveEndpoint(d);
@@ -635,7 +661,7 @@ export function createDeployService(deps: DeployServiceDeps): DeployService {
     async deploymentLogs(idOrName, opts): Promise<string | null> {
       if (!deps.provider.logs) return null;
       const d = (await deps.deployStore.get(idOrName)) ?? (await deps.deployStore.getByName(idOrName));
-      if (!d || d.status !== "running") return null;
+      if (!d || (d.status !== "running" && d.status !== "crashed")) return null;
       return deps.provider.logs(d, opts);
     },
 

@@ -92,6 +92,7 @@ function statusClass(d: DeploymentView): string {
     return "deploying";
   if (d.status === "running") return "running";
   if (d.status === "archived") return "archived";
+  if (d.status === "crashed") return "crashed";
   return "stopped";
 }
 

@@ -7,7 +7,7 @@ interface DeploymentVersionView {
 
 export interface DeploymentView {
   id: string;
-  status?: "running" | "stopped" | "archived" | string;
+  status?: "running" | "stopped" | "archived" | "crashed" | string;
   ownerScopeId?: string;
   createdBy?: string;
   createdInScope?: string;

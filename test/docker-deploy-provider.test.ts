@@ -188,3 +188,94 @@ test("the daemon probe reports a hung daemon as a timeout", async () => {
 
   assert.equal(await dockerDaemonFailure({ dockerExec }), "no response within 10s");
 });
+
+test("runState reports a still-running container as running", async () => {
+  const dockerExec: DockerExec = async (args) => {
+    if (args[0] === "inspect") return { code: 0, stdout: JSON.stringify({ Running: true }), stderr: "" };
+    return { code: 0, stdout: "", stderr: "" };
+  };
+  const store = createDeployStore();
+  const deployment = await store.create({
+    ownerScopeId: scopeId("personal", "U1"),
+    createdBy: "U1",
+    entrypoint: "node server.js",
+    snapshotDir: "/snap/one",
+  });
+  const provider = createDockerDeployProvider({ dockerExec });
+
+  assert.deepEqual(await provider.runState!(deployment, deployment.versions[0]!), { running: true });
+});
+
+test("runState reports an exited container's exit code without treating it as absent", async () => {
+  const dockerExec: DockerExec = async (args) => {
+    if (args[0] === "inspect")
+      return { code: 0, stdout: JSON.stringify({ Running: false, ExitCode: 7, OOMKilled: false, Error: "" }), stderr: "" };
+    return { code: 0, stdout: "", stderr: "" };
+  };
+  const store = createDeployStore();
+  const deployment = await store.create({
+    ownerScopeId: scopeId("personal", "U1"),
+    createdBy: "U1",
+    entrypoint: "node server.js",
+    snapshotDir: "/snap/one",
+  });
+  const provider = createDockerDeployProvider({ dockerExec });
+
+  assert.deepEqual(await provider.runState!(deployment, deployment.versions[0]!), { running: false, exitCode: 7 });
+});
+
+test("runState surfaces an OOM kill as detail", async () => {
+  const dockerExec: DockerExec = async (args) => {
+    if (args[0] === "inspect")
+      return { code: 0, stdout: JSON.stringify({ Running: false, ExitCode: 137, OOMKilled: true, Error: "" }), stderr: "" };
+    return { code: 0, stdout: "", stderr: "" };
+  };
+  const store = createDeployStore();
+  const deployment = await store.create({
+    ownerScopeId: scopeId("personal", "U1"),
+    createdBy: "U1",
+    entrypoint: "node server.js",
+    snapshotDir: "/snap/one",
+  });
+  const provider = createDockerDeployProvider({ dockerExec });
+
+  assert.deepEqual(await provider.runState!(deployment, deployment.versions[0]!), {
+    running: false,
+    exitCode: 137,
+    detail: "out of memory",
+  });
+});
+
+test("runState returns null for an absent container instead of guessing a crash", async () => {
+  const dockerExec: DockerExec = async (args) => {
+    if (args[0] === "inspect") return { code: 1, stdout: "", stderr: "No such container: agent-deploy-x" };
+    return { code: 0, stdout: "", stderr: "" };
+  };
+  const store = createDeployStore();
+  const deployment = await store.create({
+    ownerScopeId: scopeId("personal", "U1"),
+    createdBy: "U1",
+    entrypoint: "node server.js",
+    snapshotDir: "/snap/one",
+  });
+  const provider = createDockerDeployProvider({ dockerExec });
+
+  assert.equal(await provider.runState!(deployment, deployment.versions[0]!), null);
+});
+
+test("runState rejects a transient daemon failure instead of reporting a false crash", async () => {
+  const dockerExec: DockerExec = async (args) => {
+    if (args[0] === "inspect") return { code: 1, stdout: "", stderr: "daemon unavailable" };
+    return { code: 0, stdout: "", stderr: "" };
+  };
+  const store = createDeployStore();
+  const deployment = await store.create({
+    ownerScopeId: scopeId("personal", "U1"),
+    createdBy: "U1",
+    entrypoint: "node server.js",
+    snapshotDir: "/snap/one",
+  });
+  const provider = createDockerDeployProvider({ dockerExec });
+
+  await assert.rejects(provider.runState!(deployment, deployment.versions[0]!), /daemon unavailable/);
+});

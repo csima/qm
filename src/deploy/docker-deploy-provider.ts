@@ -1,5 +1,5 @@
 import type { Deployment, DeploymentVersion } from "./deploy-store.ts";
-import type { DeployEndpoint, DeployProvider } from "./deploy-provider.ts";
+import type { DeployEndpoint, DeployProvider, DeployRunState } from "./deploy-provider.ts";
 import { spawnDockerExec, type DockerExec } from "../sandbox/docker-exec.ts";
 import { errMessage } from "../util/errors.ts";
 
@@ -160,6 +160,23 @@ export function createDockerDeployProvider(opts: DockerDeployProviderOptions = {
 
     async resolveEndpoint(d): Promise<DeployEndpoint | null> {
       return (await migrateTarget(name(d))) ? d.endpoint : null;
+    },
+
+    async runState(d: Deployment): Promise<DeployRunState | null> {
+      const inspected = await dexec(["inspect", "--format", "{{json .State}}", name(d)]);
+      if (inspected.code !== 0) {
+        if (/no such (?:object|container)|not found/i.test(inspected.stderr)) return null;
+        throw new Error(`docker inspect ${name(d)} failed: ${inspected.stderr.trim()}`);
+      }
+      let state: { Running?: boolean; ExitCode?: number; OOMKilled?: boolean; Error?: string };
+      try {
+        state = JSON.parse(inspected.stdout) as typeof state;
+      } catch {
+        throw new Error(`docker inspect ${name(d)} returned invalid state`);
+      }
+      if (state.Running) return { running: true };
+      const detail = state.OOMKilled ? "out of memory" : state.Error || undefined;
+      return { running: false, exitCode: state.ExitCode, ...(detail ? { detail } : {}) };
     },
   };
 }
