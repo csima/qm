@@ -200,6 +200,7 @@ export interface OrchestratorDeps {
   deliveries?: DeliveryStore;
   directory?: DirectoryStore;
   isCurrentSharedScopeMember?: IsCurrentSharedScopeMember;
+  currentScopeMembers?: import("../../resolution/scope-membership.ts").CurrentScopeMembers;
   managedGroups?: Pick<ManagedGroupDirectory, "recognizes" | "members" | "version" | "withVersion" | "slackChannel">;
   reachExec?: boolean;
   eagerProvision?: boolean;
