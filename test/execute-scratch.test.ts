@@ -561,17 +561,23 @@ test("scratch credentials are selected per command and masked before returning",
 
 function turnBoxes(sandbox: Partial<Sandbox>, transferId = "turn-a") {
   const events: import("../src/audit/audit-log.ts").AuditEvent[] = [];
+  const cleanups: import("../src/audit/audit-log.ts").AuditEvent[] = [];
   const errors: unknown[] = [];
   const boxes = createTurnSandboxes({
     deps: {
       sandbox,
-      auditLog: { record: (event: import("../src/audit/audit-log.ts").AuditEvent) => events.push(event) },
+      auditLog: {
+        record: (event: import("../src/audit/audit-log.ts").AuditEvent) =>
+          (event.action === "sandbox.cleanup" ? cleanups : events).push(event),
+      },
       errors: { record: (...args: unknown[]) => errors.push(args) },
     },
     input: { runId: "run-1" },
     actor: { id: "U1" },
     session: { id: "session-1" },
     transferId,
+    emitGapWork: () => {},
+    turnFilesDir: ".agent-turn/s/t",
     scopeId: scopeId("channel", "C1"),
     memoryScopeId: scopeId("channel", "C1"),
     connectorEnv: { AGENT_API_TOKEN: "scope-capability" },
@@ -583,8 +589,36 @@ function turnBoxes(sandbox: Partial<Sandbox>, transferId = "turn-a") {
       ],
     },
   } as unknown as TurnSandboxContext);
-  return { boxes, events, errors };
+  return { boxes, events, cleanups, errors };
 }
+
+test("reclaim records one cleanup audit with per-step timings and backend", async () => {
+  const { boxes, cleanups } = turnBoxes({
+    async provision(_layers, opts) {
+      return { ...(opts?.scratch ? scratchHandle : scopedHandle), backend: "e2b" };
+    },
+    async removeDir() {},
+    async listDir() {
+      return [];
+    },
+    async teardown() {},
+  });
+  await boxes.provision();
+  await boxes.provisionScratch();
+  await boxes.reclaimBox();
+  assert.equal(cleanups.length, 1);
+  const detail = JSON.parse(cleanups[0]!.detail!);
+  assert.equal(detail.runId, "run-1");
+  assert.ok(detail.totalMs >= 0);
+  const steps = new Map(
+    (detail.steps as Array<{ step: string; backend?: string; ms: number; ok: boolean }>).map((s) => [s.step, s]),
+  );
+  for (const step of ["scrub", "teardown", "scratch_destroy"]) {
+    assert.equal(steps.get(step)?.backend, "e2b", step);
+    assert.equal(steps.get(step)?.ok, true, step);
+    assert.ok(steps.get(step)!.ms >= 0, step);
+  }
+});
 
 test("scratch provisioning is singleflight within a turn and isolated across turns", async () => {
   const provisions: Parameters<Sandbox["provision"]>[] = [];

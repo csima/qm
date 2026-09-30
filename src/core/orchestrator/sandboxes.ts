@@ -772,9 +772,39 @@ export function createTurnSandboxes(ctx: TurnSandboxContext) {
     );
   };
   const reclaimBox = async (): Promise<void> => {
+    const startedAt = Date.now();
+    const steps: Array<{ step: string; backend?: string; ms: number; ok: boolean }> = [];
+    const timed = async <T>(step: string, handle: SandboxHandle | undefined, work: () => Promise<T>): Promise<T> => {
+      const at = Date.now();
+      let ok = false;
+      try {
+        const value = await work();
+        ok = true;
+        return value;
+      } finally {
+        steps.push({ step, ...(handle?.backend ? { backend: handle.backend } : {}), ms: Date.now() - at, ok });
+      }
+    };
+    try {
+      await reclaimSteps(timed);
+    } finally {
+      deps.auditLog?.record({
+        at: Date.now(),
+        principalId: actor.id,
+        action: "sandbox.cleanup",
+        resource: scratchKey(),
+        scopeLabel: scopeId,
+        detail: JSON.stringify({ runId: input.runId, sessionId: session.id, totalMs: Date.now() - startedAt, steps }),
+      });
+    }
+  };
+  const reclaimSteps = async (
+    timed: <T>(step: string, handle: SandboxHandle | undefined, work: () => Promise<T>) => Promise<T>,
+  ): Promise<void> => {
     let ownerCleanupError: unknown;
     let scratchCleanupError: unknown;
-    if (ownerAuthProvisionInFlight) await ownerAuthProvisionInFlight.catch(() => {});
+    if (ownerAuthProvisionInFlight)
+      await timed("owner_auth_provision_wait", undefined, () => ownerAuthProvisionInFlight!.catch(() => {}));
     ownerAuthProvisionInFlight = null;
     const reachEntries = [...reachBoxes.entries()];
     reachBoxes.clear();
@@ -789,29 +819,29 @@ export function createTurnSandboxes(ctx: TurnSandboxContext) {
             keepReachWarm = false;
           }
         }
-        if (keepReachWarm) {
-          await deps.sandbox.teardown(h, { keepWarm: true }).catch(() => {});
-          return;
-        }
-        await deps.sandbox.teardown(h).catch(() => {});
+        await timed("reach_teardown", h, () =>
+          deps.sandbox.teardown(h, keepReachWarm ? { keepWarm: true } : undefined).catch(() => {}),
+        );
       }),
     );
     const ownerHandle = ownerAuthBox.handle ?? ownerAuthBox.pending;
     if (ownerHandle) {
       try {
-        await scrubOwnerAuthHandle(ownerHandle).catch((scrubErr) => {
-          deps.errors?.record(
-            {
-              category: "sandbox",
-              code: "owner_auth_scrub_failed",
-              message: errMessage(scrubErr),
-              scopeLabel: scopeId,
-              sessionId: session.id,
-            },
-            scrubErr,
-          );
+        await timed("owner_auth_scrub", ownerHandle, async () => {
+          await scrubOwnerAuthHandle(ownerHandle).catch((scrubErr) => {
+            deps.errors?.record(
+              {
+                category: "sandbox",
+                code: "owner_auth_scrub_failed",
+                message: errMessage(scrubErr),
+                scopeLabel: scopeId,
+                sessionId: session.id,
+              },
+              scrubErr,
+            );
+          });
+          await destroyEphemeralHandle(ownerHandle);
         });
-        await destroyEphemeralHandle(ownerHandle);
         ownerAuthBox.handle = null;
         ownerAuthBox.pending = null;
       } catch (err) {
@@ -828,13 +858,14 @@ export function createTurnSandboxes(ctx: TurnSandboxContext) {
         );
       }
     }
-    if (scratchProvisionInFlight) await scratchProvisionInFlight.catch(() => {});
+    if (scratchProvisionInFlight)
+      await timed("scratch_provision_wait", undefined, () => scratchProvisionInFlight!.catch(() => {}));
     scratchProvisionInFlight = null;
     const scratchHandle = scratchBox.handle ?? scratchBox.pending;
     if (scratchHandle) {
       const cleanupStart = Date.now();
       try {
-        await destroyEphemeralHandle(scratchHandle);
+        await timed("scratch_destroy", scratchHandle, () => destroyEphemeralHandle(scratchHandle));
         scratchBox.handle = null;
         scratchBox.pending = null;
         recordScratchLifecycle("released", scratchHandle, {
@@ -859,7 +890,8 @@ export function createTurnSandboxes(ctx: TurnSandboxContext) {
         );
       }
     }
-    await Promise.allSettled(resourcePending.values());
+    if (resourcePending.size)
+      await timed("resource_provision_wait", undefined, () => Promise.allSettled(resourcePending.values()));
     const released = new Set<string>();
     const current = box.handle ?? box.pending;
     const releases: Promise<void>[] = [];
@@ -871,11 +903,10 @@ export function createTurnSandboxes(ctx: TurnSandboxContext) {
         (async () => {
           try {
             if (handle.scopeId === undefined || handle.scopeId === writableScopeId || handle.scopeId === scopeId)
-              await clearTurnFiles(handle);
+              await timed("resource_scrub", handle, () => clearTurnFiles(handle));
           } finally {
-            await deps.sandbox.teardown(handle, {
-              keepWarm: await hasLiveProcesses(handle, memoryScopeId).catch(() => true),
-            });
+            const keepWarm = await hasLiveProcesses(handle, memoryScopeId).catch(() => true);
+            await timed("resource_teardown", handle, () => deps.sandbox.teardown(handle, { keepWarm }));
           }
         })(),
       );
@@ -885,7 +916,7 @@ export function createTurnSandboxes(ctx: TurnSandboxContext) {
       if (result.status === "rejected") swallow("resource sandbox release", result.reason);
     resourceHandles.clear();
     resourcePendingHandles.clear();
-    if (provisionInFlight) await provisionInFlight.catch(() => {});
+    if (provisionInFlight) await timed("provision_wait", undefined, () => provisionInFlight!.catch(() => {}));
     provisionInFlight = null;
     const handle = box.handle ?? box.pending;
     box.handle = null;
@@ -895,7 +926,7 @@ export function createTurnSandboxes(ctx: TurnSandboxContext) {
       if (scratchCleanupError) throw scratchCleanupError;
       return;
     }
-    await clearTurnFiles(handle);
+    await timed("scrub", handle, () => clearTurnFiles(handle));
     let keepWarm = false;
     if (deps.processes && supportsProcessSessions(deps.sandbox)) {
       try {
@@ -905,10 +936,12 @@ export function createTurnSandboxes(ctx: TurnSandboxContext) {
         keepWarm = false;
       }
     }
-    await deps.sandbox.teardown(handle, {
-      ...(keepWarm ? { keepWarm: true } : {}),
-      ...(box.used ? {} : { homeUnchanged: true }),
-    });
+    await timed("teardown", handle, () =>
+      deps.sandbox.teardown(handle, {
+        ...(keepWarm ? { keepWarm: true } : {}),
+        ...(box.used ? {} : { homeUnchanged: true }),
+      }),
+    );
     if (ownerCleanupError) throw ownerCleanupError;
     if (scratchCleanupError) throw scratchCleanupError;
   };
