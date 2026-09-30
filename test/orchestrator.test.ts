@@ -1124,6 +1124,18 @@ test("turn timezone rides the prompt and control-plane capability token", async 
   assert.equal(res.status, "ok");
   const claims = await verifyCapabilityToken(captured!.env!.AGENT_API_TOKEN!, TEST_CAPABILITY_SECRET);
   assert.equal(claims!.timezone, "America/New_York");
+  assert.equal(claims!.surface, "test");
+
+  const slackThread = { kind: "dm" as const, threadRef: "dm:U1:slack-wake" };
+  await app.turn(dm("!run echo slack", { surface: "slack", conversation: slackThread }));
+  captured = undefined;
+  await app.turn(dm("!run echo wake", { surface: "monitor", conversation: slackThread }));
+  const wake = await verifyCapabilityToken(captured!.env!.AGENT_API_TOKEN!, TEST_CAPABILITY_SECRET);
+  assert.equal(wake!.surface, "slack", "a wake in a Slack thread keeps the conversation's surface");
+  captured = undefined;
+  await app.turn(dm("!run echo web", { surface: "web", conversation: slackThread }));
+  const web = await verifyCapabilityToken(captured!.env!.AGENT_API_TOKEN!, TEST_CAPABILITY_SECRET);
+  assert.equal(web!.surface, "web", "a live web UI turn is a web turn even in a Slack-labelled conversation");
 
   const prompt = await app.turn(
     dm("!sysprompt", { conversation: { kind: "dm", threadRef: "dm:U1:tz-prompt" }, timezone: "America/New_York" }),

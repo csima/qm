@@ -94,7 +94,8 @@ export function effortLevelsForHarness(
   model?: Model<Api>,
 ): Array<{ value: EffortLevel; label: string }> {
   const advertised = (model as ModelMetadata | undefined)?.effortLevelsByHarness?.[harnessId] ?? [];
-  return EFFORT_LEVELS.filter(({ value }) => advertised.includes(value));
+  const [unset, ...levels] = EFFORT_LEVELS;
+  return [unset!, ...levels.filter(({ value }) => advertised.includes(value))];
 }
 
 export function isPeakEffort(harnessId: string, model: Model<Api> | undefined, level: string): boolean {
@@ -102,9 +103,7 @@ export function isPeakEffort(harnessId: string, model: Model<Api> | undefined, l
 }
 
 export function resolveEffort(harnessId: string, model: Model<Api> | undefined, effort: EffortLevel): EffortLevel {
-  return effort === "auto" || effortLevelsForHarness(harnessId, model).some(({ value }) => value === effort)
-    ? effort
-    : "auto";
+  return effortLevelsForHarness(harnessId, model).some(({ value }) => value === effort) ? effort : "auto";
 }
 
 export function compatibleHarnessOptions<T extends { harnessId: string; model: { id: string } }>(

@@ -35,7 +35,7 @@ function effortText(
   level: EffortLevel,
   option: Pick<ModelOption, "harnessId" | "model"> | undefined,
 ): TemplateResult | string {
-  const label = effortLabel(level);
+  const label = effortLabel(level) || "Default";
   return option && isPeakEffort(option.harnessId, option.model, level)
     ? html`<span class="effort-peak">${label}</span>`
     : label;

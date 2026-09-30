@@ -1,3 +1,4 @@
+import { createCurrentScopeMembers } from "../resolution/scope-membership.ts";
 import { notifyDeploymentShared } from "../deploy/share-notice.ts";
 import { deploymentShareScope } from "../deploy/email-access.ts";
 import {
@@ -86,6 +87,7 @@ export function createSessionMethods(
   | "managesScope"
   | "isOpenScopeMember"
   | "isCurrentSharedScopeMember"
+  | "currentScopeMembers"
   | "membershipControlsScope"
   | "authorizesCapabilityScope"
   | "updateSession"
@@ -780,6 +782,14 @@ export function createSessionMethods(
       return principalCanManageScope(principalId, scope);
     },
 
+    currentScopeMembers: createCurrentScopeMembers(
+      {
+        managedGroups: deps.projects,
+        directory: deps.directory,
+        identity: deps.identity,
+      },
+      true,
+    ),
     isCurrentSharedScopeMember(principalId, scope) {
       const { kind } = parseScopeId(scope);
       return kind === "channel" || kind === "group"
@@ -1035,6 +1045,7 @@ export function createSessionMethods(
               (await h.directoryMember(email))?.type === "internal",
           ),
         };
+        await deps.deploy.assertShareAllowed(g.ownerScopeId, g.granteeScopeId, g.permission);
       }
       await deps.acl.grant(g, await artifactAuthor(g.ownerScopeId, g.ref));
       deps.auditLog.record({

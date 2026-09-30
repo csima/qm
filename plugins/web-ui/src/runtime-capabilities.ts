@@ -4,6 +4,7 @@ export type EffortLevel =
   "low" | "medium" | "high" | "xhigh" | "max" | "ultra" | "ultracode" | "auto" | "adaptive" | "default";
 
 export const EFFORT_LEVELS: Array<{ value: EffortLevel; label: string }> = [
+  { value: "auto", label: "Default" },
   { value: "adaptive", label: "Adaptive" },
   { value: "default", label: "Provider default" },
   { value: "low", label: "Low" },

@@ -198,7 +198,7 @@ test("the model catalog falls back from unavailable saved harnesses using only c
   assert.deepEqual(modelLoadoutOptions([], saved, "claude"), []);
 });
 
-test("harness effort choices come from the model's advertised levels and label extra high clearly", () => {
+test("harness effort choices are Default plus the model's advertised levels, with extra high labeled clearly", () => {
   const model = {
     ...option("pi:one").model,
     effortLevelsByHarness: {
@@ -209,15 +209,16 @@ test("harness effort choices come from the model's advertised levels and label e
     },
   };
   const menu = (harnessId: string) => effortLevelsForHarness(harnessId, model).map(({ value }) => value);
-  assert.deepEqual(menu("pi"), ["low", "medium", "high", "xhigh", "max"]);
-  assert.deepEqual(menu("claude"), ["low", "medium", "high", "xhigh", "max", "ultracode"]);
-  assert.deepEqual(menu("codex"), ["low", "medium", "high", "xhigh", "max", "ultra"]);
+  assert.deepEqual(menu("pi"), ["auto", "low", "medium", "high", "xhigh", "max"]);
+  assert.deepEqual(menu("claude"), ["auto", "low", "medium", "high", "xhigh", "max", "ultracode"]);
+  assert.deepEqual(menu("codex"), ["auto", "low", "medium", "high", "xhigh", "max", "ultra"]);
   for (const harnessId of ["pi", "claude", "codex"])
     assert.equal(effortLevelsForHarness(harnessId, model).find(({ value }) => value === "xhigh")?.label, "Extra high");
-  for (const harnessId of ["opencode", "mock", "unknown"]) assert.deepEqual(menu(harnessId), []);
+  for (const harnessId of ["opencode", "mock", "unknown"])
+    assert.deepEqual(effortLevelsForHarness(harnessId, model), [{ value: "auto", label: "Default" }]);
 });
 
-test("native reasoning choices require model and harness metadata while legacy settings survive", () => {
+test("native reasoning choices require model and harness metadata and always offer Default", () => {
   const model = {
     ...option("pi:one").model,
     effortLevelsByHarness: {
@@ -226,6 +227,7 @@ test("native reasoning choices require model and harness metadata while legacy s
     },
   };
   assert.deepEqual(effortLevelsForHarness("pi", model), [
+    { value: "auto", label: "Default" },
     { value: "adaptive", label: "Adaptive" },
     { value: "default", label: "Provider default" },
     { value: "low", label: "Low" },
@@ -239,19 +241,22 @@ test("native reasoning choices require model and harness metadata while legacy s
     ),
   );
   const withoutEfforts = { ...model, effortLevelsByHarness: { pi: [] } };
-  assert.deepEqual(effortLevelsForHarness("pi", withoutEfforts), []);
+  assert.deepEqual(effortLevelsForHarness("pi", withoutEfforts), [{ value: "auto", label: "Default" }]);
   const saved = [entry("pi:one", "adaptive"), entry("pi:two", "default"), entry("pi:three", "auto")];
   assert.deepEqual(parseLoadout(JSON.stringify(saved)), saved);
 });
 
-test("no effort choice is ever labelled Legacy default", () => {
+test("the unset effort is always offered first as Default, never Legacy default", () => {
   const model = {
     ...option("pi:one").model,
     effortLevelsByHarness: { pi: ["auto", "adaptive", "default", "low", "high"], claude: ["auto", "low"] },
   };
   for (const harnessId of ["pi", "claude", "codex", "opencode"])
-    for (const candidate of [undefined, model])
-      assert.ok(effortLevelsForHarness(harnessId, candidate).every(({ value, label }) => value !== "auto" && label));
+    for (const candidate of [undefined, model]) {
+      const [first, ...rest] = effortLevelsForHarness(harnessId, candidate);
+      assert.deepEqual(first, { value: "auto", label: "Default" });
+      assert.ok(rest.every(({ value, label }) => value !== "auto" && label && label !== "Legacy default"));
+    }
   assert.equal(effortLabel("auto"), "");
 });
 
@@ -311,11 +316,11 @@ test("the effort menu lists exactly what the model advertises for its harness an
   };
   const menu = (harnessId: string, candidate?: typeof model) =>
     effortLevelsForHarness(harnessId, candidate).map(({ value }) => value);
-  assert.deepEqual(menu("pi", model), ["default", "low", "xhigh"]);
-  assert.deepEqual(menu("codex", model), ["low", "ultra"]);
-  assert.deepEqual(menu("claude", model), []);
-  assert.deepEqual(menu("pi"), []);
-  assert.deepEqual(menu("codex", { ...model, effortLevelsByHarness: undefined } as never), []);
+  assert.deepEqual(menu("pi", model), ["auto", "default", "low", "xhigh"]);
+  assert.deepEqual(menu("codex", model), ["auto", "low", "ultra"]);
+  assert.deepEqual(menu("claude", model), ["auto"]);
+  assert.deepEqual(menu("pi"), ["auto"]);
+  assert.deepEqual(menu("codex", { ...model, effortLevelsByHarness: undefined } as never), ["auto"]);
   for (const level of ["low", "medium", "high", "xhigh", "max", "ultra", "ultracode", "adaptive", "default"] as const)
     assert.ok([level, "auto"].includes(resolveEffort("pi", model, level)), level);
 });

@@ -84,6 +84,7 @@ test("Pi sends every catalog model's offered effort to the provider exactly as s
     .filter((id) => modelSupportedByHarness(id, "pi") && thinkingLevelsForHarness("pi", id).length > 1);
   assert.ok(modelIds.some((id) => resolveModel(id)?.api === "anthropic-messages"));
   assert.ok(modelIds.some((id) => resolveModel(id)?.api === "openai-responses"));
+  assert.ok(modelIds.includes("claude-sonnet-5-5"));
   for (const modelId of modelIds) {
     const harness = createPiHarness({ defaultModelId: modelId });
     t.after(() => harness.turns.close?.());

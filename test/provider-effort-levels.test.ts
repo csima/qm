@@ -34,6 +34,17 @@ test("each model offers only the effort levels its provider documents", () => {
   assert.deepEqual(tiers("pi", "claude-opus-5-5"), ["low", "medium", "high", "xhigh", "max"]);
   assert.deepEqual(tiers("pi", "claude-opus-4-6"), ["low", "medium", "high", "max"]);
   assert.deepEqual(tiers("pi", "claude-haiku-4-5"), []);
+  assert.deepEqual(thinkingLevelsForHarness("pi", "claude-sonnet-5-5"), [
+    "auto",
+    "default",
+    "adaptive",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
+  ]);
+  assert.deepEqual(tiers("claude", "claude-sonnet-5-5"), ["low", "medium", "high", "xhigh", "max", "ultracode"]);
   assert.deepEqual(tiers("pi", "gpt-6-astra"), ["low", "medium", "high", "xhigh", "max"]);
   assert.deepEqual(tiers("claude", "claude-opus-5-5"), ["low", "medium", "high", "xhigh", "max", "ultracode"]);
   assert.deepEqual(tiers("claude", "claude-opus-4-6"), ["low", "medium", "high", "max"]);

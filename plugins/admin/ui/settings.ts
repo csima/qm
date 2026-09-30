@@ -54,7 +54,7 @@ export class SettingsState extends SettingState {
   }
   get efforts(): string[] {
     const advertised = this.models.find((model) => model.id === this.draft.modelId)?.effortLevels ?? [];
-    return advertised.filter((level) => level !== "auto");
+    return advertised.length ? ["auto", ...advertised.filter((level) => level !== "auto")] : [];
   }
   get fastCapable() {
     return (
@@ -66,8 +66,7 @@ export class SettingsState extends SettingState {
     if (!runtimeKeys.includes(this.key)) return;
     if (!this.harnesses.includes(this.draft.harnessId)) this.draft.harnessId = this.harnesses[0];
     if (!this.models.some((m) => m.id === this.draft.modelId)) this.draft.modelId = this.models[0]?.id || "";
-    if (this.draft.effortLevel !== "auto" && !this.efforts.includes(this.draft.effortLevel))
-      this.draft.effortLevel = "auto";
+    if (!this.efforts.includes(this.draft.effortLevel)) this.draft.effortLevel = "auto";
     if (!this.fastCapable) this.draft.fastMode = false;
   }
   change(field: string, value: unknown) {
@@ -158,6 +157,7 @@ const harnessLabels: Record<string, string> = {
   claude: "Claude Code",
 };
 const effortLabels: Record<string, string> = {
+  auto: "Default",
   adaptive: "Adaptive",
   default: "Provider default",
   low: "Low",
@@ -257,11 +257,7 @@ function card(s: SettingsState) {
               .value=${s.draft.effortLevel || "auto"}
               @change=${(e: Event) => s.change("effortLevel", value(e))}
             >
-              ${
-                (s.draft.effortLevel || "auto") === "auto"
-                  ? html`<option value="auto" selected hidden>Not set</option>`
-                  : null
-              }
+              ${s.efforts.length ? null : html`<option value="auto" selected hidden>Default</option>`}
               ${repeat(
                 s.efforts,
                 (id) => id,

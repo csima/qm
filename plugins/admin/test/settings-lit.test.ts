@@ -164,7 +164,7 @@ test("credential save acknowledges its submitted snapshot and retains newer edit
   }
 });
 
-test("runtime reasoning choices follow the selected model and keep an unset level unset", () => {
+test("runtime reasoning choices follow the selected model and offer the current default", () => {
   const dom = setup();
   try {
     const data = {
@@ -181,25 +181,22 @@ test("runtime reasoning choices follow the selected model and keep an unset leve
     const select = () => dom.window.document.getElementById("base-effort") as HTMLSelectElement;
     const choices = () => [...select().options].map((option) => [option.value, option.textContent]);
     assert.deepEqual(choices(), [
-      ["auto", "Not set"],
+      ["auto", "Default"],
       ["adaptive", "Adaptive"],
       ["default", "Provider default"],
       ["high", "High"],
     ]);
-    assert.equal(select().options[0]!.hidden, true);
+    assert.equal(select().options[0]!.hidden, false);
     assert.equal(select().value, "auto");
     assert.equal(dom.window.eval('settingsUI.collect("runtime").effortLevel'), "auto");
     assert.doesNotMatch(dom.window.document.body.textContent ?? "", /Legacy default/);
     select().value = "adaptive";
     select().dispatchEvent(new dom.window.Event("change"));
     assert.equal(dom.window.eval('settingsUI.collect("runtime").effortLevel'), "adaptive");
-    assert.equal(
-      choices().some(([value]) => value === "auto"),
-      false,
-    );
+    assert.equal(choices()[0]![0], "auto");
     dom.window.eval('settingsUI.states.get("runtime").change("modelId", "b")');
     assert.deepEqual(choices(), [
-      ["auto", "Not set"],
+      ["auto", "Default"],
       ["high", "High"],
     ]);
     assert.equal(dom.window.eval('settingsUI.collect("runtime").effortLevel'), "auto");
@@ -214,7 +211,8 @@ test("runtime reasoning choices follow the selected model and keep an unset leve
     dom.window.eval(
       'settingsUI.states.get("runtime").context.modelsByHarness.pi = [{id:"b"}]; settingsUI.states.get("runtime").changed()',
     );
-    assert.deepEqual(choices(), [["auto", "Not set"]]);
+    assert.deepEqual(choices(), [["auto", "Default"]]);
+    assert.equal(select().disabled, true);
   } finally {
     dom.window.close();
   }
