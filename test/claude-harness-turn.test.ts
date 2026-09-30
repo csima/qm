@@ -668,3 +668,45 @@ test("Claude retains a queued message which the SDK never consumes", async () =>
   assert.equal(entries.filter((entry) => entry.type === "user").length, 1);
   assert.equal((await signals.pending("no-echo"))[0]?.signal.ts, "pending");
 });
+
+test("each steered prompt gets its own LLM request record", async () => {
+  const signals = createMemoryRunSignalStore();
+  const runId = "run-steps";
+  currentScript = async function* (prompts) {
+    const iterator = prompts[Symbol.asyncIterator]();
+    await iterator.next();
+    await signals.send(runId, { kind: "steer", text: "and another thing" });
+    await iterator.next();
+    yield assistantMessage("msg_A", "first", {
+      input_tokens: 5,
+      output_tokens: 2,
+      cache_read_input_tokens: 0,
+      cache_creation_input_tokens: 0,
+    });
+    yield resultMessage("first", { ttft_ms: 10, duration_ms: 20, total_cost_usd: 0.1 });
+    yield assistantMessage("msg_B", "second", {
+      input_tokens: 9,
+      output_tokens: 3,
+      cache_read_input_tokens: 0,
+      cache_creation_input_tokens: 0,
+    });
+    yield resultMessage("second", { ttft_ms: 30, duration_ms: 40, total_cost_usd: 0.3 });
+  };
+
+  const harness = createClaudeHarness({ signals });
+  const { turn, llmRequests } = harnessTurn({ runId });
+  await harness.turns.runTurn(turn);
+
+  assert.deepEqual(
+    llmRequests.map((record) => record.step),
+    [0, 1],
+  );
+  assert.equal(llmRequests[1]!.truncated, false);
+  assert.equal(
+    (llmRequests[1]!.promptEnvelope as { system: string }).system,
+    "be brief",
+    "steer steps reuse the turn's envelope — the steer text itself lives on the tape",
+  );
+  assert.equal(llmRequests[0]!.usage?.costUsd, 0.1);
+  assert.ok(Math.abs((llmRequests[1]!.usage?.costUsd ?? 0) - 0.2) < 1e-9);
+});
