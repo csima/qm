@@ -79,7 +79,7 @@ test("notifier only wakes on configured same-repository main push CI and dynamic
     { head_repository: { full_name: "outsider/core" } },
   ])
     assert.equal(admitted({ ...ci, ...patch }), false);
-  assert.match(workflow, /workflows: \[CI\/CD, CodeQL\]/);
+  assert.match(workflow, /workflows: \[CI\/CD, CodeQL, Push on main\]/);
   assert.match(workflow, /types: \[completed\]/);
   assert.match(workflow, /branches: \[main\]/);
   assert.match(workflow, /permissions:\n {2}contents: read\n {2}actions: read/);
