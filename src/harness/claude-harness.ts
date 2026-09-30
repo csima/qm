@@ -932,7 +932,7 @@ export function createClaudeHarness(opts: ClaudeHarnessOptions = {}): Harness {
       capabilities: new Set(["abort", "steer", "images", "thinking-level", "fast-mode"]),
     },
     {
-      runTurn: runPrompt,
+      runTurn: (turn) => runPrompt({ ...turn, handoff: undefined }),
       close: () => {
         for (const sdkQuery of active) sdkQuery.close();
         active.clear();

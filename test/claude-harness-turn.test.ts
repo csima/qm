@@ -763,6 +763,34 @@ test("Claude deadline hands off even when the SDK interrupt never settles", { ti
   }
 });
 
+test("Claude keeps running tools after a committed-step handoff request until its deadline", async () => {
+  const requested = new AbortController();
+  let ran = 0;
+  currentScript = async function* (prompts) {
+    await prompts[Symbol.asyncIterator]().next();
+    requested.abort();
+    await toolHandlers.get("runtime")!({ action: "get" });
+    yield resultMessage("finished before the deadline");
+  };
+  const harness = createClaudeHarness({});
+  const { turn, entries } = harnessTurn({
+    readOnly: false,
+    handoff: requested.signal,
+    handoffDeadline: new AbortController().signal,
+    tools: {
+      runtime: async () => {
+        ran++;
+        return { ok: true };
+      },
+    } as unknown as HarnessTurnInput["tools"],
+  });
+  const result = await harness.turns.runTurn(turn);
+  assert.equal(result.handedOff, undefined);
+  assert.equal(result.reply, "finished before the deadline");
+  assert.equal(ran, 1);
+  assert.ok(!entries.some((entry) => (entry.payload as { notExecuted?: boolean }).notExecuted));
+});
+
 test("Claude deadline bounds SDK initialization", { timeout: 3000 }, async () => {
   const entered = Promise.withResolvers<void>();
   const release = Promise.withResolvers<void>();

@@ -99,3 +99,15 @@ test("provider call IDs reused later cannot inherit an earlier completion", () =
     [],
   );
 });
+
+test("Claude native call IDs do not mark a completed bridge call uncertain", () => {
+  const call = entry("tool_call", { tool: "execute", callId: "bridge-1" });
+  const result = entry("tool_result", { callId: "bridge-1", result: "done" });
+  const claudeCall = {
+    kind: "message",
+    harness: "claude",
+    payload: { message: { role: "assistant", content: [{ type: "tool_use", id: "toolu_1", name: "execute" }] } },
+  } as TapeRecord;
+  assert.deepEqual(uncertainToolCalls([call, result], [claudeCall]), []);
+  assert.deepEqual(uncertainToolCalls([call], [claudeCall]), ["execute"]);
+});

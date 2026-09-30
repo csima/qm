@@ -50,7 +50,7 @@ export function uncertainToolCalls(entries: readonly SessionEntry[], rows: reado
     if (typeof id === "string") nativeResults.add(id);
   };
   for (const row of rows) {
-    if (row.kind !== "message" || !isObj(row.payload)) continue;
+    if (row.kind !== "message" || row.harness === "claude" || !isObj(row.payload)) continue;
     const p = row.payload;
     if (p.type === "function_call") addCall(p.call_id, p.name);
     if (p.type === "function_call_output") addResult(p.call_id);
