@@ -1673,6 +1673,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         const memoryClaim = memoryAccess
           ? { ...memoryAccess, read: baseRecallScopes, ...(orgMemoryWrite ? { orgWrite: orgMemoryWrite } : {}) }
           : undefined;
+        const turnSurface = input.surface === "web" ? "web" : (session.surface ?? input.surface);
         controlClaims = {
           ...scopeAttestation,
           aud: CONTROL_PLANE_AUD,
@@ -1706,6 +1707,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           runAttempt: input.attempt,
           runLeaseToken: input.runLeaseToken,
           threadRef: conversation.threadRef,
+          ...(turnSurface ? { surface: turnSurface } : {}),
         };
         connectorEnv.AGENT_API_TOKEN = await mintCapabilityToken(
           controlClaims,
