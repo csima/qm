@@ -1,6 +1,12 @@
 import { SandboxProvisionCleanupError, cleanupFailedProvision } from "../src/sandbox/sandbox.ts";
 import { execFileSync } from "node:child_process";
-import { createTurnSandboxes, type TurnSandboxContext } from "../src/core/orchestrator/sandboxes.ts";
+import {
+  createTurnSandboxes,
+  finishPendingScrubs,
+  type PendingSandboxScrub,
+  type TurnSandboxContext,
+} from "../src/core/orchestrator/sandboxes.ts";
+import { createMemoryMap } from "../src/persistence/durable-map.ts";
 import { fakeSprites } from "./support/auto-fake-sprites.ts";
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -559,7 +565,11 @@ test("scratch credentials are selected per command and masked before returning",
   await assert.rejects(ctx.execute("env", { scratch: true, credentials: ["owner"] }), /requires scope:owner/);
 });
 
-function turnBoxes(sandbox: Partial<Sandbox>, transferId = "turn-a") {
+function turnBoxes(
+  sandbox: Partial<Sandbox>,
+  transferId = "turn-a",
+  sandboxScrubs = createMemoryMap<PendingSandboxScrub>(),
+) {
   const events: import("../src/audit/audit-log.ts").AuditEvent[] = [];
   const cleanups: import("../src/audit/audit-log.ts").AuditEvent[] = [];
   const errors: unknown[] = [];
@@ -571,6 +581,7 @@ function turnBoxes(sandbox: Partial<Sandbox>, transferId = "turn-a") {
           (event.action === "sandbox.cleanup" ? cleanups : events).push(event),
       },
       errors: { record: (...args: unknown[]) => errors.push(args) },
+      sandboxScrubs,
     },
     input: { runId: "run-1" },
     actor: { id: "U1" },
@@ -725,7 +736,7 @@ test("a provision that resolves after reclaim scrubs and releases itself without
   const provisioned = boxes.provision();
   const scratched = boxes.provisionScratch();
   await boxes.reclaimBox();
-  assert.deepEqual(log, []);
+  assert.equal(log.length, 0);
   assert.deepEqual(JSON.parse(cleanups[0]!.detail!).deferred.sort(), ["provision", "scratch"]);
   await assert.rejects(boxes.provision(), /already been released/);
   await assert.rejects(boxes.provisionScratch(), /already been released/);
@@ -738,6 +749,73 @@ test("a provision that resolves after reclaim scrubs and releases itself without
   assert.ok(log.indexOf("scrub:scoped-box") < log.indexOf("teardown:scoped-box"));
   assert.equal(boxes.box.handle, null);
   assert.equal(boxes.scratchBox.handle, null);
+});
+
+test("a scrub still running at the handoff deadline is noted durably and cleared when it finishes", async () => {
+  const scrubs = createMemoryMap<PendingSandboxScrub>();
+  const removal = Promise.withResolvers<void>();
+  const torn: string[] = [];
+  const { boxes, cleanups } = turnBoxes(
+    {
+      async provision() {
+        return { ...scopedHandle, backend: "e2b", resourceId: "sbx-1" };
+      },
+      async removeDir(_handle, dir) {
+        if (dir === ".agent-turn/s/t") await removal.promise;
+      },
+      async listDir() {
+        return [];
+      },
+      async teardown(handle) {
+        torn.push(handle.id);
+      },
+    },
+    "turn-a",
+    scrubs,
+  );
+  await boxes.provision();
+  await boxes.reclaimBox(AbortSignal.abort());
+  const pending = await scrubs.get("session-1:turn-a");
+  assert.deepEqual(
+    pending?.boxes.map((box) => [box.sandboxId, box.dirs]),
+    [["sbx-1", [".agent-turn/s/t"]]],
+  );
+  assert.deepEqual(torn, []);
+  removal.resolve();
+  while (torn.length === 0 || (await scrubs.entries()).length) await new Promise((r) => setImmediate(r));
+  assert.deepEqual(torn, ["scoped-box"]);
+  assert.equal(JSON.parse(cleanups[0]!.detail!).scrubPending, true);
+});
+
+test("a new worker finishes a pending scrub and keeps it while the box is unreachable", async () => {
+  const scrubs = createMemoryMap<PendingSandboxScrub>();
+  const layers = [{ scopeId: scopeId("channel", "C1"), mode: "rw" as const, mountPath: "" }];
+  await scrubs.put("session-1:turn-a", {
+    createdAt: 1,
+    scopeLabel: "channel:C1",
+    boxes: [{ layers, sandboxId: "sbx-1", dirs: [".agent-turn/s/t"] }],
+  });
+  const calls: string[] = [];
+  let reachable = false;
+  const sandbox = {
+    async provision(_layers: unknown, opts?: { sandboxId?: string }) {
+      if (!reachable) throw new Error("provider down");
+      calls.push(`provision:${opts?.sandboxId}`);
+      return scopedHandle;
+    },
+    async removeDir(_handle: SandboxHandle, dir: string) {
+      calls.push(`remove:${dir}`);
+    },
+    async teardown() {
+      calls.push("teardown");
+    },
+  };
+  await finishPendingScrubs(sandbox, scrubs);
+  assert.equal((await scrubs.entries()).length, 1);
+  reachable = true;
+  await finishPendingScrubs(sandbox, scrubs);
+  assert.deepEqual(calls, ["provision:sbx-1", "remove:.agent-turn/s/t", "teardown"]);
+  assert.equal((await scrubs.entries()).length, 0);
 });
 
 test("scratch destruction failures remain visible and retain the handle for retry", async () => {

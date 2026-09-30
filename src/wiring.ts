@@ -320,6 +320,7 @@ import { createPostgresTaskStore } from "./tasks/postgres-task-store.ts";
 import type { TaskStore } from "./tasks/task-store.ts";
 import { createMemoryStrategy } from "./memory/strategy.ts";
 import { createOrchestrator, egressClaimAllowingControlPlane, type OrchestratorDeps } from "./core/orchestrator.ts";
+import { finishPendingScrubs, type PendingSandboxScrub } from "./core/orchestrator/sandboxes.ts";
 import {
   mintCapabilityToken,
   CAPABILITY_TTL_MS,
@@ -1156,6 +1157,7 @@ export function buildApp(
     },
     canUseScope: (actorId, scopeId) => membership.canUseSandboxScope!(actorId, scopeId),
   });
+  const sandboxScrubs = artifactMap<PendingSandboxScrub>("sandbox_scrubs");
   const sandbox: Sandbox = createSandboxRouter({
     resources: sandboxResources,
     backends: sandboxBackends,
@@ -1994,6 +1996,7 @@ export function buildApp(
     deliveries,
     approvals,
     approvalGrants: artifactMap<CommandApprovalGrant>("approval_grants"),
+    sandboxScrubs,
     ...(processes ? { processes } : {}),
     monitors,
     crons,
@@ -2336,6 +2339,13 @@ export function buildApp(
         : advisoryLock.withLock("session-return-sweep", sweepSessionReturns),
     1_000,
     { label: "session-returns", immediate: true },
+  );
+  const pendingScrubSweeper = createSweeper(
+    () => finishPendingScrubs(sandbox, sandboxScrubs),
+    config.reaperIntervalMs,
+    {
+      label: "pending-sandbox-scrubs",
+    },
   );
   const orphanedSignalSweeper = createSweeper(
     async () => {
@@ -2718,6 +2728,7 @@ export function buildApp(
       wakeSweep.start();
       swarms?.start();
       orphanedSignalSweeper.start();
+      pendingScrubSweeper.start();
       sessionReturnSweeper.start();
       approvalDeliverySweeper.start();
       runDeliverySweeper.start();
@@ -2748,6 +2759,7 @@ export function buildApp(
       wakeSweep.stop(),
       swarms?.stop(),
       orphanedSignalSweeper.stop(),
+      pendingScrubSweeper.stop(),
       sessionReturnSweeper.stop(),
       approvalDeliverySweeper.stop(),
       runDeliverySweeper.stop(),
@@ -2781,7 +2793,11 @@ export function buildApp(
     stopBackground,
     async backgroundDrained() {
       await backgroundStopping;
-      await Promise.all([admittedWork.drained(), ...workers.map((worker) => worker.drained())]);
+      await Promise.all([
+        admittedWork.drained(),
+        orchestrator.cleanupsDrained?.(),
+        ...workers.map((worker) => worker.drained()),
+      ]);
     },
     async releaseInFlightRuns() {
       await Promise.all(workers.map((w) => w.releaseInFlight()));
@@ -2794,6 +2810,9 @@ export function buildApp(
       await Promise.all([
         withTimeout(() => admittedWork.drained(), config.shutdownDrainMs, "admitted work drain").catch(
           swallowAs("wiring: admitted work drain failed", undefined),
+        ),
+        withTimeout(async () => orchestrator.cleanupsDrained?.(), config.shutdownDrainMs, "turn cleanup drain").catch(
+          swallowAs("wiring: turn cleanup drain failed", undefined),
         ),
         ...workers.map((w) => w.stop(config.shutdownDrainMs)),
       ]).catch(swallowAs("wiring: worker drain failed", undefined));

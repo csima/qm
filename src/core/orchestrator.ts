@@ -270,6 +270,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
     );
   }
   const leaseKeepaliveMs = Math.floor(deps.sessions.leaseTtlMs / 3);
+  const backgroundCleanups = new Set<Promise<void>>();
   const pending = deps.approvals ?? createMemoryMap<PendingApprovalRecord>();
   const transcripts = createTranscriptSource(deps.sessions);
   const approvalGrants = deps.approvalGrants ?? createMemoryMap<CommandApprovalGrant>();
@@ -457,6 +458,9 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
   }
 
   return {
+    async cleanupsDrained() {
+      while (backgroundCleanups.size) await Promise.allSettled(backgroundCleanups);
+    },
     async screenSecuritySteer({ payload, actor, conversation, sessionId }) {
       const resolution = await deps.resolution.resolve(conversation, actor);
       if (resolution.securityPolicy.inboundScreening === "off") return "allow";
@@ -4353,12 +4357,13 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
                 }
               }
             }
-            if (!pausing && turnCompleted && !session.title && !fallbackTitleWrite) {
-              await generateAndStoreTitle(session.id, scopeId, `User:\n${titleText}\n\nAssistant:\n${result.reply}`);
-            }
           } finally {
-            await reclaimBox();
+            await reclaimBox(input.handoffDeadline);
           }
+        };
+        const nameSession = async (): Promise<void> => {
+          if (!pausing && turnCompleted && !session.title && !fallbackTitleWrite)
+            await generateAndStoreTitle(session.id, scopeId, `User:\n${titleText}\n\nAssistant:\n${result.reply}`);
         };
 
         let finalResult: TurnResult;
@@ -4476,10 +4481,13 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           await catchUpMessageRevisions();
           await deps.sessions.releaseLease(lease);
           leaseReleased = true;
-          void tail().catch(swallowAs("orchestrator: background tail", undefined));
+          const cleanup = tail().finally(() => backgroundCleanups.delete(cleanup));
+          backgroundCleanups.add(cleanup);
+          void cleanup.then(nameSession).catch(swallowAs("orchestrator: background tail", undefined));
         } else {
           await tail();
           tailOwnsCleanup = true;
+          await nameSession();
         }
         await deps.errors?.flush();
         return finalResult;
@@ -4588,7 +4596,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
       } finally {
         if (input.runId) deps.turnStream?.end(input.runId);
         try {
-          if (!tailOwnsCleanup) await reclaimBox();
+          if (!tailOwnsCleanup) await reclaimBox(input.handoffDeadline);
         } finally {
           stopLeaseKeepalive();
         }

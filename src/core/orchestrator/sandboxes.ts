@@ -3,7 +3,13 @@ import { personalScope } from "../../types.ts";
 import { intersectEgressPolicies } from "../../resolution/egress-policy.ts";
 import { isOpenScopeMember } from "../../resolution/sharing-access.ts";
 import type { GapPhase } from "../../sessions/session-store.ts";
-import { type SandboxHandle, supportsProcessSessions, SandboxProvisionCleanupError } from "../../sandbox/sandbox.ts";
+import {
+  type Sandbox,
+  type SandboxHandle,
+  supportsProcessSessions,
+  SandboxProvisionCleanupError,
+} from "../../sandbox/sandbox.ts";
+import type { DurableMap } from "../../persistence/durable-map.ts";
 import type { SandboxAccessPlan } from "../../sandbox/sandbox-resources.ts";
 import { reconcileProcesses } from "../../processes/reconcile.ts";
 import {
@@ -27,11 +33,43 @@ import { isSafeSkillName } from "../../skills/skill-name.ts";
 import type { SkillResult } from "../../tools/primitives.ts";
 import { TURN_FILES_DIR } from "../attachments.ts";
 import { errMessage, swallow, swallowAs } from "../../util/errors.ts";
-import { sleep } from "../../util/async.ts";
+import { sleep, withAbort } from "../../util/async.ts";
 import { loadActiveBundles } from "./turn-helpers.ts";
 import type { OrchestratorDeps, OrchestratorInput } from "./types.ts";
 
 const TURN_FILES_MAX_AGE_MS = 24 * 60 * 60_000;
+
+export interface PendingSandboxScrub {
+  createdAt: number;
+  scopeLabel: string;
+  boxes: Array<{ layers: Resolution["layers"]; sandboxId?: string; egress?: Resolution["egress"]; dirs: string[] }>;
+}
+
+export async function finishPendingScrubs(
+  sandbox: Pick<Sandbox, "provision" | "removeDir" | "teardown">,
+  scrubs: DurableMap<PendingSandboxScrub>,
+): Promise<void> {
+  for (const [id, pending] of await scrubs.entries()) {
+    const remaining: PendingSandboxScrub["boxes"] = [];
+    for (const box of pending.boxes) {
+      try {
+        const handle = await sandbox.provision(box.layers, {
+          ...(box.sandboxId ? { sandboxId: box.sandboxId } : {}),
+          ...(box.egress ? { egress: box.egress } : {}),
+        });
+        try {
+          await Promise.all(box.dirs.map((dir) => sandbox.removeDir(handle, dir)));
+        } finally {
+          await sandbox.teardown(handle).catch(swallowAs("orchestrator: pending scrub teardown", undefined));
+        }
+      } catch (err) {
+        swallow(`orchestrator: pending sandbox scrub ${id}`, err);
+        remaining.push(box);
+      }
+    }
+    await (remaining.length ? scrubs.put(id, { ...pending, boxes: remaining }) : scrubs.delete(id));
+  }
+}
 
 export interface TurnSandboxContext {
   deps: OrchestratorDeps;
@@ -143,6 +181,8 @@ export function createTurnSandboxes(ctx: TurnSandboxContext) {
     return guarded;
   };
   const closedError = () => new Error("This turn's sandboxes have already been released");
+  const boxKey = (handle: SandboxHandle) => `${handle.backend}:${handle.id}`;
+  const boxSpecs = new Map<string, Omit<PendingSandboxScrub["boxes"][number], "dirs">>();
   const scratchKey = () => `turn:${session.id}:${transferId}`;
   let scratchStartedAt: number | undefined;
   let scratchReadyAt: number | undefined;
@@ -351,6 +391,11 @@ export function createTurnSandboxes(ctx: TurnSandboxContext) {
       ...(onSandboxStatus ? { onStatus: onSandboxStatus } : {}),
     });
     box.pending = handle;
+    boxSpecs.set(boxKey(handle), {
+      layers: resolution.layers,
+      ...(handle.resourceId ? { sandboxId: handle.resourceId } : {}),
+      egress: resolution.egress,
+    });
     emit("provision", provisionStart, Date.now());
     box.provisionMs = Date.now() - provisionStart;
     deps.auditLog?.record({
@@ -583,6 +628,7 @@ export function createTurnSandboxes(ctx: TurnSandboxContext) {
         ...(egressToken ? { egressToken } : {}),
       });
       resourcePendingHandles.set(id, handle);
+      boxSpecs.set(boxKey(handle), { layers, sandboxId: id, egress });
       if (credentialScopeId) await prepareCredentials(handle, emitGapWork, credentialScopeId);
       if (!crossScope) {
         await prepareCredentials(handle, emitGapWork);
@@ -755,20 +801,18 @@ export function createTurnSandboxes(ctx: TurnSandboxContext) {
     reachBoxes.set(target, handle);
     return handle;
   };
-  const clearTurnFiles = async (handle: SandboxHandle): Promise<void> => {
+  const turnDirsOf = (handle: SandboxHandle) => [turnFilesDir, ...(restoredDirs.get(boxKey(handle)) ?? [])];
+  const clearTurnFiles = async (handle: SandboxHandle): Promise<boolean> => {
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
-        await Promise.all(
-          [turnFilesDir, ...(restoredDirs.get(`${handle.backend}:${handle.id}`) ?? [])].map((dir) =>
-            deps.sandbox.removeDir(handle, dir),
-          ),
-        );
-        return;
+        await Promise.all(turnDirsOf(handle).map((dir) => deps.sandbox.removeDir(handle, dir)));
+        return true;
       } catch (err) {
         if (attempt === 3) swallow("orchestrator: turn file cleanup", err);
         else await sleep(50);
       }
     }
+    return false;
   };
   const prepareTurnFiles = async (handle: SandboxHandle): Promise<void> => {
     const cutoff = Date.now() - TURN_FILES_MAX_AGE_MS;
@@ -801,7 +845,7 @@ export function createTurnSandboxes(ctx: TurnSandboxContext) {
         (!process.sandboxId && process.scopeId === (handle.scopeId ?? fallbackScope)),
     );
   };
-  const reclaimBox = async (): Promise<void> => {
+  const reclaimBox = async (deadline?: AbortSignal): Promise<void> => {
     const startedAt = Date.now();
     const steps: Array<{ step: string; backend?: string; ms: number; ok: boolean }> = [];
     const deferred: string[] = [];
@@ -816,9 +860,8 @@ export function createTurnSandboxes(ctx: TurnSandboxContext) {
         steps.push({ step, ...(handle?.backend ? { backend: handle.backend } : {}), ms: Date.now() - at, ok });
       }
     };
-    try {
-      await reclaimSteps(timed, deferred);
-    } finally {
+    const audit = (scrubPending: boolean) =>
+      (steps.length || deferred.length) &&
       deps.auditLog?.record({
         at: Date.now(),
         principalId: actor.id,
@@ -831,9 +874,29 @@ export function createTurnSandboxes(ctx: TurnSandboxContext) {
           totalMs: Date.now() - startedAt,
           steps,
           deferred,
+          ...(scrubPending ? { scrubPending } : {}),
         }),
       });
+    const { scrubbed, finished, unscrubbed } = reclaimSteps(timed, deferred);
+    let scrubDone = false;
+    void scrubbed.then(() => (scrubDone = true));
+    if (
+      await withAbort(() => finished, deadline).then(
+        () => false,
+        () => true,
+      )
+    ) {
+      const pending = !scrubDone;
+      void finished.then(() => audit(pending));
+      if (pending) {
+        await noteScrubPending([...unscrubbed]);
+        void scrubbed.then(() => noteScrubPending([...unscrubbed]));
+      }
+      return;
     }
+    audit(unscrubbed.size > 0);
+    if (unscrubbed.size) await noteScrubPending([...unscrubbed]);
+    for (const result of await finished) if (result?.status === "rejected") throw result.reason;
   };
   const releaseOwnerAuth = async (): Promise<void> => {
     const handle = ownerAuthBox.handle ?? ownerAuthBox.pending;
@@ -903,10 +966,9 @@ export function createTurnSandboxes(ctx: TurnSandboxContext) {
       return false;
     });
   };
-  const scrubResource = async (handle: SandboxHandle): Promise<void> => {
-    if (handle.scopeId === undefined || handle.scopeId === writableScopeId || handle.scopeId === scopeId)
-      await clearTurnFiles(handle);
-  };
+  const scrubResource = async (handle: SandboxHandle): Promise<boolean> =>
+    !(handle.scopeId === undefined || handle.scopeId === writableScopeId || handle.scopeId === scopeId) ||
+    clearTurnFiles(handle);
   const teardownResource = async (handle: SandboxHandle): Promise<void> => {
     const keepWarm = await hasLiveProcesses(handle, memoryScopeId).catch(() => true);
     await deps.sandbox.teardown(handle, { keepWarm });
@@ -920,15 +982,15 @@ export function createTurnSandboxes(ctx: TurnSandboxContext) {
   };
   const released = new Set<string>();
   const claim = (handle: SandboxHandle): boolean => {
-    const key = `${handle.backend}:${handle.id}`;
+    const key = boxKey(handle);
     if (released.has(key)) return false;
     released.add(key);
     return true;
   };
-  const reclaimSteps = async (
+  const reclaimSteps = (
     timed: <T>(step: string, handle: SandboxHandle | undefined, work: () => Promise<T>) => Promise<T>,
     deferred: string[],
-  ): Promise<void> => {
+  ) => {
     closed = true;
     const later = (step: string, promise: Promise<unknown> | null, release: () => Promise<unknown>): boolean => {
       if (!promise || !inFlight.has(promise)) return false;
@@ -975,24 +1037,43 @@ export function createTurnSandboxes(ctx: TurnSandboxContext) {
     }
     const ownerHandle = ownerLate ? null : (ownerAuthBox.handle ?? ownerAuthBox.pending);
     const scratchHandle = scratchLate ? null : (scratchBox.handle ?? scratchBox.pending);
-    const [owner, scratch] = await Promise.allSettled([
+    const unscrubbed = new Set([...resources, ...(main ? [main] : [])]);
+    const scrub = (step: string, handle: SandboxHandle, work: () => Promise<boolean>) =>
+      timed(step, handle, work).then((done) => void (done && unscrubbed.delete(handle)));
+    const scrubbed = Promise.allSettled([
       ownerHandle && timed("owner_auth_scrub", ownerHandle, releaseOwnerAuth),
       scratchHandle && timed("scratch_destroy", scratchHandle, releaseScratch),
-      ...resources.map((handle) => timed("resource_scrub", handle, () => scrubResource(handle))),
-      main && timed("scrub", main, () => clearTurnFiles(main)),
+      ...resources.map((handle) => scrub("resource_scrub", handle, () => scrubResource(handle))),
+      main && scrub("scrub", main, () => clearTurnFiles(main)),
     ]);
-    const [mainTeardown, ...rest] = await Promise.allSettled([
-      main && timed("teardown", main, () => teardownMain(main, used)),
-      ...resources.map((handle) => timed("resource_teardown", handle, () => teardownResource(handle))),
-      ...reachEntries.map(async ([target, handle]) => {
-        const keepWarm = await liveProcessesOn(handle, target, "orchestrator: reach live process check");
-        await timed("reach_teardown", handle, () =>
-          deps.sandbox.teardown(handle, keepWarm ? { keepWarm: true } : undefined).catch(() => {}),
-        );
-      }),
-    ]);
-    for (const result of rest) if (result.status === "rejected") swallow("resource sandbox release", result.reason);
-    for (const result of [mainTeardown, owner, scratch]) if (result?.status === "rejected") throw result.reason;
+    const finished = scrubbed.then(async ([owner, scratch]) => {
+      const [mainTeardown, ...rest] = await Promise.allSettled([
+        main && timed("teardown", main, () => teardownMain(main, used)),
+        ...resources.map((handle) => timed("resource_teardown", handle, () => teardownResource(handle))),
+        ...reachEntries.map(async ([target, handle]) => {
+          const keepWarm = await liveProcessesOn(handle, target, "orchestrator: reach live process check");
+          await timed("reach_teardown", handle, () =>
+            deps.sandbox.teardown(handle, keepWarm ? { keepWarm: true } : undefined).catch(() => {}),
+          );
+        }),
+      ]);
+      for (const result of rest) if (result.status === "rejected") swallow("resource sandbox release", result.reason);
+      return [mainTeardown, owner, scratch];
+    });
+    return { scrubbed, finished, unscrubbed };
+  };
+  const noteScrubPending = async (handles: readonly SandboxHandle[]): Promise<void> => {
+    if (!deps.sandboxScrubs) return;
+    const id = `${session.id}:${transferId}`;
+    const boxes = handles.map((handle) => ({
+      ...(boxSpecs.get(boxKey(handle)) ?? { layers: resolution.layers }),
+      dirs: turnDirsOf(handle),
+    }));
+    await (
+      boxes.length
+        ? deps.sandboxScrubs.put(id, { createdAt: Date.now(), scopeLabel: scopeId, boxes })
+        : deps.sandboxScrubs.delete(id)
+    ).catch(swallowAs("orchestrator: pending sandbox scrub note", undefined));
   };
 
   return {
