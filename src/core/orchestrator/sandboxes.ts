@@ -49,7 +49,9 @@ export async function finishPendingScrubs(
   sandbox: Pick<Sandbox, "provision" | "removeDir" | "teardown">,
   scrubs: DurableMap<PendingSandboxScrub>,
 ): Promise<void> {
-  for (const [id, pending] of await scrubs.entries()) {
+  for (const [id] of await scrubs.entries()) {
+    const pending = await scrubs.take(id);
+    if (!pending || Date.now() - pending.createdAt > TURN_FILES_MAX_AGE_MS) continue;
     const remaining: PendingSandboxScrub["boxes"] = [];
     for (const box of pending.boxes) {
       try {
@@ -60,14 +62,16 @@ export async function finishPendingScrubs(
         try {
           await Promise.all(box.dirs.map((dir) => sandbox.removeDir(handle, dir)));
         } finally {
-          await sandbox.teardown(handle).catch(swallowAs("orchestrator: pending scrub teardown", undefined));
+          await sandbox
+            .teardown(handle, { keepWarm: true })
+            .catch(swallowAs("orchestrator: pending scrub teardown", undefined));
         }
       } catch (err) {
         swallow(`orchestrator: pending sandbox scrub ${id}`, err);
         remaining.push(box);
       }
     }
-    await (remaining.length ? scrubs.put(id, { ...pending, boxes: remaining }) : scrubs.delete(id));
+    if (remaining.length) await scrubs.put(id, { ...pending, boxes: remaining });
   }
 }
 
@@ -396,6 +400,7 @@ export function createTurnSandboxes(ctx: TurnSandboxContext) {
       ...(handle.resourceId ? { sandboxId: handle.resourceId } : {}),
       egress: resolution.egress,
     });
+    if (closed) throw closedError();
     emit("provision", provisionStart, Date.now());
     box.provisionMs = Date.now() - provisionStart;
     deps.auditLog?.record({
@@ -629,6 +634,7 @@ export function createTurnSandboxes(ctx: TurnSandboxContext) {
       });
       resourcePendingHandles.set(id, handle);
       boxSpecs.set(boxKey(handle), { layers, sandboxId: id, egress });
+      if (closed) throw closedError();
       if (credentialScopeId) await prepareCredentials(handle, emitGapWork, credentialScopeId);
       if (!crossScope) {
         await prepareCredentials(handle, emitGapWork);
@@ -710,6 +716,7 @@ export function createTurnSandboxes(ctx: TurnSandboxContext) {
             );
             ownerAuthBox.pending = handle;
             ownerAuthBox.provisionMs = Date.now() - provisionStart;
+            if (closed) throw closedError();
             if (deps.keychain && isolateOwnerKeychain) {
               const restoredServices = await materializeDeviceFlowLogins({
                 sandbox: deps.sandbox,
@@ -877,7 +884,7 @@ export function createTurnSandboxes(ctx: TurnSandboxContext) {
           ...(scrubPending ? { scrubPending } : {}),
         }),
       });
-    const { scrubbed, finished, unscrubbed } = reclaimSteps(timed, deferred);
+    const { scrubbed, finished } = reclaimSteps(timed, deferred, deadline);
     let scrubDone = false;
     void scrubbed.then(() => (scrubDone = true));
     if (
@@ -889,13 +896,13 @@ export function createTurnSandboxes(ctx: TurnSandboxContext) {
       const pending = !scrubDone;
       void finished.then(() => audit(pending));
       if (pending) {
-        await noteScrubPending([...unscrubbed]);
-        void scrubbed.then(() => noteScrubPending([...unscrubbed]));
+        await noteScrubPending();
+        void scrubbed.then(noteScrubPending);
       }
       return;
     }
     audit(unscrubbed.size > 0);
-    if (unscrubbed.size) await noteScrubPending([...unscrubbed]);
+    if (unscrubbed.size) await noteScrubPending();
     for (const result of await finished) if (result?.status === "rejected") throw result.reason;
   };
   const releaseOwnerAuth = async (): Promise<void> => {
@@ -969,12 +976,12 @@ export function createTurnSandboxes(ctx: TurnSandboxContext) {
   const scrubResource = async (handle: SandboxHandle): Promise<boolean> =>
     !(handle.scopeId === undefined || handle.scopeId === writableScopeId || handle.scopeId === scopeId) ||
     clearTurnFiles(handle);
-  const teardownResource = async (handle: SandboxHandle): Promise<void> => {
-    const keepWarm = await hasLiveProcesses(handle, memoryScopeId).catch(() => true);
+  const teardownResource = async (handle: SandboxHandle, warm: boolean): Promise<void> => {
+    const keepWarm = warm || (await hasLiveProcesses(handle, memoryScopeId).catch(() => true));
     await deps.sandbox.teardown(handle, { keepWarm });
   };
-  const teardownMain = async (handle: SandboxHandle, used: boolean): Promise<void> => {
-    const keepWarm = await liveProcessesOn(handle, memoryScopeId, "orchestrator: live process check");
+  const teardownMain = async (handle: SandboxHandle, used: boolean, warm: boolean): Promise<void> => {
+    const keepWarm = warm || (await liveProcessesOn(handle, memoryScopeId, "orchestrator: live process check"));
     await deps.sandbox.teardown(handle, {
       ...(keepWarm ? { keepWarm: true } : {}),
       ...(used ? {} : { homeUnchanged: true }),
@@ -987,9 +994,18 @@ export function createTurnSandboxes(ctx: TurnSandboxContext) {
     released.add(key);
     return true;
   };
+  const unscrubbed = new Set<SandboxHandle>();
+  let noted = false;
+  const scrubLate = async (handle: SandboxHandle, work: () => Promise<boolean>): Promise<void> => {
+    unscrubbed.add(handle);
+    const done = await work();
+    if (done) unscrubbed.delete(handle);
+    if (!done || noted) await noteScrubPending();
+  };
   const reclaimSteps = (
     timed: <T>(step: string, handle: SandboxHandle | undefined, work: () => Promise<T>) => Promise<T>,
     deferred: string[],
+    deadline: AbortSignal | undefined,
   ) => {
     closed = true;
     const later = (step: string, promise: Promise<unknown> | null, release: () => Promise<unknown>): boolean => {
@@ -1007,20 +1023,21 @@ export function createTurnSandboxes(ctx: TurnSandboxContext) {
     const mainLate = later("provision", provisionInFlight, async () => {
       const handle = takeMain();
       if (!handle) return;
-      await clearTurnFiles(handle);
-      await teardownMain(handle, box.used);
+      await scrubLate(handle, () => clearTurnFiles(handle));
+      await teardownMain(handle, box.used, true);
     });
     const ownerLate = later("owner_auth", ownerAuthProvisionInFlight, releaseOwnerAuth);
     const scratchLate = later("scratch", scratchProvisionInFlight, releaseScratch);
-    for (const [id, promise] of resourcePending)
+    const lateResources = [...resourcePending].filter(([id, promise]) =>
       later("resource", promise, async () => {
         const handle = resourceHandles.get(id) ?? resourcePendingHandles.get(id);
         resourceHandles.delete(id);
         resourcePendingHandles.delete(id);
         if (!handle || !claim(handle)) return;
-        await scrubResource(handle);
-        await teardownResource(handle);
-      });
+        await scrubLate(handle, () => scrubResource(handle));
+        await teardownResource(handle, true);
+      }),
+    );
     ownerAuthProvisionInFlight = null;
     scratchProvisionInFlight = null;
     provisionInFlight = null;
@@ -1030,14 +1047,14 @@ export function createTurnSandboxes(ctx: TurnSandboxContext) {
     const used = box.used;
     const resources: SandboxHandle[] = [];
     for (const [id, handle] of [...resourceHandles, ...resourcePendingHandles]) {
-      if (resourcePending.has(id)) continue;
+      if (lateResources.some(([late]) => late === id)) continue;
       resourceHandles.delete(id);
       resourcePendingHandles.delete(id);
       if (claim(handle)) resources.push(handle);
     }
     const ownerHandle = ownerLate ? null : (ownerAuthBox.handle ?? ownerAuthBox.pending);
     const scratchHandle = scratchLate ? null : (scratchBox.handle ?? scratchBox.pending);
-    const unscrubbed = new Set([...resources, ...(main ? [main] : [])]);
+    for (const handle of [...resources, ...(main ? [main] : [])]) unscrubbed.add(handle);
     const scrub = (step: string, handle: SandboxHandle, work: () => Promise<boolean>) =>
       timed(step, handle, work).then((done) => void (done && unscrubbed.delete(handle)));
     const scrubbed = Promise.allSettled([
@@ -1047,25 +1064,29 @@ export function createTurnSandboxes(ctx: TurnSandboxContext) {
       main && scrub("scrub", main, () => clearTurnFiles(main)),
     ]);
     const finished = scrubbed.then(async ([owner, scratch]) => {
+      const warm = !!deadline?.aborted;
       const [mainTeardown, ...rest] = await Promise.allSettled([
-        main && timed("teardown", main, () => teardownMain(main, used)),
-        ...resources.map((handle) => timed("resource_teardown", handle, () => teardownResource(handle))),
+        main && timed("teardown", main, () => teardownMain(main, used, warm)),
+        ...resources.map((handle) => timed("resource_teardown", handle, () => teardownResource(handle, warm))),
         ...reachEntries.map(async ([target, handle]) => {
-          const keepWarm = await liveProcessesOn(handle, target, "orchestrator: reach live process check");
+          const keepWarm = warm || (await liveProcessesOn(handle, target, "orchestrator: reach live process check"));
           await timed("reach_teardown", handle, () =>
-            deps.sandbox.teardown(handle, keepWarm ? { keepWarm: true } : undefined).catch(() => {}),
-          );
+            deps.sandbox.teardown(handle, keepWarm ? { keepWarm: true } : undefined),
+          ).catch(() => {});
         }),
       ]);
       for (const result of rest) if (result.status === "rejected") swallow("resource sandbox release", result.reason);
       return [mainTeardown, owner, scratch];
     });
-    return { scrubbed, finished, unscrubbed };
+    return { scrubbed, finished };
   };
-  const noteScrubPending = async (handles: readonly SandboxHandle[]): Promise<void> => {
+  const noteScrubPending = async (): Promise<void> => {
     if (!deps.sandboxScrubs) return;
     const id = `${session.id}:${transferId}`;
-    const boxes = handles.map((handle) => ({
+    const current = box.handle ?? box.pending;
+    const handles = new Set([...unscrubbed, ...(current ? [current] : []), ...resourcePendingHandles.values()]);
+    noted = handles.size > 0;
+    const boxes = [...handles].map((handle) => ({
       ...(boxSpecs.get(boxKey(handle)) ?? { layers: resolution.layers }),
       dirs: turnDirsOf(handle),
     }));

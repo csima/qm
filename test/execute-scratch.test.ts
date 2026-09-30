@@ -720,33 +720,55 @@ test("reclaim removes every credential before any teardown and tears boxes down 
 test("a provision that resolves after reclaim scrubs and releases itself without delaying reclaim", async () => {
   const main = Promise.withResolvers<SandboxHandle>();
   const scratch = Promise.withResolvers<SandboxHandle>();
+  const resource = Promise.withResolvers<SandboxHandle>();
   const log: string[] = [];
+  const prepared: string[] = [];
   const { boxes, cleanups } = turnBoxes({
-    provision: (_layers, opts) => (opts?.scratch ? scratch.promise : main.promise),
+    provision: (_layers, opts) => {
+      if (opts?.scratch) return scratch.promise;
+      return opts?.sandboxId ? resource.promise : main.promise;
+    },
     async removeDir(handle, dir) {
       if (dir === ".agent-turn/s/t") log.push(`scrub:${handle.id}`);
     },
-    async listDir() {
+    async listDir(handle) {
+      prepared.push(handle.id);
       return [];
     },
     async teardown(handle, opts) {
-      log.push(`${opts?.destroy ? "destroy" : "teardown"}:${handle.id}`);
+      if (opts?.destroy) log.push(`destroy:${handle.id}`);
+      else log.push(`${opts?.keepWarm ? "teardown" : "paused"}:${handle.id}`);
     },
   });
   const provisioned = boxes.provision();
   const scratched = boxes.provisionScratch();
+  const resourced = boxes.provisionResource({
+    resource: { id: "res-1", ownerScopeId: scopeId("channel", "C1") },
+    crossScope: false,
+    egress: undefined,
+  } as unknown as Parameters<typeof boxes.provisionResource>[0]);
   await boxes.reclaimBox();
   assert.equal(log.length, 0);
-  assert.deepEqual(JSON.parse(cleanups[0]!.detail!).deferred.sort(), ["provision", "scratch"]);
+  assert.deepEqual(JSON.parse(cleanups[0]!.detail!).deferred.sort(), ["provision", "resource", "scratch"]);
   await assert.rejects(boxes.provision(), /already been released/);
   await assert.rejects(boxes.provisionScratch(), /already been released/);
   main.resolve(scopedHandle);
   scratch.resolve(scratchHandle);
+  resource.resolve({ id: "res-box", rootDir: "/workspace", resourceId: "res-1" });
   await assert.rejects(provisioned, /already been released/);
+  await assert.rejects(resourced, /already been released/);
   await assert.rejects(scratched, /already been released/);
-  while (log.length < 3) await new Promise((r) => setImmediate(r));
-  assert.deepEqual([...log].sort(), ["destroy:scratch-box", "scrub:scoped-box", "teardown:scoped-box"]);
+  while (log.length < 5) await new Promise((r) => setImmediate(r));
+  assert.deepEqual([...log].sort(), [
+    "destroy:scratch-box",
+    "scrub:res-box",
+    "scrub:scoped-box",
+    "teardown:res-box",
+    "teardown:scoped-box",
+  ]);
   assert.ok(log.indexOf("scrub:scoped-box") < log.indexOf("teardown:scoped-box"));
+  assert.ok(log.indexOf("scrub:res-box") < log.indexOf("teardown:res-box"));
+  assert.deepEqual(prepared, [], "no credentials or turn files are prepared on a box that arrives after close");
   assert.equal(boxes.box.handle, null);
   assert.equal(boxes.scratchBox.handle, null);
 });
@@ -766,8 +788,8 @@ test("a scrub still running at the handoff deadline is noted durably and cleared
       async listDir() {
         return [];
       },
-      async teardown(handle) {
-        torn.push(handle.id);
+      async teardown(handle, opts) {
+        torn.push(`${handle.id}:${opts?.keepWarm ? "warm" : "paused"}`);
       },
     },
     "turn-a",
@@ -783,15 +805,16 @@ test("a scrub still running at the handoff deadline is noted durably and cleared
   assert.deepEqual(torn, []);
   removal.resolve();
   while (torn.length === 0 || (await scrubs.entries()).length) await new Promise((r) => setImmediate(r));
-  assert.deepEqual(torn, ["scoped-box"]);
+  assert.deepEqual(torn, ["scoped-box:warm"]);
   assert.equal(JSON.parse(cleanups[0]!.detail!).scrubPending, true);
 });
 
 test("a new worker finishes a pending scrub and keeps it while the box is unreachable", async () => {
   const scrubs = createMemoryMap<PendingSandboxScrub>();
   const layers = [{ scopeId: scopeId("channel", "C1"), mode: "rw" as const, mountPath: "" }];
+  await scrubs.put("expired", { createdAt: 1, scopeLabel: "channel:C1", boxes: [{ layers, dirs: ["old"] }] });
   await scrubs.put("session-1:turn-a", {
-    createdAt: 1,
+    createdAt: Date.now(),
     scopeLabel: "channel:C1",
     boxes: [{ layers, sandboxId: "sbx-1", dirs: [".agent-turn/s/t"] }],
   });
@@ -806,15 +829,15 @@ test("a new worker finishes a pending scrub and keeps it while the box is unreac
     async removeDir(_handle: SandboxHandle, dir: string) {
       calls.push(`remove:${dir}`);
     },
-    async teardown() {
-      calls.push("teardown");
+    async teardown(_handle: SandboxHandle, opts?: { keepWarm?: boolean }) {
+      calls.push(`teardown:${opts?.keepWarm}`);
     },
   };
   await finishPendingScrubs(sandbox, scrubs);
   assert.equal((await scrubs.entries()).length, 1);
   reachable = true;
   await finishPendingScrubs(sandbox, scrubs);
-  assert.deepEqual(calls, ["provision:sbx-1", "remove:.agent-turn/s/t", "teardown"]);
+  assert.deepEqual(calls, ["provision:sbx-1", "remove:.agent-turn/s/t", "teardown:true"]);
   assert.equal((await scrubs.entries()).length, 0);
 });
 
