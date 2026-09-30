@@ -7608,6 +7608,9 @@ a.connector-widget:focus-visible {
 .deploy-status.crashed > span {
   background: var(--destructive, #c0392b);
 }
+.deploy-crash {
+  color: var(--destructive, #c0392b);
+}
 .deploy-permission {
   display: inline-flex;
   align-items: center;

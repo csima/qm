@@ -163,20 +163,23 @@ export function createDockerDeployProvider(opts: DockerDeployProviderOptions = {
     },
 
     async runState(d: Deployment): Promise<DeployRunState | null> {
-      const inspected = await dexec(["inspect", "--format", "{{json .State}}", name(d)]);
+      const inspected = await dexec(["inspect", "--format", "{{json .State}}", name(d)], DAEMON_PROBE_TIMEOUT_MS);
       if (inspected.code !== 0) {
         if (/no such (?:object|container)|not found/i.test(inspected.stderr)) return null;
         throw new Error(`docker inspect ${name(d)} failed: ${inspected.stderr.trim()}`);
       }
-      let state: { Running?: boolean; ExitCode?: number; OOMKilled?: boolean; Error?: string };
+      let state: { Running?: boolean; ExitCode?: number; OOMKilled?: boolean };
       try {
         state = JSON.parse(inspected.stdout) as typeof state;
       } catch {
         throw new Error(`docker inspect ${name(d)} returned invalid state`);
       }
       if (state.Running) return { running: true };
-      const detail = state.OOMKilled ? "out of memory" : state.Error || undefined;
-      return { running: false, exitCode: state.ExitCode, ...(detail ? { detail } : {}) };
+      return {
+        running: false,
+        ...(typeof state.ExitCode === "number" ? { exitCode: state.ExitCode } : {}),
+        ...(state.OOMKilled ? { oomKilled: true } : {}),
+      };
     },
   };
 }

@@ -3,182 +3,170 @@ import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createApp } from "../src/api/app.ts";
 import { createDeployStore } from "../src/deploy/deploy-store.ts";
 import { createDeployService } from "../src/deploy/deploy-service.ts";
 import { createAclStore } from "../src/acl/acl-store.ts";
+import { createDirectoryStore } from "../src/directory/directory-store.ts";
+import { createIdentityService } from "../src/identity/identity-service.ts";
+import { createMemorySessionStore } from "../src/sessions/memory-session-store.ts";
 import type { DeployProvider, DeployRunState } from "../src/deploy/deploy-provider.ts";
 import { scopeId } from "../src/types.ts";
 
-function svc(opts: {
-  managedScaleToZero?: boolean;
-  runState?: (id: string) => Promise<DeployRunState | null>;
-  logs?: (id: string) => Promise<string | null>;
-}) {
-  const deployStore = createDeployStore();
-  let runStateCalls = 0;
+function harness(opts: { managedScaleToZero?: boolean; runState?: () => Promise<DeployRunState | null> } = {}) {
+  const container = { alive: true, probes: 0, applies: 0 };
   const provider: DeployProvider = {
     profile: { managedScaleToZero: opts.managedScaleToZero ?? false },
-    apply: async () => ({ host: "127.0.0.1", port: 5000 }),
+    apply: async () => {
+      container.applies++;
+      container.alive = true;
+      return { host: "127.0.0.1", port: 5000 };
+    },
     destroy: async () => {},
-    ...(opts.runState
-      ? {
-          runState: async (d) => {
-            runStateCalls++;
-            return opts.runState!(d.id);
-          },
-        }
-      : {}),
-    ...(opts.logs ? { logs: async (d) => opts.logs!(d.id) } : {}),
+    logs: async () => "boot failed: cannot find module",
+    runState: async () => {
+      container.probes++;
+      if (opts.runState) return opts.runState();
+      return container.alive ? { running: true } : { running: false, exitCode: 7 };
+    },
   };
+  const deployStore = createDeployStore();
+  const acl = createAclStore();
   const deploy = createDeployService({
     deployStore,
     provider,
     auditLog: { record() {}, events: async () => [], tail: async () => [] },
-    acl: createAclStore(),
+    acl,
     deployDir: mkdtempSync(join(tmpdir(), "deploy-crash-")),
   });
-  return {
+  const app = createApp({
     deploy,
-    deployStore,
-    get runStateCalls() {
-      return runStateCalls;
-    },
-  };
+    acl,
+    directory: createDirectoryStore(),
+    sessions: createMemorySessionStore(),
+    identity: createIdentityService(),
+  } as unknown as Parameters<typeof createApp>[0]);
+  const publish = () =>
+    deploy.deploy({ ownerScopeId: scopeId("personal", "U1"), createdBy: "U1", entrypoint: "x", files: [] });
+  return { deploy, deployStore, app, container, publish };
 }
 
-test("getDeployment downgrades a running deployment whose container exited to crashed, with exit code and detail", async () => {
-  const { deploy, deployStore } = svc({ runState: async () => ({ running: false, exitCode: 7 }) });
-  const d = await deploy.deploy({
-    ownerScopeId: scopeId("personal", "U1"),
-    createdBy: "U1",
-    entrypoint: "x",
-    files: [],
-  });
-  assert.equal((await deployStore.get(d.id))!.status, "running");
+const settle = () => new Promise((resolve) => setImmediate(resolve));
 
-  const got = await deploy.getDeployment(d.id);
-  assert.equal(got!.status, "crashed");
-  assert.equal(got!.crash?.exitCode, 7);
+test("an explicit viewer read records an exited container as crashed, keeps its logs, and shows diagnostics only to readers", async () => {
+  const { app, deployStore, container, publish } = harness();
+  const d = await publish();
+  container.alive = false;
+
+  const [seen] = await app.listDeploymentsForViewer("U1");
+  assert.equal(seen?.status, "crashed");
+  assert.equal(seen?.crash?.exitCode, 7);
   assert.equal((await deployStore.get(d.id))!.status, "crashed");
+  assert.deepEqual(await app.deploymentLogsFor(d.id, "U1", { tailLines: 50 }), {
+    status: "ok",
+    logs: "boot failed: cannot find module",
+  });
+  assert.deepEqual(await app.listDeploymentsForViewer("U-stranger"), []);
+  assert.equal((await app.deploymentLogsFor(d.id, "U-stranger", { tailLines: 50 })).status, "denied");
 });
 
-test("listDeployments downgrades every crashed running deployment it observes", async () => {
-  const exited = new Set<string>();
-  const { deploy } = svc({ runState: async (id) => (exited.has(id) ? { running: false, exitCode: 1 } : { running: true }) });
-  const a = await deploy.deploy({ ownerScopeId: scopeId("personal", "U1"), createdBy: "U1", entrypoint: "x", files: [] });
-  const b = await deploy.deploy({ ownerScopeId: scopeId("personal", "U1"), createdBy: "U1", entrypoint: "x", files: [] });
-  exited.add(a.id);
+test("capability auth and internal lookups read the stored row without probing the provider", async () => {
+  const { app, deploy, container, publish } = harness();
+  const d = await publish();
+  container.alive = false;
 
-  const list = await deploy.listDeployments();
-  const ga = list.find((x) => x.id === a.id)!;
-  const gb = list.find((x) => x.id === b.id)!;
-  assert.equal(ga.status, "crashed");
-  assert.equal(gb.status, "running");
-});
-
-test("a provider with no runState signal (container absent) leaves status alone rather than guessing a crash", async () => {
-  const { deploy, deployStore } = svc({ runState: async () => null });
-  const d = await deploy.deploy({ ownerScopeId: scopeId("personal", "U1"), createdBy: "U1", entrypoint: "x", files: [] });
-
-  const got = await deploy.getDeployment(d.id);
-  assert.equal(got!.status, "running");
-  assert.equal((await deployStore.get(d.id))!.status, "running");
-});
-
-test("a provider without runState support is never probed and never downgraded", async () => {
-  const { deploy, deployStore, runStateCalls } = svc({});
-  const d = await deploy.deploy({ ownerScopeId: scopeId("personal", "U1"), createdBy: "U1", entrypoint: "x", files: [] });
-
-  await deploy.getDeployment(d.id);
+  await app.getDeployment(d.id);
+  await app.getDeployment(d.name ?? d.id);
   await deploy.listDeployments();
-  assert.equal(runStateCalls, 0);
-  assert.equal((await deployStore.get(d.id))!.status, "running");
+  await app.reachDeployment(d.id, "U1");
+  assert.equal(container.probes, 0);
+  assert.equal((await app.getDeployment(d.id))!.status, "running");
 });
 
-test("a managed scale-to-zero provider is never probed for crashes (it owns its own running/stopped semantics)", async () => {
-  const { deploy, runStateCalls } = svc({ managedScaleToZero: true, runState: async () => ({ running: false, exitCode: 1 }) });
-  const d = await deploy.deploy({ ownerScopeId: scopeId("personal", "U1"), createdBy: "U1", entrypoint: "x", files: [] });
+test("repeated viewer reads share one bounded probe while the container stays up", async () => {
+  const { app, container, publish } = harness();
+  await publish();
 
-  const got = await deploy.getDeployment(d.id);
-  assert.equal(got!.status, "running");
-  assert.equal(runStateCalls, 0);
+  await Promise.all([app.listDeploymentsForViewer("U1"), app.listDeploymentsForViewer("U1")]);
+  await app.listDeploymentsForViewer("U1");
+  assert.equal(container.probes, 1);
 });
 
-test("a transient run-state probe error preserves the running status rather than false-failing", async () => {
-  const { deploy, deployStore } = svc({
+test("no signal, a transient probe failure, or a managed platform never records a crash", async () => {
+  for (const opts of [
+    { runState: async () => null },
+    {
+      runState: async () => {
+        throw new Error("docker daemon unavailable");
+      },
+    },
+    { managedScaleToZero: true, runState: async () => ({ running: false, exitCode: 1 }) },
+  ]) {
+    const { deploy, deployStore, publish } = harness(opts);
+    const d = await publish();
+    assert.equal((await deploy.refreshRunState(d)).status, "running");
+    assert.equal((await deployStore.get(d.id))!.status, "running");
+  }
+});
+
+test("a stale exited probe cannot mark a same-version restart that finished first as crashed", async () => {
+  let release!: () => void;
+  const stalled = new Promise<void>((resolve) => (release = resolve));
+  const { deploy, deployStore, container, publish } = harness({
     runState: async () => {
-      throw new Error("docker daemon unavailable");
+      const alive = container.alive;
+      if (container.probes === 1) await stalled;
+      return alive ? { running: true } : { running: false, exitCode: 7 };
     },
   });
-  const d = await deploy.deploy({ ownerScopeId: scopeId("personal", "U1"), createdBy: "U1", entrypoint: "x", files: [] });
+  const d = await publish();
+  container.alive = false;
 
-  const got = await deploy.getDeployment(d.id);
-  assert.equal(got!.status, "running");
+  const read = deploy.refreshRunState(d);
+  await deploy.rollbackDeployment(d.id, 1);
+  assert.equal(container.applies, 2);
+  release();
+  const after = await read;
+
+  assert.equal(after.status, "running");
+  assert.equal(after.appliedVersion, 1);
   assert.equal((await deployStore.get(d.id))!.status, "running");
+  assert.equal(container.probes, 2);
 });
 
-test("a concurrent redeploy that lands while a crash is being detected is not clobbered", async () => {
-  let firstProbe = true;
-  const { deploy, deployStore } = svc({
+test("a same-version restart queued behind an in-flight crash record still ends running with the crash cleared", async () => {
+  let release!: () => void;
+  const stalled = new Promise<void>((resolve) => (release = resolve));
+  const { deploy, deployStore, container, publish } = harness({
     runState: async () => {
-      if (firstProbe) {
-        firstProbe = false;
-        return { running: false, exitCode: 9 };
-      }
-      return { running: true };
+      if (container.probes === 2) await stalled;
+      return { running: false, exitCode: 7 };
     },
   });
-  const d = await deploy.deploy({ ownerScopeId: scopeId("personal", "U1"), createdBy: "U1", entrypoint: "x", files: [] });
+  const d = await publish();
+  container.alive = false;
 
-  const staleAppliedVersion = (await deployStore.get(d.id))!.appliedVersion;
-  await deploy.redeploy(d.id, { entrypoint: "y", files: [] });
-  const redeployed = (await deployStore.get(d.id))!;
-  assert.equal(redeployed.status, "running");
-  assert.equal(redeployed.appliedVersion, 2);
+  const read = deploy.refreshRunState(d);
+  while (container.probes < 2) await settle();
+  const restart = deploy.rollbackDeployment(d.id, 1);
+  await settle();
+  assert.equal(container.applies, 1);
+  release();
+  assert.equal((await read).status, "crashed");
+  await restart;
 
-  const changed = await deployStore.setCrash(d.id, staleAppliedVersion, { exitCode: 9, at: Date.now() });
-  assert.equal(changed, false);
-  assert.equal((await deployStore.get(d.id))!.status, "running");
-  assert.equal((await deployStore.get(d.id))!.appliedVersion, 2);
+  const final = (await deployStore.get(d.id))!;
+  assert.equal(final.status, "running");
+  assert.equal(final.crash, undefined);
 });
 
-test("markVersionRunning (redeploy) clears a stale crash marker from a previous version", async () => {
-  const { deploy, deployStore } = svc({ runState: async () => ({ running: false, exitCode: 3 }) });
-  const d = await deploy.deploy({ ownerScopeId: scopeId("personal", "U1"), createdBy: "U1", entrypoint: "x", files: [] });
-  await deploy.getDeployment(d.id);
-  assert.equal((await deployStore.get(d.id))!.status, "crashed");
-
-  const redeployed = await deploy.redeploy(d.id, { entrypoint: "y", files: [] });
-  assert.equal(redeployed.status, "running");
-  assert.equal(redeployed.crash, undefined);
-});
-
-test("deploymentLogs still returns logs for a crashed deployment (logs are preserved, not torn down)", async () => {
-  const { deploy } = svc({
-    runState: async () => ({ running: false, exitCode: 1, detail: "OOMKilled" }),
-    logs: async () => "boot failed: cannot find module",
-  });
-  const d = await deploy.deploy({ ownerScopeId: scopeId("personal", "U1"), createdBy: "U1", entrypoint: "x", files: [] });
-  await deploy.getDeployment(d.id);
-
-  const logs = await deploy.deploymentLogs(d.id, { tailLines: 100 });
-  assert.equal(logs, "boot failed: cannot find module");
-});
-
-test("reachDeployment reports a crashed deployment as not_found instead of proxying to a dead container", async () => {
-  const { deploy } = svc({ runState: async () => ({ running: false, exitCode: 1 }) });
-  const d = await deploy.deploy({ ownerScopeId: scopeId("personal", "U1"), createdBy: "U1", entrypoint: "x", files: [] });
-
-  const reach = await deploy.reachDeployment(d.id, "U1", { bypassAcl: true });
-  assert.equal(reach.status, "not_found");
-});
-
-test("keepAlwaysOnWarm skips a crashed always-on deployment instead of pretending to warm it", async () => {
-  const { deploy, deployStore } = svc({ runState: async () => ({ running: false, exitCode: 1 }) });
-  const d = await deploy.deploy({ ownerScopeId: scopeId("personal", "U1"), createdBy: "U1", entrypoint: "x", files: [] });
+test("keep-warm skips a crashed always-on app instead of reporting it warm", async () => {
+  const { deploy, deployStore, container, publish } = harness();
+  const d = await publish();
   await deploy.setDeploymentAlwaysOn(d.id, true);
+  container.alive = false;
 
-  const warmed = await deploy.keepAlwaysOnWarm();
-  assert.equal(warmed, 0);
+  assert.equal(await deploy.keepAlwaysOnWarm(), 0);
   assert.equal((await deployStore.get(d.id))!.status, "crashed");
+  assert.equal(container.applies, 1);
 });

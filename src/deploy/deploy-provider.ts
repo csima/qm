@@ -18,7 +18,7 @@ export interface DeployReconcileInput {
 export interface DeployRunState {
   running: boolean;
   exitCode?: number;
-  detail?: string;
+  oomKilled?: boolean;
 }
 
 export interface DeployProvider {

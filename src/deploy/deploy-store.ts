@@ -51,7 +51,7 @@ type DeploymentStatus = "running" | "stopped" | "archived" | "crashed";
 
 export interface DeploymentCrash {
   exitCode?: number;
-  detail?: string;
+  oomKilled?: boolean;
   at: number;
 }
 
@@ -112,7 +112,7 @@ export interface DeployStore {
   setCurrentVersion(id: string, version: number): Promise<void>;
   setVersionImage(id: string, version: number, image: string): Promise<void>;
   setStatus(id: string, status: DeploymentStatus): Promise<void>;
-  setCrash(id: string, expectedAppliedVersion: number | undefined, crash: DeploymentCrash | null): Promise<boolean>;
+  setCrashed(id: string, crash: DeploymentCrash): Promise<void>;
   setEndpoint(id: string, endpoint: DeployEndpoint | null): Promise<void>;
   setName(id: string, name: string): Promise<void>;
   setOwnerScope(id: string, ownerScopeId: ScopeId): Promise<void>;
@@ -412,17 +412,8 @@ export function createDeployStore(backing?: DurableMap<Deployment> | DeployStore
         await backingMap.put(id, d);
       }
     },
-    async setCrash(id, expectedAppliedVersion, crash) {
-      const d = await backingMap.get(id);
-      if (!d || d.status !== "running" || d.appliedVersion !== expectedAppliedVersion) return false;
-      if (crash) {
-        d.status = "crashed";
-        d.crash = crash;
-      } else {
-        delete d.crash;
-      }
-      await backingMap.put(id, d);
-      return true;
+    async setCrashed(id, crash) {
+      await backingMap.merge(id, { status: "crashed", crash });
     },
     async setEndpoint(id, endpoint) {
       const d = await backingMap.get(id);
