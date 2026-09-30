@@ -244,11 +244,19 @@ export async function resolvePinnedRuntime(
   const { fastMode, defaultEffortLevel, ...rest } = requested;
   const pinned = parseRuntimeChoice(rest);
   if (!pinned.ok) throw new NonRetryableTurnError(pinned.message);
+  const [orgStored, scopedStored, scopedLegacy] = await Promise.all([
+    config.getRuntimeSelectionDurable(orgScopeId),
+    scope === orgScopeId ? null : config.getRuntimeSelectionDurable(scope),
+    scope === orgScopeId ? null : config.getBaseModelOwnDurable(scope),
+  ]);
+  const inherited =
+    scopedStored && isHarnessId(scopedStored.harnessId)
+      ? scopedStored
+      : !scopedLegacy && orgStored && isHarnessId(orgStored.harnessId)
+        ? orgStored
+        : undefined;
   const saved =
-    pinned.choice.effortLevel === undefined && defaultEffortLevel === undefined
-      ? ((await config.getRuntimeSelectionDurable(scope)) ?? (await config.getRuntimeSelectionDurable(orgScopeId)))
-          ?.effortLevel
-      : undefined;
+    pinned.choice.effortLevel === undefined && defaultEffortLevel === undefined ? inherited?.effortLevel : undefined;
   const effortLevel =
     pinned.choice.effortLevel ??
     (saved === undefined

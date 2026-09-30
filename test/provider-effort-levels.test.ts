@@ -297,4 +297,17 @@ test("a personal-account pinned runtime carries the saved effort and fails when 
     }),
     { harnessId: "claude", modelId: "claude-opus-5-5", effortLevel: "ultracode" },
   );
+  const pin = { harnessId: "claude", modelId: "claude-opus-5-5" } as const;
+  assert.deepEqual(await resolvePinnedRuntime(config, ORG, SCOPE, { ...pin, defaultEffortLevel: "low" }), {
+    ...pin,
+    effortLevel: "low",
+  });
+  await config.setRuntimeSelectionLatest(ORG, runtimeChoice({ ...pin, harnessId: "pi", effortLevel: "adaptive" }));
+  await config.setRuntimeSelectionLatest(SCOPE, runtimeChoice({ harnessId: "pi", modelId: "claude-opus-5-5" }));
+  assert.deepEqual(await resolvePinnedRuntime(config, ORG, SCOPE, pin), pin);
+  await config.setRuntimeSelectionLatest(SCOPE, null);
+  await assert.rejects(resolvePinnedRuntime(config, ORG, SCOPE, pin), /effort adaptive isn't available on claude/);
+  config.setBaseModel(SCOPE, "claude-opus-5-5");
+  await config.flushScope(SCOPE);
+  assert.deepEqual(await resolvePinnedRuntime(config, ORG, SCOPE, pin), pin);
 });
