@@ -130,6 +130,36 @@ test("skill files live only for the turn that loaded them", async () => {
   assert.match((await app.turn({ ...request, text: "!skill helper" } as TurnRequest)).reply ?? "", /no skill file/);
 });
 
+test("a failed turn keeps renewing its session lease until sandbox cleanup finishes", async (t) => {
+  const { app, skills, sandbox, sessions } = freshApp();
+  await publishFileSkill(skills, "lease-helper");
+  let renewals = 0;
+  const renew = sessions.renewLease.bind(sessions);
+  sessions.renewLease = async (...args) => {
+    renewals++;
+    return renew(...args);
+  };
+  let renewedDuringCleanup = 0;
+  const teardown = sandbox.teardown.bind(sandbox);
+  sandbox.teardown = async (...args) => {
+    const before = renewals;
+    t.mock.timers.tick(sessions.leaseTtlMs);
+    renewedDuringCleanup += renewals - before;
+    return teardown(...args);
+  };
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  await assert.rejects(
+    app.turn({
+      surface: "test",
+      actor,
+      conversation: { kind: "dm", threadRef: "dm:U1:lease-cleanup" },
+      text: "!skill-then-boom lease-helper",
+    } as TurnRequest),
+    /simulated fault/,
+  );
+  assert.ok(renewedDuringCleanup > 0, "the lease was renewed while cleanup was still running");
+});
+
 for (const mutation of ["unchanged", "archived", "edited"] as const) {
   test(`a skill load survives handoff with content validation: ${mutation}`, async () => {
     const { app, skills, sandbox } = freshApp();

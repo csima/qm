@@ -4587,8 +4587,11 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         throw err;
       } finally {
         if (input.runId) deps.turnStream?.end(input.runId);
-        stopLeaseKeepalive();
-        if (!tailOwnsCleanup) await reclaimBox();
+        try {
+          if (!tailOwnsCleanup) await reclaimBox();
+        } finally {
+          stopLeaseKeepalive();
+        }
         if (!leaseReleased) {
           await catchUpMessageRevisions();
           await deps.sessions.releaseLease(lease);
