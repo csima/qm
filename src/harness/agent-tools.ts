@@ -1527,7 +1527,12 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
       ),
       model: Type.Optional(Type.String({ description: "open: model override; fails closed if unavailable." })),
       harness: Type.Optional(Type.String({ description: "open: harness override." })),
-      thinkingLevel: Type.Optional(Type.String({ description: "open: reasoning effort override." })),
+      thinkingLevel: Type.Optional(
+        Type.String({
+          description:
+            "open: reasoning effort override. With a model override, an inherited effort that model does not offer is an error, so pass one.",
+        }),
+      ),
       fastMode: Type.Optional(Type.Boolean({ description: "open: fast mode override." })),
       target: Type.Optional(
         Type.String({

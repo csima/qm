@@ -249,10 +249,10 @@ export async function availableRuntimeError(
   input: RuntimeChoiceInput,
   purpose?: RuntimePurpose,
 ): Promise<string | null> {
+  await ctx.deps.refreshModels?.();
   const parsed = parseRuntimeChoice(input);
   if (!parsed.ok) return parsed.message;
   const choice = parsed.choice;
-  await ctx.deps.refreshModels?.();
   const choices = await runtimeConfigBody(ctx, scope, undefined, purpose, choice);
   if (
     !choices.modelsByHarness[choice.harnessId]?.includes(choice.modelId) ||

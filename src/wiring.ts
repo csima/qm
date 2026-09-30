@@ -310,7 +310,7 @@ import { keychainCodexAuthStore, fileCodexAuthStore, type CodexAuthStore } from 
 import { keychainHarnessAuthEnv } from "./credentials/harness-auth-env.ts";
 import { createClaudeHarness, claudeHarnessConfigOptions } from "./harness/claude-harness.ts";
 import { createPiHarness, piHarnessConfigOptions, type ProviderKeys } from "./harness/pi-harness.ts";
-import { createHarnessRouter, resolveRuntimeChoiceDurable } from "./harness/harness-router.ts";
+import { createHarnessRouter, resolvePinnedRuntime, resolveRuntimeChoiceDurable } from "./harness/harness-router.ts";
 import { selectableModelCatalog } from "./model/model-catalog.ts";
 import type { Harness } from "./harness/harness.ts";
 import { createSecurityScreenProxy, type SecurityScreener } from "./security/security-screener.ts";
@@ -392,10 +392,7 @@ import {
   modelProviderAvailabilityFor,
   resolveModel,
   type HarnessId,
-  parseEffort,
-  parseRuntimeChoice,
 } from "./model/pi-models.ts";
-import { NonRetryableTurnError } from "./core/turn-error.ts";
 import { createAdminService, bootAdminGrantSeed, type AdminService } from "./admin/admin-service.ts";
 import { createAdminGrantStore, createMapAdminGrantPersistence, type AdminGrant } from "./admin/admin-grant-store.ts";
 import { createPostgresAdminGrantStore } from "./admin/postgres-admin-grant-store.ts";
@@ -1453,18 +1450,12 @@ export function buildApp(
   const harness = createHarnessRouter(adapters, adapters.get(fallbackHarness)!, async (input) => {
     await refreshModels();
     const requested = input.requestedRuntime;
-    if (input.runtimePinned && requested?.harnessId && requested.modelId) {
-      const { fastMode, defaultEffortLevel, ...rest } = requested;
-      const pinned = parseRuntimeChoice(rest);
-      if (!pinned.ok) throw new NonRetryableTurnError(pinned.message);
-      const effortLevel =
-        pinned.choice.effortLevel ?? parseEffort(pinned.choice.harnessId, pinned.choice.modelId, defaultEffortLevel);
-      return {
-        ...pinned.choice,
-        ...(effortLevel ? { effortLevel } : {}),
-        ...(typeof fastMode === "boolean" ? { fastMode } : {}),
-      };
-    }
+    if (input.runtimePinned && requested?.harnessId && requested.modelId)
+      return resolvePinnedRuntime(configStore, runtimeOrgScope, input.scopeLabel, {
+        ...requested,
+        harnessId: requested.harnessId,
+        modelId: requested.modelId,
+      });
     return resolveRuntimeChoiceDurable(
       configStore,
       runtimeOrgScope,

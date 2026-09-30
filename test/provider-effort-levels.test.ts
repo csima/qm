@@ -13,7 +13,7 @@ import {
 import { builtInModelCatalog } from "../src/model/model-catalog.ts";
 import { codexReasoningEffort } from "../src/harness/codex-harness.ts";
 import { applyTurnEffort } from "../src/harness/pi-harness.ts";
-import { resolveRuntimeChoice } from "../src/harness/harness-router.ts";
+import { resolvePinnedRuntime, resolveRuntimeChoice } from "../src/harness/harness-router.ts";
 import { createRuntimeService } from "../src/harness/runtime-control.ts";
 import { recoveredRuntime } from "../src/harness/runtime-recovery.ts";
 import type { SessionEntry } from "../src/types.ts";
@@ -266,4 +266,35 @@ test("Pi refuses an effort the model does not offer instead of clamping it to a 
   assert.equal(opus46.state.thinkingLevel, "high");
   applyTurnEffort(astra as never, "max");
   assert.equal(astra.state.thinkingLevel, "max");
+});
+
+test("a personal-account pinned runtime carries the saved effort and fails when the pinned runtime does not offer it", async () => {
+  const config = createMemoryConfigStore("default-org");
+  await config.setRuntimeSelectionLatest(
+    SCOPE,
+    runtimeChoice({ harnessId: "pi", modelId: "claude-opus-5-5", effortLevel: "adaptive" }),
+  );
+  await assert.rejects(resolvePinnedRuntime(config, ORG, SCOPE, { harnessId: "claude", modelId: "claude-opus-5-5" }), {
+    message: `effort adaptive isn't available on claude/claude-opus-5-5; choose another effort (valid: ${valid("claude", "claude-opus-5-5")})`,
+  });
+  await config.setRuntimeSelectionLatest(
+    SCOPE,
+    runtimeChoice({ harnessId: "pi", modelId: "claude-opus-5-5", effortLevel: "xhigh" }),
+  );
+  assert.deepEqual(
+    await resolvePinnedRuntime(config, ORG, SCOPE, { harnessId: "claude", modelId: "claude-opus-5-5" }),
+    {
+      harnessId: "claude",
+      modelId: "claude-opus-5-5",
+      effortLevel: "xhigh",
+    },
+  );
+  assert.deepEqual(
+    await resolvePinnedRuntime(config, ORG, SCOPE, {
+      harnessId: "claude",
+      modelId: "claude-opus-5-5",
+      effortLevel: "ultracode",
+    }),
+    { harnessId: "claude", modelId: "claude-opus-5-5", effortLevel: "ultracode" },
+  );
 });

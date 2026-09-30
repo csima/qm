@@ -7,6 +7,7 @@ import {
   modelSupportedByHarness,
   resolveModel,
   parseEffort,
+  parseRuntimeChoice,
   effortNotOfferedMessage,
   modelUnavailableReason,
   type EffortLevel,
@@ -232,6 +233,32 @@ export function resolveRuntimeChoice(
       ? parseEffort(target.harnessId, target.modelId, defaultEffortLevel)
       : resolvedEffort(target, overrides.effortLevel, base);
   return normalizeRuntimeChoice(target, effort);
+}
+
+export async function resolvePinnedRuntime(
+  config: ScopedConfigStore,
+  orgScopeId: ScopeId,
+  scope: ScopeId,
+  requested: RequestedRuntime & { harnessId: HarnessId; modelId: string },
+): Promise<RuntimeChoice> {
+  const { fastMode, defaultEffortLevel, ...rest } = requested;
+  const pinned = parseRuntimeChoice(rest);
+  if (!pinned.ok) throw new NonRetryableTurnError(pinned.message);
+  const saved =
+    pinned.choice.effortLevel === undefined && defaultEffortLevel === undefined
+      ? ((await config.getRuntimeSelectionDurable(scope)) ?? (await config.getRuntimeSelectionDurable(orgScopeId)))
+          ?.effortLevel
+      : undefined;
+  const effortLevel =
+    pinned.choice.effortLevel ??
+    (saved === undefined
+      ? parseEffort(pinned.choice.harnessId, pinned.choice.modelId, defaultEffortLevel)
+      : resolvedEffort(pinned.choice, undefined, { ...pinned.choice, effortLevel: saved }));
+  return {
+    ...pinned.choice,
+    ...(effortLevel ? { effortLevel } : {}),
+    ...(typeof fastMode === "boolean" ? { fastMode } : {}),
+  };
 }
 
 export async function resolveRuntimeChoiceDurable(
