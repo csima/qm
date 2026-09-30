@@ -668,6 +668,44 @@ test("scratch provisioning is singleflight within a turn and isolated across tur
   assert.ok(!JSON.stringify(first.events).includes("scope-capability"));
 });
 
+test("reclaim removes every credential before any teardown and tears boxes down in parallel", async () => {
+  const log: string[] = [];
+  const gate = Promise.withResolvers<void>();
+  const { boxes } = turnBoxes({
+    async provision(layers, opts) {
+      if (opts?.scratch) return { ...scratchHandle, backend: "e2b" };
+      return {
+        ...scopedHandle,
+        id: layers.some((layer) => layer.scopeId === scopeId("channel", "C2")) ? "reach-box" : "scoped-box",
+        backend: "e2b",
+      };
+    },
+    async removeDir(handle, dir) {
+      if (dir === ".agent-turn/s/t") log.push(`scrub:${handle.id}`);
+    },
+    async listDir() {
+      return [];
+    },
+    async teardown(handle, opts) {
+      if (opts?.destroy) return void log.push(`destroy:${handle.id}`);
+      log.push(`teardown:${handle.id}`);
+      await gate.promise;
+      log.push(`paused:${handle.id}`);
+    },
+  });
+  await boxes.provision();
+  await boxes.provisionScratch();
+  await boxes.provisionForReach(scopeId("channel", "C2"));
+  const reclaim = boxes.reclaimBox();
+  while (log.filter((entry) => entry.startsWith("teardown:")).length < 2) await new Promise((r) => setImmediate(r));
+  gate.resolve();
+  await reclaim;
+  const firstTeardown = log.findIndex((entry) => entry.startsWith("teardown:"));
+  assert.ok(log.indexOf("scrub:scoped-box") >= 0 && log.indexOf("scrub:scoped-box") < firstTeardown, log.join());
+  assert.ok(log.indexOf("destroy:scratch-box") >= 0 && log.indexOf("destroy:scratch-box") < firstTeardown, log.join());
+  assert.deepEqual(log.slice(firstTeardown, firstTeardown + 2).sort(), ["teardown:reach-box", "teardown:scoped-box"]);
+});
+
 test("reclaim waits for in-flight scratch creation before destroying its handle", async () => {
   const ready = Promise.withResolvers<SandboxHandle>();
   const destroyed: string[] = [];

@@ -798,152 +798,140 @@ export function createTurnSandboxes(ctx: TurnSandboxContext) {
       });
     }
   };
+  const releaseOwnerAuth = async (): Promise<void> => {
+    const handle = ownerAuthBox.handle ?? ownerAuthBox.pending;
+    if (!handle) return;
+    try {
+      await scrubOwnerAuthHandle(handle).catch((scrubErr) => {
+        deps.errors?.record(
+          {
+            category: "sandbox",
+            code: "owner_auth_scrub_failed",
+            message: errMessage(scrubErr),
+            scopeLabel: scopeId,
+            sessionId: session.id,
+          },
+          scrubErr,
+        );
+      });
+      await destroyEphemeralHandle(handle);
+      ownerAuthBox.handle = null;
+      ownerAuthBox.pending = null;
+    } catch (err) {
+      deps.errors?.record(
+        {
+          category: "sandbox",
+          code: "owner_auth_destroy_failed",
+          message: errMessage(err),
+          scopeLabel: scopeId,
+          sessionId: session.id,
+        },
+        err,
+      );
+      throw err;
+    }
+  };
+  const releaseScratch = async (): Promise<void> => {
+    const handle = scratchBox.handle ?? scratchBox.pending;
+    if (!handle) return;
+    const cleanupStart = Date.now();
+    try {
+      await destroyEphemeralHandle(handle);
+    } catch {
+      const error = new Error("Disposable sandbox destruction failed");
+      recordScratchLifecycle("release_failed", handle, {
+        releasedAt: Date.now(),
+        cleanupMs: Date.now() - cleanupStart,
+      });
+      deps.errors?.record(
+        {
+          category: "sandbox",
+          code: "scratch_destroy_failed",
+          message: "Disposable sandbox destruction failed",
+          scopeLabel: scopeId,
+          sessionId: session.id,
+        },
+        error,
+      );
+      throw error;
+    }
+    scratchBox.handle = null;
+    scratchBox.pending = null;
+    recordScratchLifecycle("released", handle, { releasedAt: Date.now(), cleanupMs: Date.now() - cleanupStart });
+  };
+  const liveProcessesOn = async (handle: SandboxHandle, fallbackScope: ScopeId, label: string): Promise<boolean> => {
+    if (!deps.processes || !supportsProcessSessions(deps.sandbox)) return false;
+    return hasLiveProcesses(handle, fallbackScope).catch((e) => {
+      swallow(label, e);
+      return false;
+    });
+  };
+  const scrubResource = async (handle: SandboxHandle): Promise<void> => {
+    if (handle.scopeId === undefined || handle.scopeId === writableScopeId || handle.scopeId === scopeId)
+      await clearTurnFiles(handle);
+  };
+  const teardownResource = async (handle: SandboxHandle): Promise<void> => {
+    const keepWarm = await hasLiveProcesses(handle, memoryScopeId).catch(() => true);
+    await deps.sandbox.teardown(handle, { keepWarm });
+  };
+  const teardownMain = async (handle: SandboxHandle, used: boolean): Promise<void> => {
+    const keepWarm = await liveProcessesOn(handle, memoryScopeId, "orchestrator: live process check");
+    await deps.sandbox.teardown(handle, {
+      ...(keepWarm ? { keepWarm: true } : {}),
+      ...(used ? {} : { homeUnchanged: true }),
+    });
+  };
   const reclaimSteps = async (
     timed: <T>(step: string, handle: SandboxHandle | undefined, work: () => Promise<T>) => Promise<T>,
   ): Promise<void> => {
-    let ownerCleanupError: unknown;
-    let scratchCleanupError: unknown;
-    if (ownerAuthProvisionInFlight)
-      await timed("owner_auth_provision_wait", undefined, () => ownerAuthProvisionInFlight!.catch(() => {}));
+    await Promise.all([
+      ownerAuthProvisionInFlight &&
+        timed("owner_auth_provision_wait", undefined, () => ownerAuthProvisionInFlight!.catch(() => {})),
+      scratchProvisionInFlight &&
+        timed("scratch_provision_wait", undefined, () => scratchProvisionInFlight!.catch(() => {})),
+      resourcePending.size &&
+        timed("resource_provision_wait", undefined, () => Promise.allSettled(resourcePending.values())),
+      provisionInFlight && timed("provision_wait", undefined, () => provisionInFlight!.catch(() => {})),
+    ]);
     ownerAuthProvisionInFlight = null;
+    scratchProvisionInFlight = null;
+    provisionInFlight = null;
     const reachEntries = [...reachBoxes.entries()];
     reachBoxes.clear();
-    await Promise.all(
-      reachEntries.map(async ([target, h]) => {
-        let keepReachWarm = false;
-        if (deps.processes && supportsProcessSessions(deps.sandbox)) {
-          try {
-            keepReachWarm = await hasLiveProcesses(h, target);
-          } catch (e) {
-            swallow("orchestrator: reach live process check", e);
-            keepReachWarm = false;
-          }
-        }
-        await timed("reach_teardown", h, () =>
-          deps.sandbox.teardown(h, keepReachWarm ? { keepWarm: true } : undefined).catch(() => {}),
-        );
-      }),
-    );
-    const ownerHandle = ownerAuthBox.handle ?? ownerAuthBox.pending;
-    if (ownerHandle) {
-      try {
-        await timed("owner_auth_scrub", ownerHandle, async () => {
-          await scrubOwnerAuthHandle(ownerHandle).catch((scrubErr) => {
-            deps.errors?.record(
-              {
-                category: "sandbox",
-                code: "owner_auth_scrub_failed",
-                message: errMessage(scrubErr),
-                scopeLabel: scopeId,
-                sessionId: session.id,
-              },
-              scrubErr,
-            );
-          });
-          await destroyEphemeralHandle(ownerHandle);
-        });
-        ownerAuthBox.handle = null;
-        ownerAuthBox.pending = null;
-      } catch (err) {
-        ownerCleanupError = err;
-        deps.errors?.record(
-          {
-            category: "sandbox",
-            code: "owner_auth_destroy_failed",
-            message: errMessage(err),
-            scopeLabel: scopeId,
-            sessionId: session.id,
-          },
-          err,
-        );
-      }
-    }
-    if (scratchProvisionInFlight)
-      await timed("scratch_provision_wait", undefined, () => scratchProvisionInFlight!.catch(() => {}));
-    scratchProvisionInFlight = null;
-    const scratchHandle = scratchBox.handle ?? scratchBox.pending;
-    if (scratchHandle) {
-      const cleanupStart = Date.now();
-      try {
-        await timed("scratch_destroy", scratchHandle, () => destroyEphemeralHandle(scratchHandle));
-        scratchBox.handle = null;
-        scratchBox.pending = null;
-        recordScratchLifecycle("released", scratchHandle, {
-          releasedAt: Date.now(),
-          cleanupMs: Date.now() - cleanupStart,
-        });
-      } catch {
-        scratchCleanupError = new Error("Disposable sandbox destruction failed");
-        recordScratchLifecycle("release_failed", scratchHandle, {
-          releasedAt: Date.now(),
-          cleanupMs: Date.now() - cleanupStart,
-        });
-        deps.errors?.record(
-          {
-            category: "sandbox",
-            code: "scratch_destroy_failed",
-            message: "Disposable sandbox destruction failed",
-            scopeLabel: scopeId,
-            sessionId: session.id,
-          },
-          scratchCleanupError,
-        );
-      }
-    }
-    if (resourcePending.size)
-      await timed("resource_provision_wait", undefined, () => Promise.allSettled(resourcePending.values()));
-    const released = new Set<string>();
-    const current = box.handle ?? box.pending;
-    const releases: Promise<void>[] = [];
-    for (const handle of [...resourceHandles.values(), ...resourcePendingHandles.values()]) {
-      const key = `${handle.backend}:${handle.id}`;
-      if (released.has(key) || (current?.id === handle.id && current.backend === handle.backend)) continue;
-      released.add(key);
-      releases.push(
-        (async () => {
-          try {
-            if (handle.scopeId === undefined || handle.scopeId === writableScopeId || handle.scopeId === scopeId)
-              await timed("resource_scrub", handle, () => clearTurnFiles(handle));
-          } finally {
-            const keepWarm = await hasLiveProcesses(handle, memoryScopeId).catch(() => true);
-            await timed("resource_teardown", handle, () => deps.sandbox.teardown(handle, { keepWarm }));
-          }
-        })(),
-      );
-    }
-    const releasedResults = await Promise.allSettled(releases);
-    for (const result of releasedResults)
-      if (result.status === "rejected") swallow("resource sandbox release", result.reason);
-    resourceHandles.clear();
-    resourcePendingHandles.clear();
-    if (provisionInFlight) await timed("provision_wait", undefined, () => provisionInFlight!.catch(() => {}));
-    provisionInFlight = null;
-    const handle = box.handle ?? box.pending;
+    const main = box.handle ?? box.pending;
+    const used = box.used;
     box.handle = null;
     box.pending = null;
-    if (!handle) {
-      if (ownerCleanupError) throw ownerCleanupError;
-      if (scratchCleanupError) throw scratchCleanupError;
-      return;
+    const released = new Set<string>();
+    const resources: SandboxHandle[] = [];
+    for (const handle of [...resourceHandles.values(), ...resourcePendingHandles.values()]) {
+      const key = `${handle.backend}:${handle.id}`;
+      if (released.has(key) || (main?.id === handle.id && main.backend === handle.backend)) continue;
+      released.add(key);
+      resources.push(handle);
     }
-    await timed("scrub", handle, () => clearTurnFiles(handle));
-    let keepWarm = false;
-    if (deps.processes && supportsProcessSessions(deps.sandbox)) {
-      try {
-        keepWarm = await hasLiveProcesses(handle, memoryScopeId);
-      } catch (e) {
-        swallow("orchestrator: live process check", e);
-        keepWarm = false;
-      }
-    }
-    await timed("teardown", handle, () =>
-      deps.sandbox.teardown(handle, {
-        ...(keepWarm ? { keepWarm: true } : {}),
-        ...(box.used ? {} : { homeUnchanged: true }),
+    resourceHandles.clear();
+    resourcePendingHandles.clear();
+    const ownerHandle = ownerAuthBox.handle ?? ownerAuthBox.pending;
+    const scratchHandle = scratchBox.handle ?? scratchBox.pending;
+    const [owner, scratch] = await Promise.allSettled([
+      ownerHandle && timed("owner_auth_scrub", ownerHandle, releaseOwnerAuth),
+      scratchHandle && timed("scratch_destroy", scratchHandle, releaseScratch),
+      ...resources.map((handle) => timed("resource_scrub", handle, () => scrubResource(handle))),
+      main && timed("scrub", main, () => clearTurnFiles(main)),
+    ]);
+    const [mainTeardown, ...rest] = await Promise.allSettled([
+      main && timed("teardown", main, () => teardownMain(main, used)),
+      ...resources.map((handle) => timed("resource_teardown", handle, () => teardownResource(handle))),
+      ...reachEntries.map(async ([target, handle]) => {
+        const keepWarm = await liveProcessesOn(handle, target, "orchestrator: reach live process check");
+        await timed("reach_teardown", handle, () =>
+          deps.sandbox.teardown(handle, keepWarm ? { keepWarm: true } : undefined).catch(() => {}),
+        );
       }),
-    );
-    if (ownerCleanupError) throw ownerCleanupError;
-    if (scratchCleanupError) throw scratchCleanupError;
+    ]);
+    for (const result of rest) if (result.status === "rejected") swallow("resource sandbox release", result.reason);
+    for (const result of [mainTeardown, owner, scratch]) if (result?.status === "rejected") throw result.reason;
   };
 
   return {
