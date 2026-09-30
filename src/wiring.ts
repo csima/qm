@@ -2929,6 +2929,7 @@ export function serverDeps(
         }
       : {}),
     allowUnauthenticatedCore: config.allowUnauthenticatedCore,
+    ...(config.spendExportToken ? { spendExportToken: config.spendExportToken } : {}),
     ...(config.signingSecret ? { signingSecret: config.signingSecret } : {}),
     ...(config.capabilitySecret ? { capabilitySecret: config.capabilitySecret } : {}),
     capabilityTokenCompression: config.capabilityTokenCompression,
