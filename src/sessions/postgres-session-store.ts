@@ -1131,7 +1131,7 @@ export function createPostgresSessionStore(connectionString: string, opts: Store
     },
 
     async getContextWindow(sessionId) {
-      const [meta, summary] = await Promise.all([
+      const [meta, summary, memoryContext] = await Promise.all([
         q(
           `SELECT count(*)::int AS total,
                   bool_or((payload::jsonb -> 'securityTainted') = 'true'::jsonb) AS taint
@@ -1148,6 +1148,10 @@ export function createPostgresSessionStore(connectionString: string, opts: Store
             ORDER BY seq DESC LIMIT 1`,
           [sessionId],
         ),
+        q(
+          "SELECT * FROM session_entries WHERE session_id = $1 AND ((type = 'system' AND payload::jsonb ->> 'kind' = 'memory_context') OR (type = 'user' AND payload::jsonb -> 'memoryContext' ->> 'kind' = 'memory_context')) ORDER BY seq DESC LIMIT 1",
+          [sessionId],
+        ),
       ]);
       const through = summary[0]?.through;
       const sinceSeq = typeof through === "number" ? through + 1 : 0;
@@ -1156,7 +1160,10 @@ export function createPostgresSessionStore(connectionString: string, opts: Store
         sinceSeq,
       ]);
       return {
-        entries: rows.map(rowToEntry),
+        entries: [
+          ...(memoryContext[0] && Number(memoryContext[0].seq) < sinceSeq ? [rowToEntry(memoryContext[0])] : []),
+          ...rows.map(rowToEntry),
+        ],
         totalEntries: Number(meta[0]?.total ?? 0),
         hasSecurityTaint: meta[0]?.taint === true,
       };
