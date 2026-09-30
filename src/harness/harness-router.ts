@@ -249,12 +249,8 @@ export async function resolvePinnedRuntime(
     scope === orgScopeId ? null : config.getRuntimeSelectionDurable(scope),
     scope === orgScopeId ? null : config.getBaseModelOwnDurable(scope),
   ]);
-  const inherited =
-    scopedStored && isHarnessId(scopedStored.harnessId)
-      ? scopedStored
-      : !scopedLegacy && orgStored && isHarnessId(orgStored.harnessId)
-        ? orgStored
-        : undefined;
+  const orgInherited = !scopedLegacy && orgStored && isHarnessId(orgStored.harnessId) ? orgStored : undefined;
+  const inherited = scopedStored && isHarnessId(scopedStored.harnessId) ? scopedStored : orgInherited;
   const saved =
     pinned.choice.effortLevel === undefined && defaultEffortLevel === undefined ? inherited?.effortLevel : undefined;
   const effortLevel =
