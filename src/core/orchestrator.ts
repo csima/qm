@@ -1,6 +1,7 @@
 import { externalSlackRequestAllowed, currentExternalSlackRun } from "../resolution/external-slack.ts";
 import { externalTools } from "./orchestrator/external-tools.ts";
 import { isBackendCredential } from "../credentials/keychain.ts";
+import { resolveBrowserModel } from "../model/browser-model.ts";
 import { memoryRecallDelta } from "../memory/recall-delta.ts";
 import { requiresDelegation, delegatedAuthorizationOrigin } from "../sessions/session-syscalls.ts";
 import {
@@ -77,6 +78,7 @@ import {
   CAPABILITY_TTL_MS,
   SANDBOX_CAPABILITY_TTL_MS,
   CONTROL_PLANE_AUD,
+  BROWSER_MODEL_AUD,
   OAUTH_CONSENT_AUD,
   CREDENTIAL_BROKER_AUD,
   EGRESS_PROXY_AUD,
@@ -172,7 +174,7 @@ import { randomUUID } from "node:crypto";
 import { LRUCache } from "lru-cache";
 import type { SkillResolution } from "../skills/skill-store.ts";
 import type { Orchestrator, OrchestratorDeps, OrchestratorInput } from "./orchestrator/types.ts";
-import { isHarnessId, resolveModel, CODEX_SUBSCRIPTION_PROVIDER } from "../model/pi-models.ts";
+import { isHarnessId, CODEX_SUBSCRIPTION_PROVIDER } from "../model/pi-models.ts";
 import type { ProviderKeys } from "../harness/pi-harness.ts";
 import type { CodexTurnAuth } from "../harness/harness.ts";
 import { resolveIndividualAuthRouting } from "./individual-auth-routing.ts";
@@ -231,11 +233,6 @@ const ACTIVITY_ENTRY_TYPES = new Set<EntryType>([
   "approval_request",
   "approval_resolved",
 ]);
-
-function knownBrowseModel(id: string | null | undefined): { id: string; provider: string } | undefined {
-  const provider = id ? resolveModel(id)?.provider : undefined;
-  return id && provider ? { id, provider } : undefined;
-}
 
 const SHARED_CORE_MD = loadProtocolFile("shared-core");
 const MODE_CONVERSATION_MD = loadProtocolFile("mode-conversation");
@@ -643,7 +640,12 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         return result;
       };
       const mirrorRunActivity = async (appended: SessionEntry): Promise<void> => {
-        if (input.runId && deps.runActivity && ACTIVITY_ENTRY_TYPES.has(appended.type)) {
+        if (
+          input.runId &&
+          deps.runActivity &&
+          (ACTIVITY_ENTRY_TYPES.has(appended.type) ||
+            (appended.type === "user" && (appended.payload as { steered?: boolean })?.steered === true))
+        ) {
           await deps.runActivity
             .append(input.runId, {
               seq: appended.seq,
@@ -1249,7 +1251,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
       turnContextBlocks.push(computerBlock);
       if (!external && deps.scratchExec) {
         systemPrompt +=
-          '\n\nSelect a sandbox explicitly or use a stored default. The opt-in scratch box (scope:"scratch") is separate: same OS and tooling, org-global files only, no logins or tokens, wiped after the turn — prefer it for heavy self-contained runs that need no logins, workspace files, or follow-up; it keeps this computer responsive.';
+          '\n\nSelect a sandbox explicitly or use a stored default. The opt-in scratch box (scope:"scratch") is separate: same OS/tooling, read-only org-global files, this conversation\'s scoped Files/API capabilities, and credentials explicitly requested per execute call. Its local files are wiped after the turn, and resident workspace files and cached CLI logins are not restored. Use it for self-contained commands and API work; publish needed outputs to Files and verify success. Use scoped execution for existing workspace state or work that must continue locally.';
       }
       if (!external && deps.deploymentLayer?.hints.length) {
         systemPrompt += `\n\n## Deployment tool hints\n${deps.deploymentLayer.hints.map((hint) => `- ${hint}`).join("\n")}`;
@@ -1604,17 +1606,26 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         const browseSteps = deps.config?.getBrowseMaxSteps(toScopeId("org", orgId()));
         if (browseSteps && !("BROWSE_LAB_MAX_STEPS" in connectorEnv))
           connectorEnv.BROWSE_LAB_MAX_STEPS = String(browseSteps);
-        const browseChoice =
-          knownBrowseModel(deps.config?.getBrowseModel(toScopeId("org", orgId()))) ??
-          knownBrowseModel(deps.resolveBaseModelId?.());
-        if (browseChoice && !("BROWSE_LAB_MODEL" in connectorEnv)) {
-          connectorEnv.BROWSE_LAB_MODEL = browseChoice.id;
-          connectorEnv.BROWSE_LAB_MODEL_PROVIDER = browseChoice.provider;
-        }
+      }
+      const browserSelection =
+        !strictReadOnly && allInternal
+          ? await resolveBrowserModel({
+              actorId: actor.id,
+              config: deps.config,
+              credentials: deps.userModelCredentials,
+              companyModel: deps.resolveBaseModelId?.(),
+            })
+          : undefined;
+      const managedBrowse = browserSelection;
+      if (managedBrowse) {
+        connectorEnv.BROWSE_LAB_MODEL_PROVIDER = "managed";
+        connectorEnv.BROWSE_LAB_MODEL = browserSelection.model ?? "unavailable";
       }
       let actorIsOrgAdmin = false;
       let orgMemoryWrite: ScopeId | undefined;
       let controlClaims: CapabilityClaims | undefined;
+      const sandboxTokenTtlMs = deps.sandboxCapabilityTtlMs ?? SANDBOX_CAPABILITY_TTL_MS;
+      const sandboxTokenExpiry = sandboxTokenTtlMs === 0 ? 0 : Date.now() + sandboxTokenTtlMs;
       const scopeAttestation = {
         ...(external ? { externalSlack: true as const } : {}),
         actorId: actor.id,
@@ -1655,7 +1666,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
             (input.origin.kind === "automation" && input.origin.useOwnerKeychain === true))
             ? { ownerConnections: true }
             : {}),
-          exp: Date.now() + SANDBOX_CAPABILITY_TTL_MS,
+          exp: sandboxTokenExpiry,
           ...(turnTimezone ? { timezone: turnTimezone } : {}),
           ...(destination ? { destination } : {}),
           ...(delivery.candidates.length > 0 ? { destinations: delivery.candidates } : {}),
@@ -1684,11 +1695,24 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           deps.capabilitySecret ?? deps.signingSecret,
           deps.capabilityTokenCompression,
         );
+        if (managedBrowse) {
+          connectorEnv.BROWSE_LAB_BASE_URL = `${deps.apiBaseUrl.replace(/\/+$/, "")}/v1/browser-model`;
+          connectorEnv.BROWSE_LAB_MODEL_TOKEN = await mintCapabilityToken(
+            {
+              ...scopeAttestation,
+              aud: BROWSER_MODEL_AUD,
+              browserModel: browserSelection.model ?? "unavailable",
+              browserAccount: browserSelection.account,
+              exp: Date.now() + CAPABILITY_TTL_MS,
+            },
+            deps.capabilitySecret ?? deps.signingSecret,
+          );
+        }
         connectorEnv.AGENT_OAUTH_CONSENT_TOKEN = await mintCapabilityToken(
           {
             ...scopeAttestation,
             aud: OAUTH_CONSENT_AUD,
-            exp: Date.now() + SANDBOX_CAPABILITY_TTL_MS,
+            exp: sandboxTokenExpiry,
           },
           deps.capabilitySecret ?? deps.signingSecret,
           deps.capabilityTokenCompression,
@@ -1705,8 +1729,10 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
             if (slugs.length > 0) {
               const usable = records.filter((r) => slugs.includes(r.slug));
               const lines = usable.map((r) => {
-                const methods = r.allowedMethods?.length ? r.allowedMethods.join("/") : "GET";
-                const paths = r.allowedPathPrefixes?.length ? `paths ${r.allowedPathPrefixes.join(", ")}` : "any path";
+                const methods = r.allowedMethods?.length ? r.allowedMethods.toSorted().join("/") : "GET";
+                const paths = r.allowedPathPrefixes?.length
+                  ? `paths ${r.allowedPathPrefixes.toSorted().join(", ")}`
+                  : "any path";
                 return `- \`${r.slug}\` (${r.name}; shared org credential) → ${r.host} (${methods}; ${paths})`;
               });
               sharedCredsBlock =
@@ -1733,7 +1759,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
                 "If the intended account is unclear before a write, clarify it rather than silently switching accounts. " +
                 "A non-2xx `status` is the UPSTREAM service's own answer (e.g. a bad query or its auth), not a broker " +
                 "error. Use ONLY these (slug → host; allowed methods; allowed paths):\n" +
-                lines.join("\n");
+                lines.sort().join("\n");
             }
           }
         }
@@ -1746,7 +1772,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
             ...scopeAttestation,
             aud: EGRESS_PROXY_AUD,
             egress: egressClaimAllowingControlPlane(egress, deps.apiBaseUrl ?? "", securityPolicy.denyPrivateNetworks),
-            exp: Date.now() + SANDBOX_CAPABILITY_TTL_MS,
+            exp: sandboxTokenExpiry,
           },
           egressSecret,
           deps.capabilityTokenCompression,
@@ -1800,7 +1826,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
                     }
                   : {}),
                 credentials: brokerSlugs,
-                exp: Date.now() + SANDBOX_CAPABILITY_TTL_MS,
+                exp: sandboxTokenExpiry,
               },
               (deps.capabilitySecret ?? deps.signingSecret)!,
               deps.capabilityTokenCompression,
@@ -2246,7 +2272,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         if (credentialDescriptions.length)
           systemPrompt +=
             "\n\n## Execution credentials\nRequest exact handles in execute.credentials:\n" +
-            credentialDescriptions.join("\n");
+            credentialDescriptions.sort().join("\n");
         systemPrompt += sharedCredsBlock;
         if (actorIsOrgAdmin) {
           systemPrompt +=
@@ -2255,7 +2281,8 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
             (orgMemoryWrite
               ? ', and for plain "remember this org-wide" requests the lighter path is `"scope":"org"` on the memory self-API (memory skill)'
               : "") +
-            ". You're acting as them: confirm before any mutation, and say exactly what you changed. Hard limits the API enforces: private-content reads require a DM or an Open conversation on a live admin turn (organization, personal, and conversation sharing restrictions all apply); admin grant changes and impersonation are portal-only. Open admin reads can expose private data to everyone in the conversation: retrieve and report only what the request needs.";
+            ". You're acting as them: confirm before any mutation, and say exactly what you changed. Hard limits the API enforces: private-content reads require a DM or an Open conversation on a live admin turn (organization, personal, and conversation sharing restrictions all apply); admin grant changes and impersonation are portal-only. Open admin reads can expose private data to everyone in the conversation: retrieve and report only what the request needs." +
+            " System administration is not limited to the admin dashboard. Use the admin's independently authorized infrastructure or provider access to diagnose, repair, and manage this instance, including resources owned by other users. Ordinary resource-owner restrictions do not by themselves prohibit that administrative work or require the resource owner to do it. An owner-only API denial is not a denial of separately authorized system administration; verify that authority before taking another route. Using that independently authorized access as the admin is not impersonation or circumvention. Credential grants, provider permissions, explicit restrictions (including the portal-only actions above), mutation approvals, and audience privacy still apply. Keep actions attributed to the admin; never borrow another user's identity or credentials without authorization. Follow the admin and cloud-cli skills.";
         }
         if (deps.signingSecret && deps.apiBaseUrl && (deps.crons || deps.webhooks || deps.monitors)) {
           const nowMs = Date.now();
@@ -2328,12 +2355,11 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
             ...(audienceMembers.some((p) => samePerson(p.id, actor.id)) ? [] : [actor]),
             ...audienceMembers,
           ].map((p) => ({ id: p.id, ...(p.displayName ? { displayName: p.displayName } : {}) }));
-          const [entriesByOwner, connectorsByOwner, scopeGrants, scopeAsks, ownerAsks] = await Promise.all([
+          const [entriesByOwner, connectorsByOwner, scopeGrants, scopeAsks] = await Promise.all([
             deps.keychain.listByOwners(members.map((m) => m.id)),
             deps.keychain.listConnectorsByOwners(members.map((m) => m.id)),
             deps.keychain.grantsForScope(scopeId),
             deps.keychain.listAsks({ requesterScopeId: scopeId }),
-            conversation.kind === "dm" ? deps.keychain.listAsks({ ownerId: actor.id }) : Promise.resolve([]),
           ]);
           const keychainBlock = renderKeychainManifest({
             scopeId,
@@ -2346,7 +2372,6 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
             scopeGrants,
             injected: [],
             scopeAsks,
-            ownerAsks,
           });
           if (keychainBlock) systemPrompt += `\n\n${keychainBlock}`;
         }
@@ -2432,7 +2457,14 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           }
         }
 
-        if (input.runId) deps.turnStream?.begin(input.runId);
+        if (input.runId) {
+          if ((input.surface === "slack" || input.surface === "monitor") && input.runLeaseToken) {
+            await deps.runs
+              ?.setDeliveryState(input.runId, input.runLeaseToken, { replying: true })
+              .catch(swallowAs("orchestrator: persist reply engagement", false));
+          }
+          deps.turnStream?.begin(input.runId);
+        }
 
         const backgroundBroker =
           deps.processes && supportsProcessSessions(deps.sandbox)
@@ -2777,7 +2809,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           input.attachments?.length && !strictReadOnly
             ? await materializeInbound(
                 deps.sandbox,
-                await provision(),
+                provision,
                 input.attachments,
                 blobTransfer,
                 fileRegistration,
@@ -2794,7 +2826,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
                   : undefined,
               )
             : { metas: [], images: [], tooMany: [], unavailable: [], blocked: [], unscreened: [] };
-        const manifest = inboundManifest(inbound.metas, turnInboxDir);
+        const manifest = inboundManifest(inbound.metas, turnInboxDir, inbound.unstaged);
         const inboundIssues = inboundIssueList({
           tooMany: inbound.tooMany,
           unavailable: inbound.unavailable,
@@ -3397,7 +3429,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
                   payload.name = actor.displayName.trim();
                 if (input.displayText?.trim() && payload.text === input.text && typeof payload.display !== "string")
                   payload.display = input.displayText;
-                if (syntheticPrompt || continuation) payload.hidden = true;
+                if ((syntheticPrompt || continuation) && payload.steered !== true) payload.hidden = true;
                 return { ...tainted, payload };
               })();
               const appended = await withManagedRosterVersion(() => deps.sessions.append(lease, stored));
@@ -3434,6 +3466,31 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           return deps.harness.turns.runTurn({
             session,
             prepareSteer: async (text, request) => {
+              const refreshedInbox =
+                input.surface === "web" &&
+                conversation.kind === "dm" &&
+                /^web:.+:inbox$/.test(conversation.threadRef) &&
+                request?.conversation.threadRef === conversation.threadRef
+                  ? request.conversationHeader?.trim()
+                  : undefined;
+              if (refreshedInbox) {
+                let allowed = true;
+                if (securityPolicy.inboundScreening === "external") {
+                  for (const chunk of securityScreenChunks("conversation-header", refreshedInbox)) {
+                    const verdict = await classifySecurityData(chunk, actor.id, scopeId, recordScreenRequest, {
+                      hook: "user_input",
+                      request: text,
+                      surface: "steer",
+                      origin: input.origin.kind,
+                    });
+                    if (verdict?.decision !== "auto" || verdict.unscreened) {
+                      allowed = false;
+                      break;
+                    }
+                  }
+                }
+                text = `${text}\n\n${allowed ? refreshedInbox : "Updated inbox context was withheld by the security screen."}`;
+              }
               if (!request?.attachments?.length) return { text };
               const seed = `${fileRegistration.seed}:steer:${randomUUID()}`;
               const inboxDir = `${turnInboxDir}/${randomUUID()}`;
@@ -3441,7 +3498,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
                 ? { metas: [], images: [], tooMany: [], unavailable: [], blocked: [], unscreened: [] }
                 : await materializeInbound(
                     deps.sandbox,
-                    await provision(),
+                    provision,
                     request.attachments,
                     blobTransfer,
                     { ...fileRegistration, seed },
@@ -3485,7 +3542,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
               return {
                 text: [
                   text,
-                  inboundManifest(received.metas, inboxDir),
+                  inboundManifest(received.metas, inboxDir, received.unstaged),
                   ...steeredDocuments.notices,
                   issues.length ? fileEventPayload("in", issues).text : "",
                   securityPolicy.inboundScreening === "external" &&
@@ -3702,11 +3759,21 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
               if (rec.kind !== "message" || rec.meta?.bareText === undefined) {
                 return withManagedRosterVersion(() => deps.sessions.appendTape(lease, rec));
               }
+              const recordedSteer = emittedEntries.find(
+                (entry) =>
+                  entry.seq === rec.entrySeq &&
+                  entry.type === "user" &&
+                  isObj(entry.payload) &&
+                  entry.payload.steered === true,
+              )?.payload;
               const meta = {
                 ...rec.meta,
                 ...swarmEntryProvenance,
                 ...(actor.displayName?.trim() ? { author: actor.displayName.trim() } : {}),
-                ...(syntheticPrompt || continuation ? { hidden: true } : {}),
+                ...((isObj(recordedSteer) && recordedSteer.hidden === true) ||
+                ((syntheticPrompt || continuation) && !recordedSteer)
+                  ? { hidden: true }
+                  : {}),
                 ...(input.displayText?.trim() && rec.meta.bareText === input.text
                   ? { display: input.displayText }
                   : {}),

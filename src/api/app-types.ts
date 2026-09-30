@@ -228,7 +228,12 @@ interface SessionBackgroundView {
     expiresAt: number;
     lastFiredAt?: number;
   }>;
-  crons: Array<{ id: string; title?: string; nextFireAt?: number }>;
+  crons: Array<{
+    id: string;
+    title?: string;
+    nextFireAt?: number;
+    lastFire?: { firedAt: number; status?: CronFireLogEntry["status"] };
+  }>;
 }
 
 interface SessionBackgroundOutput {
@@ -430,7 +435,7 @@ export interface App {
     scopeId: ScopeId,
     content: string,
     actorId: string,
-    opts?: { allowSharedScope?: boolean },
+    opts?: { allowSharedScope?: boolean; expectedVersion?: number },
   ): Promise<number>;
   createCron(input: CreateCronInput): Promise<Cron>;
   getCron(id: string): Promise<Cron | null>;

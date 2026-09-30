@@ -68,6 +68,8 @@ export interface Conversation {
 export type SessionType = "dm" | "channel" | "group";
 
 export interface SpawnMeta {
+  slackSource?: TurnRequest["slackSource"];
+  externalSlack?: TurnRequest["externalSlack"];
   surfaceTools?: boolean;
   deliveryCandidates?: TurnRequest["deliveryCandidates"];
   origin?: TurnOrigin;
@@ -113,6 +115,7 @@ export interface Session {
   hasEntries?: boolean;
   working?: boolean;
   awaitingInput?: boolean;
+  lastTurnFailed?: boolean;
   backgroundJobs?: number;
   watches?: number;
   crons?: number;
@@ -286,6 +289,7 @@ export interface Cron extends TriggerBase {
   ownerResourcesRequireOpen?: boolean;
   members?: Principal[];
   unattendedGrants?: string[];
+  sessionRef?: string;
 
   fireLog?: CronFireLogEntry[];
   lastFireNote?: CronFireNote;

@@ -1,8 +1,9 @@
+import { conversationWebUrl } from "../../util/conversation-links.ts";
 import { isSessionStatus } from "../../sessions/session-status.ts";
 import { suggestedActivityRoutes } from "./suggested-activities.ts";
 import { runtimeFallback, runtimeConfigBody, userRuntimeConfigBody, webuiModelEnabled } from "../runtime-config.ts";
 import { sessionSharingRoutes } from "./session-sharing.ts";
-import type { Grant, ScopeId, Session } from "../../types.ts";
+import type { Grant, PendingApproval, ScopeId, Session } from "../../types.ts";
 import { parseScopeId, scopeId as makeScopeId } from "../../types.ts";
 import type { Skill, SkillResolution } from "../../skills/skill-store.ts";
 import { ByteSourceTooLargeError } from "../../files/durable-byte-store.ts";
@@ -58,19 +59,6 @@ function sharedSkillCreateBlock(capability: ApiCtx["capability"]): string | null
 
 function isConversationColor(value: unknown): value is string | null {
   return value === null || (typeof value === "string" && /^#[0-9a-fA-F]{6}$/.test(value));
-}
-
-function conversationWebUrl(publicWebUrl: string | undefined, sessionId: string): string | undefined {
-  const raw = publicWebUrl?.trim();
-  if (!raw || !/^https?:\/\//i.test(raw) || /[?#]/.test(raw)) return undefined;
-  try {
-    const base = new URL(raw);
-    if ((base.protocol !== "http:" && base.protocol !== "https:") || base.username || base.password) return undefined;
-    base.pathname = `${base.pathname.replace(/\/+$/, "")}/s/${encodeURIComponent(sessionId)}`;
-    return base.toString();
-  } catch {
-    return undefined;
-  }
 }
 
 async function regenerateSessionTitle(ctx: ApiCtx): Promise<void> {
@@ -275,7 +263,30 @@ async function listSessionApprovals(ctx: ApiCtx): Promise<void> {
   const id = ctx.params.id!;
   const viewer = url.searchParams.get("viewer");
   if (!viewer) return sendJson(res, 400, { error: "bad_request", message: "viewer required" });
-  return sendJson(res, 200, { approvals: await app.listSessionApprovals(id, viewer) });
+  const approvals = await app.listSessionApprovals(id, viewer);
+  return sendJson(res, 200, { approvals: [...approvals, ...(await credentialApprovals(ctx, id, viewer))] });
+}
+
+// Pending credential requests from this session or any of its sub-agents, shown inline to their owner.
+async function credentialApprovals(ctx: ApiCtx, sessionId: string, viewer: string): Promise<PendingApproval[]> {
+  const kc = ctx.deps.keychain;
+  const approvals = ctx.deps.keychainApprovals;
+  if (!kc || !approvals) return [];
+  const out: PendingApproval[] = [];
+  for (const ask of await kc.listAsks({ ownerId: viewer })) {
+    if (ask.status !== "pending") continue;
+    const view = await approvals.get(ask.id, viewer);
+    if (!view || (view.sessionId !== sessionId && view.requesterSessionId !== sessionId)) continue;
+    out.push({
+      requestId: `keychain:${ask.id}`,
+      command: view.accountLabel ? `${view.service} (${view.accountLabel})` : view.service,
+      summary: `Use your ${view.service} credential in ${view.conversation}`,
+      reason: "Credential approval",
+      grantModes: { session: false, always: true },
+      blocksInput: false,
+    });
+  }
+  return out;
 }
 
 async function getSessionBackground(ctx: ApiCtx): Promise<void> {

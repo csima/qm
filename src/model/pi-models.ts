@@ -193,6 +193,7 @@ interface ModelEntry {
   auxiliary?: boolean;
   efforts?: readonly EffortTier[];
   codexUltra?: true;
+  request?: { model: string; service_tier: "ultrafast" };
   clone?: {
     template: string;
     input: number;
@@ -374,6 +375,24 @@ export const MODEL_REGISTRY: readonly ModelEntry[] = [
       cacheRead: 1,
       cacheWrite: 12.5,
       tiers: [{ inputTokensAbove: 272_000, input: 20, output: 75, cacheRead: 2, cacheWrite: 25 }],
+    },
+  },
+  {
+    id: "gpt-6-astra-ultrafast",
+    buttonLabel: "Astra Ultrafast",
+    name: "GPT-6 Astra · Ultrafast (6× cost)",
+    fastMode: false,
+    webui: true,
+    base: true,
+    efforts: OPENAI_EFFORTS,
+    request: { model: "gpt-6-astra", service_tier: "ultrafast" },
+    clone: {
+      ...GPT_56_CLONE,
+      input: 60,
+      output: 300,
+      cacheRead: 6,
+      cacheWrite: 75,
+      tiers: [{ inputTokensAbove: 272_000, input: 120, output: 450, cacheRead: 12, cacheWrite: 150 }],
     },
   },
   {
@@ -617,10 +636,27 @@ export function registerOpenRouterCatalogModel(definition: OpenRouterCatalogMode
   return model;
 }
 
+export function modelRequestOverrides(id: string): ModelEntry["request"] {
+  const request = REGISTRY_BY_ID.get(id)?.request;
+  return request ? { ...request } : undefined;
+}
+
 export function resolveBuiltinModel(id: string): PiModel | undefined {
   if (id.startsWith(CODEX_SUBSCRIPTION_PREFIX)) {
-    const m = getModel(CODEX_SUBSCRIPTION_PROVIDER, codexProviderModelId(id));
-    return m ? { ...m, id } : undefined;
+    const providerId = codexProviderModelId(id);
+    if (modelRequestOverrides(providerId)) return undefined;
+    const m = getModel(CODEX_SUBSCRIPTION_PROVIDER, providerId);
+    if (m) return { ...m, id };
+    const entry = REGISTRY_BY_ID.get(providerId);
+    const template = entry?.clone ? getModel(CODEX_SUBSCRIPTION_PROVIDER, entry.clone.template) : undefined;
+    const native = entry?.clone ? resolveBuiltinModel(providerId) : undefined;
+    if (!template || !native || native.provider !== "openai") return undefined;
+    return cloneModel(template, id, native.name, {
+      contextWindow: native.contextWindow,
+      maxTokens: native.maxTokens,
+      cost: native.cost,
+      ...(native.thinkingLevelMap ? { thinkingLevelMap: native.thinkingLevelMap } : {}),
+    });
   }
   const entry = REGISTRY_BY_ID.get(id);
   if (entry?.clone) {
@@ -699,6 +735,7 @@ export function contextTokenBudgetForModel(id: string): number | undefined {
 }
 
 export function modelSupportedByHarness(id: string | undefined, harness: string): boolean {
+  if (id && modelRequestOverrides(id)) return harness === "pi" || harness === "mock";
   if (id && isGatewayModelId(id)) return (harness === "pi" || harness === "mock") && Boolean(resolveGatewayModel(id));
   if (!id || unavailableOverlays.has(id)) return false;
   if (overlays.has(id)) return harness === "pi" || harness === "mock";

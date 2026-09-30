@@ -6,7 +6,7 @@ import { conversationScope } from "../resolution/resolution-service.ts";
 import { sleep } from "../util/async.ts";
 import { pgTextSafe } from "../util/text.ts";
 import { createMemoryAdvisoryLock, type AdvisoryLock } from "../persistence/advisory-lock.ts";
-import { errMessage } from "../util/errors.ts";
+import { errMessage, swallowAs } from "../util/errors.ts";
 import { filterHistoryForAudience } from "../resolution/context-filter.ts";
 import { randomUUID } from "node:crypto";
 import { hashId } from "../util/crypto.ts";
@@ -176,6 +176,8 @@ interface SessionSyscallBinding {
     | "readOnly"
     | "scopeVersion"
     | "sessionParticipantIds"
+    | "slackSource"
+    | "externalSlack"
   > & { origin?: OrchestratorInput["origin"] };
 }
 
@@ -296,6 +298,8 @@ function childRunRequest(child: Session, meta: SpawnMeta, text: string, displayT
     ...(meta.scopeVersion ? { scopeVersion: meta.scopeVersion } : {}),
     ...(meta.sessionParticipantIds ? { sessionParticipantIds: meta.sessionParticipantIds } : {}),
     surface: meta.surface,
+    ...(meta.slackSource ? { slackSource: meta.slackSource } : {}),
+    ...(meta.externalSlack ? { externalSlack: meta.externalSlack } : {}),
     ...(meta.deliveryTarget ? { deliveryTarget: meta.deliveryTarget } : {}),
     ...(meta.deliveryCandidates ? { deliveryCandidates: meta.deliveryCandidates } : {}),
     actor: meta.actor,
@@ -333,7 +337,8 @@ function assertAudienceCompatible(
     throw new Error("the target audience includes people outside the sender's authorized audience");
 }
 
-export async function sessionTreeRoot(sessions: Pick<SessionStore, "get">, session: Session): Promise<Session> {
+async function sessionAncestors(sessions: Pick<SessionStore, "get">, session: Session): Promise<Session[]> {
+  const ancestors: Session[] = [];
   let current = session;
   const seen = new Set<string>();
   while (current.parentSessionId) {
@@ -341,9 +346,49 @@ export async function sessionTreeRoot(sessions: Pick<SessionStore, "get">, sessi
     seen.add(current.id);
     const parent = await sessions.get(current.parentSessionId);
     if (!parent) break;
+    ancestors.push(parent);
     current = parent;
   }
-  return current;
+  return ancestors;
+}
+
+export async function sessionTreeRoot(sessions: Pick<SessionStore, "get">, session: Session): Promise<Session> {
+  return (await sessionAncestors(sessions, session)).at(-1) ?? session;
+}
+
+export async function stoppableAncestors(sessions: Pick<SessionStore, "get">, session: Session): Promise<Session[]> {
+  return (await sessionAncestors(sessions, session)).filter((ancestor) => ancestor.scopeId === session.scopeId);
+}
+
+export async function sessionTreeWorking(
+  sessions: Pick<SessionStore, "childrenOf">,
+  runs: Pick<RunStore, "activeForThread">,
+  root: Session,
+): Promise<boolean> {
+  for (const session of await treeSessions(sessions, root)) {
+    if (session.scopeId === root.scopeId && (await runs.activeForThread(session.threadRef))) return true;
+  }
+  return false;
+}
+
+export async function workingSessionThreadRefs(
+  sessions: Pick<SessionStore, "get" | "getByThread">,
+  runs: Pick<RunStore, "activeSessionIds">,
+  awaitingSessionIds: ReadonlySet<string>,
+): Promise<Set<string>> {
+  const active = await runs.activeSessionIds();
+  const working = new Set(active);
+  await Promise.all(
+    active
+      .map(async (threadRef) => {
+        const session = await sessions.getByThread(threadRef);
+        if (!session?.parentSessionId) return;
+        for (const ancestor of await stoppableAncestors(sessions, session))
+          if (!awaitingSessionIds.has(ancestor.id)) working.add(ancestor.threadRef);
+      })
+      .map((lookup) => lookup.catch(swallowAs("session list: working ancestors", undefined))),
+  );
+  return working;
 }
 
 async function treeSessions(sessions: Pick<SessionStore, "childrenOf">, root: Session): Promise<Session[]> {
@@ -593,6 +638,8 @@ export function createSessionSyscalls(deps: SessionSyscallDeps): SessionSyscalls
                   : {}),
                 ...(caller.unattendedGrants ? { unattendedGrants: [...caller.unattendedGrants] } : {}),
                 openFingerprint: fingerprint,
+                ...(binding.request.slackSource ? { slackSource: binding.request.slackSource } : {}),
+                ...(binding.request.externalSlack ? { externalSlack: binding.request.externalSlack } : {}),
                 ...(binding.request.scopeVersion ? { scopeVersion: binding.request.scopeVersion } : {}),
                 ...(binding.request.sessionParticipantIds
                   ? { sessionParticipantIds: binding.request.sessionParticipantIds }

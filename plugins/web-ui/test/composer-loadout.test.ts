@@ -291,3 +291,13 @@ test("the Anthropic default effort is only Low where the model offers it", () =>
   const haiku = { ...model, effortLevelsByHarness: { pi: ["auto", "default"], claude: ["auto"] } };
   assert.equal(defaultEffortForModel(haiku), "auto");
 });
+
+test("Astra speed variants share a preset and preserve a saved tier", () => {
+  const base = option("pi:gpt-6-astra");
+  const ultra = option("pi:gpt-6-astra-ultrafast");
+  const saved = entry(ultra.value, "high");
+  assert.deepEqual(modelLoadoutOptions([ultra, base], [], "pi"), [base]);
+  assert.deepEqual(modelLoadoutOptions([base, ultra], [saved], "pi"), [ultra]);
+  assert.deepEqual(modelLoadoutOptions([ultra], [], "pi"), [ultra]);
+  assert.deepEqual(upsertLoadout([entry(base.value)], saved), [saved]);
+});

@@ -519,7 +519,10 @@ function buildServer(app: App, deps: ServerOptions, allowUnsignedSourceAuth: boo
   };
   const requestNames = new WeakMap<IncomingMessage, string>();
   const server = createHttpServer((req, res) => {
-    const finishTiming = req.url === "/healthz" ? undefined : startTiming("http.server", `${req.method ?? "GET"} /*`);
+    const finishTiming =
+      req.url === "/healthz" || req.url === "/readyz"
+        ? undefined
+        : startTiming("http.server", `${req.method ?? "GET"} /*`);
     if (finishTiming)
       res.once("close", () =>
         finishTiming({
@@ -568,7 +571,7 @@ function buildServer(app: App, deps: ServerOptions, allowUnsignedSourceAuth: boo
         return;
       }
     }
-    rawBodies.set(req, await readRawBody(req));
+    rawBodies.set(req, await readRawBody(req, matched?.route.maxBodyBytes));
     await ready;
     routing(req, res);
   }
