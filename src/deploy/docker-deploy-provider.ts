@@ -2,8 +2,12 @@ import type { Deployment, DeploymentVersion } from "./deploy-store.ts";
 import type { DeployEndpoint, DeployProvider } from "./deploy-provider.ts";
 import { spawnDockerExec, type DockerExec } from "../sandbox/docker-exec.ts";
 import { errMessage } from "../util/errors.ts";
+import { mkdir as fsMkdir } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const APP_PORT = 8080;
+const DATA_DIR = "/data";
 const LEGACY_NETWORK = "agent-deploynet";
 const DAEMON_PROBE_TIMEOUT_MS = 10_000;
 
@@ -12,6 +16,8 @@ export interface DockerDeployProviderOptions {
   docker?: string;
   basePort?: number;
   dockerExec?: DockerExec;
+  dataRoot?: string;
+  mkdir?: (path: string) => Promise<void>;
 }
 
 export interface DockerDaemonProbeOptions {
@@ -54,6 +60,9 @@ export function createDockerDeployProvider(opts: DockerDeployProviderOptions = {
   };
 
   const dexec = opts.dockerExec ?? spawnDockerExec(docker);
+  const dataRoot = opts.dataRoot ?? join(tmpdir(), "qm-docker-deploy-data");
+  const mkdir = opts.mkdir ?? ((p: string) => fsMkdir(p, { recursive: true }).then(() => undefined));
+  const dataDirFor = (d: Deployment) => join(dataRoot, d.id);
 
   const name = (d: Deployment) => `agent-deploy-${d.id.slice(0, 12)}`;
   const network = (d: Deployment) => `${name(d)}-net`;
@@ -101,10 +110,12 @@ export function createDockerDeployProvider(opts: DockerDeployProviderOptions = {
   };
 
   return {
-    profile: { managedScaleToZero: false },
+    profile: { managedScaleToZero: false, dataDir: DATA_DIR },
 
     async apply(d: Deployment, version: DeploymentVersion): Promise<DeployEndpoint> {
       const net = await ensureNetwork(network(d));
+      const dataDir = dataDirFor(d);
+      await mkdir(dataDir);
       await dexec(["rm", "-f", name(d)]);
       const hostPort = allocPort(name(d));
       const envArgs = Object.entries(version.env ?? {}).flatMap(([k, v]) => ["-e", `${k}=${v}`]);
@@ -125,10 +136,14 @@ export function createDockerDeployProvider(opts: DockerDeployProviderOptions = {
         `127.0.0.1:${hostPort}:${APP_PORT}`,
         "-v",
         `${version.snapshotDir}:/app:ro`,
+        "-v",
+        `${dataDir}:${DATA_DIR}`,
         "-w",
         "/app",
         "-e",
         `PORT=${APP_PORT}`,
+        "-e",
+        `DATA_DIR=${DATA_DIR}`,
         ...envArgs,
         image,
         "sh",

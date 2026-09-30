@@ -5,6 +5,132 @@ import { createDeployStore } from "../src/deploy/deploy-store.ts";
 import type { DockerExec } from "../src/sandbox/docker-exec.ts";
 import { scopeId } from "../src/types.ts";
 
+test("apply mounts a per-deployment writable /data, sets DATA_DIR, and keeps the snapshot read-only", async () => {
+  const calls: string[][] = [];
+  const dockerExec: DockerExec = async (args) => {
+    calls.push(args);
+    return { code: args[1] === "inspect" ? 1 : 0, stdout: "", stderr: args[1] === "inspect" ? "No such network" : "" };
+  };
+  const mkdirCalls: string[] = [];
+  const store = createDeployStore();
+  const deployment = await store.create({
+    ownerScopeId: scopeId("personal", "U1"),
+    createdBy: "U1",
+    entrypoint: "node server.js",
+    snapshotDir: "/snap/one",
+  });
+  const provider = createDockerDeployProvider({
+    dockerExec,
+    dataRoot: "/dataroot",
+    mkdir: async (p) => {
+      mkdirCalls.push(p);
+    },
+  });
+
+  assert.equal(provider.profile.dataDir, "/data");
+  await provider.apply(deployment, deployment.versions[0]!);
+
+  assert.deepEqual(mkdirCalls, [`/dataroot/${deployment.id}`]);
+  const runArgs = calls.find((args) => args[0] === "run")!;
+  const runCmd = runArgs.join(" ");
+  assert.ok(runCmd.includes("-v /snap/one:/app:ro"));
+  assert.ok(runCmd.includes(`-v /dataroot/${deployment.id}:/data`));
+  assert.ok(!runCmd.includes(`-v /dataroot/${deployment.id}:/data:ro`));
+  assert.ok(runCmd.includes("-e DATA_DIR=/data"));
+});
+
+test("a redeploy of the same deployment reuses its data directory instead of a fresh one", async () => {
+  const dockerExec: DockerExec = async (args) => ({
+    code: args[1] === "inspect" ? 1 : 0,
+    stdout: "",
+    stderr: args[1] === "inspect" ? "No such network" : "",
+  });
+  const mkdirCalls: string[] = [];
+  const store = createDeployStore();
+  const deployment = await store.create({
+    ownerScopeId: scopeId("personal", "U1"),
+    createdBy: "U1",
+    entrypoint: "node server.js",
+    snapshotDir: "/snap/one",
+  });
+  const provider = createDockerDeployProvider({
+    dockerExec,
+    dataRoot: "/dataroot",
+    mkdir: async (p) => {
+      mkdirCalls.push(p);
+    },
+  });
+
+  await provider.apply(deployment, deployment.versions[0]!);
+  await provider.apply(deployment, deployment.versions[0]!);
+
+  assert.deepEqual(mkdirCalls, [`/dataroot/${deployment.id}`, `/dataroot/${deployment.id}`]);
+});
+
+test("two deployments get isolated data directories under the shared data root", async () => {
+  const dockerExec: DockerExec = async (args) => ({
+    code: args[1] === "inspect" ? 1 : 0,
+    stdout: "",
+    stderr: args[1] === "inspect" ? "No such network" : "",
+  });
+  const store = createDeployStore();
+  const first = await store.create({
+    ownerScopeId: scopeId("personal", "U1"),
+    createdBy: "U1",
+    entrypoint: "node server.js",
+    snapshotDir: "/snap/one",
+  });
+  const second = await store.create({
+    ownerScopeId: scopeId("personal", "U2"),
+    createdBy: "U2",
+    entrypoint: "node server.js",
+    snapshotDir: "/snap/two",
+  });
+  const mkdirCalls: string[] = [];
+  const provider = createDockerDeployProvider({
+    dockerExec,
+    dataRoot: "/dataroot",
+    mkdir: async (p) => {
+      mkdirCalls.push(p);
+    },
+  });
+
+  await provider.apply(first, first.versions[0]!);
+  await provider.apply(second, second.versions[0]!);
+
+  assert.notEqual(mkdirCalls[0], mkdirCalls[1]);
+  assert.deepEqual(new Set(mkdirCalls), new Set([`/dataroot/${first.id}`, `/dataroot/${second.id}`]));
+});
+
+test("destroy does not remove the deployment's data directory", async () => {
+  const dockerExec: DockerExec = async (args) => ({
+    code: args[1] === "inspect" ? 1 : 0,
+    stdout: "",
+    stderr: args[1] === "inspect" ? "No such network" : "",
+  });
+  const store = createDeployStore();
+  const deployment = await store.create({
+    ownerScopeId: scopeId("personal", "U1"),
+    createdBy: "U1",
+    entrypoint: "node server.js",
+    snapshotDir: "/snap/one",
+  });
+  const rmCalls: string[][] = [];
+  const provider = createDockerDeployProvider({
+    dockerExec: async (args) => {
+      if (args[0] === "rm") rmCalls.push(args);
+      return dockerExec(args);
+    },
+    dataRoot: "/dataroot",
+    mkdir: async () => undefined,
+  });
+
+  await provider.apply(deployment, deployment.versions[0]!);
+  await provider.destroy(deployment);
+
+  assert.ok(rmCalls.every((args) => args[1] === "-f" && args[2] !== "/dataroot"));
+});
+
 test("Docker deployments use isolated networks and remove them on destroy", async () => {
   const calls: string[][] = [];
   const dockerExec: DockerExec = async (args) => {
