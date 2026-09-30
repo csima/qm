@@ -2,6 +2,22 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createAdminGrantStore, createMemoryAdminGrantPersistence } from "../src/admin/admin-grant-store.ts";
 
+test("grant store: add / list / revoke round-trip on (principal, scope, role)", async () => {
+  const store = createAdminGrantStore();
+  assert.deepEqual(await store.list(), []);
+  await store.add({ principalId: "U1", scopeId: "org:default-org", role: "org_admin" });
+  await store.add({ principalId: "U2", scopeId: "org:default-org", role: "org_admin" });
+  assert.equal((await store.list()).length, 2);
+  await store.add({ principalId: "U1", scopeId: "org:default-org", role: "org_admin", grantedBy: "x" });
+  assert.equal((await store.list()).length, 2);
+  await store.add({ principalId: "U2", scopeId: "org:other", role: "org_admin" });
+  assert.equal((await store.list()).length, 3);
+  await store.revoke("U1", "org:default-org", "org_admin");
+  const list = await store.list();
+  assert.equal(list.length, 2);
+  assert.ok(!list.some((g) => g.principalId === "U1"));
+});
+
 test("grant store: seed applies only when empty and never undoes a revoke", async () => {
   const persist = createMemoryAdminGrantPersistence();
   const seed = [{ principalId: "A", scopeId: "org:default-org", role: "org_admin" as const }];

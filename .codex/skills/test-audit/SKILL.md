@@ -5,7 +5,8 @@ description: Use whenever writing, changing, reviewing, or pruning QM tests. Aut
 
 # Test Audit
 
-Adapted from OpenClaw's `test-audit` skill (MIT). Three modes share one value
+Adapted from OpenClaw's `test-audit` skill (MIT; see
+[LICENSE-openclaw](LICENSE-openclaw)). Three modes share one value
 bar. The authoring gate checks every new or changed test. An audit removes a
 few high-confidence low-value tests. A campaign prunes a whole suite; read
 [CAMPAIGN.md](CAMPAIGN.md) before starting one.

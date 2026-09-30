@@ -23,7 +23,8 @@ It runs every root test file in its own process under `NODE_V8_COVERAGE`,
 counts covered non-blank lines in `src/`, `scripts/`, `plugins/chassis/`,
 `deploy/`, and `cli/src/` (root tests exercise all of them; change with `--src`), and records for each file the lines no
 other file covers. `--serial` files share one database and run one at a time.
-`--budget` greedily builds a candidate pool of the most redundant files whose
+Files that fail or exceed `--timeout` seconds contribute no coverage, so a
+broken test cannot mask the loss of a working one. `--budget` greedily builds a candidate pool of the most redundant files whose
 joint removal loses at most that many lines. The metric counts a line covered
 when any of its characters executed; use it for before-and-after deltas.
 

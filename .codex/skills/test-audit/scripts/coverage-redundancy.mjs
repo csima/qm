@@ -12,6 +12,7 @@ const { values, positionals } = parseArgs({
     budget: { type: "string", default: "0" },
     serial: { type: "string", multiple: true, default: [] },
     out: { type: "string", default: "coverage-redundancy.json" },
+    timeout: { type: "string", default: "900" },
     src: { type: "string", multiple: true, default: ["src", "scripts", "plugins/chassis", "deploy", "cli/src"] },
   },
 });
@@ -85,7 +86,9 @@ function runOne(file) {
       env: { ...process.env, NODE_V8_COVERAGE: dir },
       stdio: "ignore",
     });
+    const timer = setTimeout(() => child.kill("SIGKILL"), Number(values.timeout) * 1000);
     child.on("exit", (code) => {
+      clearTimeout(timer);
       const lines = coveredLines(dir);
       rmSync(dir, { recursive: true, force: true });
       resolve({ file, code, ms: Date.now() - started, lines });
@@ -129,7 +132,7 @@ function denominator() {
   return total;
 }
 
-const results = await runAll();
+const results = (await runAll()).map((r) => (r.code === 0 ? r : { ...r, lines: new Set() }));
 const counts = new Map();
 for (const r of results) for (const l of r.lines) counts.set(l, (counts.get(l) ?? 0) + 1);
 const total = denominator();
