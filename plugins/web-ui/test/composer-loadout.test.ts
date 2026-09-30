@@ -266,7 +266,7 @@ test("an effort the selected model does not offer resets to unset instead of ano
   assert.deepEqual(parseLoadout(JSON.stringify([entry("pi:one", "auto")])), [entry("pi:one", "auto")]);
 });
 
-test("only the top tier each provider offers is the rainbow peak", () => {
+test("only an offered Ultracode gets the rainbow treatment", () => {
   const model = {
     ...option("pi:one").model,
     effortLevelsByHarness: {
@@ -278,9 +278,9 @@ test("only the top tier each provider offers is the rainbow peak", () => {
   };
   const peaks = (harnessId: string) =>
     ["low", "high", "xhigh", "max", "ultra", "ultracode"].filter((level) => isPeakEffort(harnessId, model, level));
-  assert.deepEqual(peaks("pi"), ["max"]);
+  assert.deepEqual(peaks("pi"), []);
   assert.deepEqual(peaks("claude"), ["ultracode"]);
-  assert.deepEqual(peaks("codex"), ["ultra"]);
+  assert.deepEqual(peaks("codex"), []);
   assert.deepEqual(peaks("opencode"), []);
   assert.equal(effortLabel("ultra"), "Ultra");
   assert.equal(effortLabel("ultracode"), "Ultracode");

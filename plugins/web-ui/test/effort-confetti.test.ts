@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { JSDOM } from "jsdom";
 import { createServer } from "vite";
 
-test("confetti celebrates only each provider's top tier and respects reduced motion", async () => {
+test("confetti celebrates only Ultracode and respects reduced motion", async () => {
   const vite = await createServer({
     root: fileURLToPath(new URL("..", import.meta.url)),
     configFile: false,
@@ -36,28 +36,27 @@ test("confetti celebrates only each provider's top tier and respects reduced mot
         opencode: ["auto"],
       },
     };
-    let selectedLevel = "ultra";
-    let selectedHarness = "codex";
+    let selectedLevel = "ultracode";
+    let selectedHarness = "claude";
     button.addEventListener("click", (event) => burstEffortConfetti(event, selectedLevel, selectedHarness, model));
     const finishBurst = async (): Promise<void> => {
       completions.splice(0).forEach((complete) => complete());
       await new Promise((resolve) => setTimeout(resolve, 0));
       assert.equal(dom.window.document.querySelector(".effort-confetti"), null);
     };
-    for (const [harness, top] of [
-      ["pi", "max"],
-      ["claude", "ultracode"],
-      ["codex", "ultra"],
-    ]) {
-      selectedHarness = harness;
-      for (const level of ["high", "auto", top]) {
-        selectedLevel = level;
-        button.click();
-        assert.equal(dom.window.document.querySelectorAll(".effort-confetti > span").length, level === top ? 14 : 0);
-        await finishBurst();
-      }
+    selectedHarness = "claude";
+    for (const level of ["high", "auto", "ultracode"]) {
+      selectedLevel = level;
+      button.click();
+      assert.equal(
+        dom.window.document.querySelectorAll(".effort-confetti > span").length,
+        level === "ultracode" ? 14 : 0,
+      );
+      await finishBurst();
     }
     for (const [harness, level] of [
+      ["pi", "max"],
+      ["codex", "ultra"],
       ["opencode", "auto"],
       ["codex", "max"],
       ["claude", "max"],
@@ -68,8 +67,8 @@ test("confetti celebrates only each provider's top tier and respects reduced mot
       button.click();
       assert.equal(dom.window.document.querySelector(".effort-confetti"), null);
     }
-    selectedHarness = "codex";
-    selectedLevel = "ultra";
+    selectedHarness = "claude";
+    selectedLevel = "ultracode";
     reducedMotion = true;
     button.click();
     assert.equal(dom.window.document.querySelector(".effort-confetti"), null);

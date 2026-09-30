@@ -97,11 +97,8 @@ export function effortLevelsForHarness(
   return EFFORT_LEVELS.filter(({ value }) => advertised.includes(value));
 }
 
-const PEAK_EFFORTS: readonly EffortLevel[] = ["max", "ultra", "ultracode"];
-
 export function isPeakEffort(harnessId: string, model: Model<Api> | undefined, level: string): boolean {
-  const top = effortLevelsForHarness(harnessId, model).at(-1)?.value;
-  return top === level && PEAK_EFFORTS.includes(top);
+  return level === "ultracode" && effortLevelsForHarness(harnessId, model).some(({ value }) => value === level);
 }
 
 export function resolveEffort(harnessId: string, model: Model<Api> | undefined, effort: EffortLevel): EffortLevel {

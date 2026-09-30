@@ -668,7 +668,7 @@ test("the personal-account picker preserves composer choices and saves context d
     );
     assert.deepEqual(
       [...host.querySelectorAll(".loadout-effort .effort-peak")].map((item) => item.textContent?.trim()),
-      ["Max"],
+      [],
     );
     assert.ok(effortChoices().every((item) => item.getAttribute("aria-checked") === "false"));
     assert.doesNotMatch(host.textContent ?? "", /Legacy default/);
