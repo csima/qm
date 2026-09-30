@@ -1106,3 +1106,19 @@ test("attachment fallback preserves participant windows and repeated calls in an
     );
   }
 });
+
+test("forRender serves the projection and honors sinceSeq and limit like getEntries", async () => {
+  const sim = await simSession();
+  await simTurn(sim, { input: "one", reply: "1" });
+  await simTurn(sim, { input: "two", reply: "2" });
+  const source = createTranscriptSource(sim.store);
+  assert.deepEqual((await source.forRender(sim.session.id)).entries, await sim.store.getEntries(sim.session.id));
+  assert.deepEqual(
+    (await source.forRender(sim.session.id, { sinceSeq: 2 })).entries,
+    await sim.store.getEntries(sim.session.id, { sinceSeq: 2 }),
+  );
+  assert.deepEqual(
+    (await source.forRender(sim.session.id, { limit: 3 })).entries,
+    await sim.store.getEntries(sim.session.id, { limit: 3 }),
+  );
+});
