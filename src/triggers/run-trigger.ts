@@ -357,9 +357,10 @@ export async function runTrigger(deps: TriggerDeps, spec: TriggerSpec): Promise<
       sessionId = res.sessionId;
       adminUrl = res.adminUrl;
       if (res.stopped) {
+        note = res.reason ? `stopped: ${res.reason}` : "stopped on request";
+        if (!res.reason) return;
         status = "failed";
-        userNote = res.reason ?? "it was stopped before it finished";
-        note = `stopped: ${userNote}`;
+        userNote = res.reason;
         return;
       }
       if (res.status === "silent") return;

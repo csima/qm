@@ -2010,3 +2010,19 @@ test("a failed cron fire reports the error with the admin link to its destinatio
     "⚠️ I couldn't finish that turn: something went wrong on my end — full error: https://qm.example/admin/sessions/s2",
   ]);
 });
+
+test("a cron fire stopped on request posts nothing", async () => {
+  const { crons, deliveries, scheduler } = harness(async () => ({ status: "ok", reply: "(stopped)", stopped: true }));
+  const cron = await crons.create({
+    schedule: { everyMs: 1000 },
+    action: "nightly digest",
+    owner: "U1",
+    createdBy: "U1",
+    ownerScopeId: scopeId("channel", "C1"),
+    destination: { type: "slack", target: "C1", audienceScopeId: scopeId("channel", "C1") },
+  });
+  await runNowSettled(scheduler, cron.id);
+  assert.equal((await deliveries.pending("slack")).length, 0);
+  const { runs } = await crons.listFires(cron.id);
+  assert.equal(runs[0]?.note, "stopped on request");
+});
