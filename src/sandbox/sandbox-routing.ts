@@ -1,3 +1,4 @@
+import { sandboxGitIdentityEnv } from "./sandbox-env.ts";
 import type { SandboxResources } from "./sandbox-resources.ts";
 import { parseScopeId, type ScopeKind, type WorkspaceLayer } from "../types.ts";
 import type { DurableMap } from "../persistence/durable-map.ts";
@@ -53,6 +54,7 @@ export interface RoutingSandboxOptions {
   routes: DurableMap<SandboxRoute>;
   defaultBackend: SandboxBackendName;
   scopeDefaults?: SandboxScopeDefaults;
+  gitIdentity?: Record<string, string>;
   resources?: SandboxResources;
   onError?: (e: { category: string; code: string; message: string; scopeLabel?: string }) => void;
 }
@@ -167,6 +169,8 @@ export function createSandboxRouter(opts: RoutingSandboxOptions): Sandbox {
     },
 
     async provision(layers: WorkspaceLayer[], provOpts?: ProvisionOptions): Promise<SandboxHandle> {
+      const identity = sandboxGitIdentityEnv(opts.gitIdentity ?? {}, provOpts?.env);
+      if (Object.keys(identity).length) provOpts = { ...provOpts, env: { ...provOpts?.env, ...identity } };
       const scope = provOpts?.routeScopeId ?? writableScope(layers);
       let resource;
       if (provOpts?.sandboxId) resource = await opts.resources?.get(provOpts.sandboxId);

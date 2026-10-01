@@ -6229,3 +6229,23 @@ for (const mode of ["unchanged", "migration", "missing", "unstable", "failure"] 
     }
   });
 }
+
+test("AWS default sandbox forwards explicit Git identity only", () => {
+  const core = serviceEnvironment(
+    {
+      ...config,
+      sandbox: {
+        backend: "aws",
+        env: {
+          GIT_AUTHOR_NAME: "Operator",
+          GIT_AUTHOR_EMAIL: "operator@example.invalid",
+          UNRELATED_SECRET: "not-forwarded",
+        },
+      },
+    },
+    "core",
+  );
+  assert.equal(core.FLY_RESIDENT_ENV_GIT_AUTHOR_NAME, "Operator");
+  assert.equal(core.FLY_RESIDENT_ENV_GIT_AUTHOR_EMAIL, "operator@example.invalid");
+  assert.equal(core.FLY_RESIDENT_ENV_UNRELATED_SECRET, undefined);
+});

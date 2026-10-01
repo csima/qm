@@ -1160,6 +1160,7 @@ export function buildApp(
     canUseScope: (actorId, scopeId) => membership.canUseSandboxScope!(actorId, scopeId),
   });
   const sandbox: Sandbox = createSandboxRouter({
+    gitIdentity: config.sandboxGitIdentity,
     resources: sandboxResources,
     backends: sandboxBackends,
     routes: sandboxRoutes,

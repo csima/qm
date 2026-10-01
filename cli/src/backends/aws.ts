@@ -388,6 +388,14 @@ export function serviceEnvironment(config: QmConfig, service: ServiceName): Reco
     ...(service === "core" ? securityScreenEnv(config) : {}),
   };
   if (service === "core") {
+    Object.assign(
+      env,
+      Object.fromEntries(
+        Object.entries(sandboxCoreEnv(config).env).filter(([key]) =>
+          /^FLY_RESIDENT_ENV_GIT_(AUTHOR|COMMITTER)_(NAME|EMAIL)$/.test(key),
+        ),
+      ),
+    );
     const sandboxBackend = config.env.core?.SANDBOX_BACKEND?.trim() || config.sandbox?.backend;
     const stores = {
       DEPLOY_PROVIDER: config.env.core?.DEPLOY_PROVIDER?.trim() || "aws",

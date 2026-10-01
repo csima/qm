@@ -1,3 +1,4 @@
+import { sandboxGitIdentityEnv } from "./sandbox/sandbox-env.ts";
 import type { ExternalSlackPolicies } from "./resolution/external-slack.ts";
 import { isStrongSigningSecret } from "./auth/source-auth.ts";
 import { parseSandboxCapabilityTtlMs } from "./auth/capability-token.ts";
@@ -74,6 +75,7 @@ export interface Config {
   sandboxResourcesEnabled: boolean;
   sharingPosture: SharingPosture;
   sandboxScopeDefaults?: SandboxScopeDefaults;
+  sandboxGitIdentity?: Record<string, string>;
   sandboxBackend: "aws" | "local" | "sprites" | "smolmachines" | "e2b" | "modal" | "porter" | "agent37" | "superserve";
   sandboxSecondaryBackend?:
     "aws" | "local" | "sprites" | "smolmachines" | "e2b" | "modal" | "porter" | "agent37" | "superserve";
@@ -1478,6 +1480,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       : {}),
     sandboxBackend,
     sandboxScopeDefaults,
+    sandboxGitIdentity: sandboxGitIdentityEnv(
+      Object.fromEntries(
+        Object.entries(env)
+          .filter(([key]) => /^FLY_RESIDENT_ENV_GIT_(AUTHOR|COMMITTER)_(NAME|EMAIL)$/.test(key))
+          .map(([key, value]) => [key.slice("FLY_RESIDENT_ENV_".length), value]),
+      ),
+    ),
     sandboxResourcesEnabled: boolEnvStrict("SANDBOX_RESOURCES_ENABLED", env.SANDBOX_RESOURCES_ENABLED) ?? false,
     deployProvider,
     ...(env.EGRESS_SERVICE_HOSTS

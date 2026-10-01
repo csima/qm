@@ -9,28 +9,11 @@ export const NONINTERACTIVE_ENV: ReadonlyArray<readonly [string, string]> = [
   ["AWS_PAGER", ""],
 ];
 
-export function nonInteractiveShellPrefix(env: NodeJS.ProcessEnv = process.env): string {
+export function nonInteractiveShellPrefix(): string {
   const exports = NONINTERACTIVE_ENV.map(([name, def]) =>
     def === "" ? `export ${name}="\${${name}-}"` : `export ${name}="\${${name}:-${def}}"`,
   ).join("; ");
-  const identity: Record<string, string> = {};
-  for (const role of ["AUTHOR", "COMMITTER"]) {
-    const name = env[`FLY_RESIDENT_ENV_GIT_${role}_NAME`];
-    const email = env[`FLY_RESIDENT_ENV_GIT_${role}_EMAIL`];
-    if (name === undefined && email === undefined) continue;
-    if (!name?.trim() || !email?.trim())
-      throw new Error(`Sandbox Git ${role.toLowerCase()} identity requires both NAME and EMAIL`);
-    identity[`GIT_${role}_NAME`] = name;
-    identity[`GIT_${role}_EMAIL`] = email;
-  }
-  if (identity.GIT_AUTHOR_NAME && !identity.GIT_COMMITTER_NAME) {
-    identity.GIT_COMMITTER_NAME = identity.GIT_AUTHOR_NAME;
-    identity.GIT_COMMITTER_EMAIL = identity.GIT_AUTHOR_EMAIL!;
-  }
-  const gitExports = Object.entries(identity)
-    .map(([key, value]) => `export ${key}=${shq(value)}; `)
-    .join("");
-  return `exec </dev/null; ${exports}; ${gitExports}`;
+  return `exec </dev/null; ${exports}; `;
 }
 
 export const DROPPED_PROXY_ENV = new Set([
@@ -62,4 +45,28 @@ export function proxyExportPrefix(handle: SandboxHandle): string {
   const picked = Object.entries(handle.env ?? {}).filter(([key]) => DROPPED_PROXY_ENV.has(key));
   if (!picked.length) return "";
   return picked.map(([k, v]) => `export ${k}=${shq(v)}`).join("; ") + "; ";
+}
+
+export function sandboxGitIdentityEnv(
+  env: Record<string, string | undefined>,
+  scoped: Record<string, string> = {},
+): Record<string, string> {
+  const identity: Record<string, string> = {};
+  const scopedAuthor = "GIT_AUTHOR_NAME" in scoped || "GIT_AUTHOR_EMAIL" in scoped;
+  for (const role of ["AUTHOR", "COMMITTER"]) {
+    const scopedRole = `GIT_${role}_NAME` in scoped || `GIT_${role}_EMAIL` in scoped;
+    if (role === "COMMITTER" && scopedAuthor && !scopedRole) continue;
+    const name = scopedRole ? scoped[`GIT_${role}_NAME`] : env[`GIT_${role}_NAME`];
+    const email = scopedRole ? scoped[`GIT_${role}_EMAIL`] : env[`GIT_${role}_EMAIL`];
+    if (name === undefined && email === undefined) continue;
+    if (!name?.trim() || !email?.trim())
+      throw new Error(`Sandbox Git ${role.toLowerCase()} identity requires both NAME and EMAIL`);
+    identity[`GIT_${role}_NAME`] = name;
+    identity[`GIT_${role}_EMAIL`] = email;
+  }
+  if (identity.GIT_AUTHOR_NAME && !identity.GIT_COMMITTER_NAME) {
+    identity.GIT_COMMITTER_NAME = identity.GIT_AUTHOR_NAME;
+    identity.GIT_COMMITTER_EMAIL = identity.GIT_AUTHOR_EMAIL!;
+  }
+  return identity;
 }

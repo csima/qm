@@ -227,6 +227,8 @@ export function sandboxCoreEnv(
   const missingSecrets: string[] = [];
   const sb = config.sandbox;
   if (!sb) return { env, missingSecrets };
+  for (const [key, value] of Object.entries(sb.env ?? {}))
+    if (/^GIT_(AUTHOR|COMMITTER)_(NAME|EMAIL)$/.test(key)) env[`FLY_RESIDENT_ENV_${key}`] = value;
   if (localSandboxActive(config)) {
     env.SANDBOX_BACKEND = "local";
     if (sb.image) env.LOCAL_SANDBOX_IMAGE = sb.image;
@@ -1579,7 +1581,12 @@ function validateSandbox(raw: unknown, path: string, target: Target): SandboxCon
     throw new CliError(`${path}: "sandbox.backend": ${JSON.stringify(out.backend)}${label} requires target ${targets}`);
   }
   if (out.backend === "local") {
-    const stray = (["app", "baseImage", "env", "secretEnv"] as const).filter((key) => out[key] !== undefined);
+    const stray = (["app", "baseImage", "env", "secretEnv"] as const).filter(
+      (key) =>
+        out[key] !== undefined &&
+        (key !== "env" ||
+          Object.keys(out.env ?? {}).some((name) => !/^GIT_(AUTHOR|COMMITTER)_(NAME|EMAIL)$/.test(name))),
+    );
     if (stray.length) {
       throw new CliError(
         `${path}: "sandbox.backend": "local" ignores ${stray.map((key) => `"sandbox.${key}"`).join(", ")} — remove them; use "sandbox.image" for the runnable local sandbox image`,
@@ -1587,7 +1594,12 @@ function validateSandbox(raw: unknown, path: string, target: Target): SandboxCon
     }
   }
   if (out.backend === "aws") {
-    const stray = (["app", "image", "baseImage", "env", "secretEnv"] as const).filter((key) => out[key] !== undefined);
+    const stray = (["app", "image", "baseImage", "env", "secretEnv"] as const).filter(
+      (key) =>
+        out[key] !== undefined &&
+        (key !== "env" ||
+          Object.keys(out.env ?? {}).some((name) => !/^GIT_(AUTHOR|COMMITTER)_(NAME|EMAIL)$/.test(name))),
+    );
     if (stray.length) {
       throw new CliError(
         `${path}: "sandbox.backend": "aws" runs Lambda MicroVM sandboxes, which ignore ${stray.map((key) => `"sandbox.${key}"`).join(", ")} (Fly sandbox settings) — remove them or set "sandbox.backend": "sprites"`,
@@ -1595,7 +1607,12 @@ function validateSandbox(raw: unknown, path: string, target: Target): SandboxCon
     }
   }
   if (out.backend === "agent37" || out.backend === "superserve") {
-    const stray = (["app", "image", "baseImage", "env", "secretEnv"] as const).filter((key) => out[key] !== undefined);
+    const stray = (["app", "image", "baseImage", "env", "secretEnv"] as const).filter(
+      (key) =>
+        out[key] !== undefined &&
+        (key !== "env" ||
+          Object.keys(out.env ?? {}).some((name) => !/^GIT_(AUTHOR|COMMITTER)_(NAME|EMAIL)$/.test(name))),
+    );
     if (stray.length) {
       throw new CliError(
         `${path}: "sandbox.backend": "${out.backend}" ignores ${stray.map((key) => `"sandbox.${key}"`).join(", ")} — remove them`,

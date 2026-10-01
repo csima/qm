@@ -1,3 +1,4 @@
+import { createSandboxRouter } from "../src/sandbox/sandbox-routing.ts";
 import { createMemoryAdvisoryLock } from "../src/persistence/advisory-lock.ts";
 import { pollProcess } from "../src/sandbox/process-poll.ts";
 import { test, after, beforeEach } from "node:test";
@@ -1158,4 +1159,26 @@ test("released scratch handles cannot recreate a persistent sandbox", async () =
   const handle = await sandbox.provision(layers, { scratch: { key: "released-handle" } });
   await sandbox.teardown(handle, { destroy: true });
   await assert.rejects(sandbox.run(handle, "true"), /handle has been released/);
+});
+
+test("Git identity fallback covers foreground and durable processes without overriding scoped accounts", async () => {
+  const routed = createSandboxRouter({
+    backends: { modal: sandbox },
+    defaultBackend: "modal",
+    routes: createMemoryMap(),
+    gitIdentity: { GIT_AUTHOR_NAME: "Operator", GIT_AUTHOR_EMAIL: "operator@example.invalid" },
+  });
+  const command =
+    'printf "%s|%s|%s|%s" "$GIT_AUTHOR_NAME" "$GIT_AUTHOR_EMAIL" "$GIT_COMMITTER_NAME" "$GIT_COMMITTER_EMAIL"';
+  for (const env of [undefined, { GIT_AUTHOR_NAME: "Bob", GIT_AUTHOR_EMAIL: "bob@example.invalid" }, undefined]) {
+    const handle = await routed.provision(layers, { env });
+    const expected = env
+      ? "Bob|bob@example.invalid|Bob|bob@example.invalid"
+      : "Operator|operator@example.invalid|Operator|operator@example.invalid";
+    assert.equal((await routed.run(handle, command)).stdout, expected);
+    assert.ok(supportsProcessSessions(routed));
+    const { processId } = await routed.startProcess(handle, command);
+    const result = await pollProcess(routed, handle, processId, { deadlineMs: 5000 });
+    assert.equal(result.output, expected);
+  }
 });
