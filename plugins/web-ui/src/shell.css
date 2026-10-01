@@ -9666,6 +9666,49 @@ h3.ambient-field-label {
   color: var(--muted-foreground);
   font-size: var(--font-12-5);
 }
+.inbox-filter:has(.inbox-email-filter-control) {
+  min-width: 0;
+  max-width: 100%;
+}
+.inbox-email-filter-control {
+  min-width: 0;
+  max-width: 100%;
+}
+.field-menu.inbox-email-filter-control > .menu-button {
+  max-width: 100%;
+  height: auto;
+  min-height: 26px;
+  padding: 4px 8px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--foreground);
+  font: inherit;
+}
+.field-menu.inbox-email-filter-control > .menu-button:hover:not(:disabled),
+.field-menu.inbox-email-filter-control > .menu-button[aria-expanded="true"],
+.field-menu.inbox-email-filter-control > .menu-button:focus-visible {
+  background: var(--secondary);
+}
+.inbox-email-filter-control > .menu-button > .icon {
+  width: 13px;
+  height: 13px;
+  opacity: 1;
+}
+.inbox-email-filter-control .menu-label,
+.inbox-email-filter-control .menu-option-label {
+  white-space: normal;
+  text-align: left;
+}
+.inbox-email-filter-control > .menu-popover {
+  width: max-content;
+  min-width: 100%;
+  max-width: min(540px, calc(100vw - 32px));
+}
+.inbox-email-filter-control > .menu-button:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
 .inbox-filter-control {
   display: inline-grid;
   grid-template-columns: auto 13px;
