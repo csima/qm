@@ -1912,6 +1912,7 @@ function surfaceTpl(surface: InboxSurface): TemplateResult {
                           ariaDescription: INBOX_FILTERS.find((filter) => filter.id === inboxState.filter)?.description,
                           value: inboxState.filter,
                           disabled: inboxState.filterBusy || inboxState.loading,
+                          keyboardNavigation: true,
                           onSelect: (value) => void selectInboxFilter(value as InboxFilter),
                           options: INBOX_FILTERS.map((filter) => ({ value: filter.id, label: filter.label })),
                         })}

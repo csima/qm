@@ -281,6 +281,7 @@ export function menuSelect(props: {
   ariaLabel: string;
   ariaDescription?: string;
   disabled?: boolean;
+  keyboardNavigation?: boolean;
   prefix?: string;
   className?: string;
 }): TemplateResult {
@@ -293,7 +294,6 @@ export function menuSelect(props: {
         class="menu-option ${active ? "active" : ""}"
         type="button"
         role="menuitemradio"
-        value=${o.value ?? ""}
         ?disabled=${props.disabled ?? false}
         aria-checked=${active ? "true" : "false"}
         aria-disabled=${o.disabledHint ? "true" : nothing}
@@ -302,9 +302,12 @@ export function menuSelect(props: {
         @click=${(e: Event) => {
           e.stopPropagation();
           if (props.disabled || o.disabledHint) return;
-          const control = (e.currentTarget as HTMLElement).closest(".form-menu-control");
           closeFormMenus();
-          control?.querySelector<HTMLButtonElement>(".menu-button")?.focus();
+          if (props.keyboardNavigation)
+            (e.currentTarget as HTMLElement)
+              .closest(".form-menu-control")
+              ?.querySelector<HTMLButtonElement>(".menu-button")
+              ?.focus();
           props.onSelect(o.value ?? null);
         }}
       >
@@ -320,7 +323,7 @@ export function menuSelect(props: {
       class=${`menu-control form-menu-control field-menu${props.className ? ` ${props.className}` : ""}`}
       data-drop="down"
       @keydown=${(e: KeyboardEvent) => {
-        if (props.disabled) return;
+        if (!props.keyboardNavigation || props.disabled) return;
         const control = e.currentTarget as HTMLElement;
         const trigger = control.querySelector<HTMLButtonElement>(".menu-button")!;
         const open = control.classList.contains("open");
@@ -358,7 +361,7 @@ export function menuSelect(props: {
         @click=${(event: MouseEvent) => {
           toggleFormMenu(event);
           const control = (event.currentTarget as HTMLElement).closest(".form-menu-control");
-          if (event.detail === 0 && control?.classList.contains("open"))
+          if (props.keyboardNavigation && event.detail === 0 && control?.classList.contains("open"))
             (
               control.querySelector<HTMLButtonElement>(".menu-option.active:not(:disabled)") ??
               control.querySelector<HTMLButtonElement>(".menu-option:not(:disabled)")

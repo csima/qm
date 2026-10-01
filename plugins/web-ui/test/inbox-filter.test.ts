@@ -4,6 +4,12 @@ import { readFileSync } from "node:fs";
 import { VirtualConsole } from "jsdom";
 import { createInboxFixture, until } from "./inbox-composer-fixture.ts";
 
+const filterNames: Record<string, string> = {
+  all: "All emails",
+  human: "Light filtering — exclude notifications",
+  triaged: "Heavy filtering — only emails that need your attention",
+};
+
 async function inboxUi(t: TestContext) {
   const errors: Error[] = [];
   const virtualConsole = new VirtualConsole();
@@ -96,12 +102,16 @@ test("inbox filters persist, preserve Sent, and keep refreshes consistent", asyn
   const settled = () => until(() => !inboxState.loading && !inboxState.filterBusy);
   const filterSelect = () => host.querySelector<HTMLButtonElement>('button[aria-label="Email filter"]')!;
   const filterMenu = () => host.querySelector<HTMLElement>(".inbox-email-filter-control .menu-popover")!;
-  const selectedFilter = () =>
-    host.querySelector<HTMLButtonElement>('.inbox-email-filter-control [aria-checked="true"]')!.value;
+  const selectedFilter = () => {
+    const label = host.querySelector('.inbox-email-filter-control [aria-checked="true"]')!.textContent!.trim();
+    return Object.keys(filterNames).find((value) => filterNames[value] === label);
+  };
   const chooseFilter = (value: string) => {
     filterSelect().click();
     assert.equal(filterMenu().hidden, false);
-    host.querySelector<HTMLButtonElement>(`.inbox-email-filter-control .menu-option[value="${value}"]`)!.click();
+    [...filterMenu().querySelectorAll<HTMLButtonElement>(".menu-option")]
+      .find((option) => option.textContent!.trim() === filterNames[value])!
+      .click();
     assert.equal(filterMenu().hidden, true);
   };
   const titles = () => [...host.querySelectorAll(".inbox-item-sub")].map((item) => item.textContent?.trim());
@@ -275,8 +285,8 @@ test("email filters appear only on email views and leave other sources unchanged
       mount({ viewId });
       assert.equal(host.querySelector(".inbox-filter > span")?.textContent, "Emails");
       assert.equal(
-        host.querySelector<HTMLButtonElement>('.inbox-email-filter-control [aria-checked="true"]')?.value,
-        filter,
+        host.querySelector('.inbox-email-filter-control [aria-checked="true"]')?.textContent?.trim(),
+        filterNames[filter],
       );
     }
     for (const viewId of ["slack", "chat", "custom", "sent"]) {
@@ -319,11 +329,26 @@ test("email filters default to Light filtering when the feed omits a preference"
   mount();
   assert.equal(inboxState.filter, "human");
   assert.equal(
-    host.querySelector<HTMLButtonElement>('.inbox-email-filter-control [aria-checked="true"]')?.value,
-    "human",
+    host.querySelector('.inbox-email-filter-control [aria-checked="true"]')?.textContent?.trim(),
+    filterNames.human,
   );
   assert.deepEqual(
     [...host.querySelectorAll(".inbox-item-sub")].map((item) => item.textContent?.trim()),
     ["Quick question", "Thanks, all set"],
   );
+});
+
+test("the inbox filter is unavailable without Inbox access", async (t) => {
+  const { host, mount, vite, inbox } = await inboxUi(t);
+  const { appState } = await vite.ssrLoadModule("/src/shell-state.ts");
+  appState.me.permissions = [];
+  const requests: string[] = [];
+  globalThis.fetch = async (input) => {
+    requests.push(String(input));
+    return Response.json({});
+  };
+  mount();
+  await inbox.refreshInbox();
+  assert.equal(host.querySelector(".inbox-email-filter-control"), null);
+  assert.deepEqual(requests, []);
 });
