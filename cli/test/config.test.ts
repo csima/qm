@@ -1509,7 +1509,10 @@ test("proxy deployment rendering names the mode and classifier", () => {
 test("explicit Git identity reaches core for local and remote sandbox backends", () => {
   for (const backend of ["local", "agent37", "superserve"] as const) {
     withConfig(
-      { sandbox: { backend, env: { GIT_AUTHOR_NAME: "Operator", GIT_AUTHOR_EMAIL: "operator@example.invalid" } } },
+      {
+        env: { core: { SUPERSERVE_TEMPLATE: "qm-agent-qa" } },
+        sandbox: { backend, env: { GIT_AUTHOR_NAME: "Operator", GIT_AUTHOR_EMAIL: "operator@example.invalid" } },
+      },
       ({ path }) => {
         const env = sandboxCoreEnv(loadConfigAt(path).config).env;
         assert.equal(env.FLY_RESIDENT_ENV_GIT_AUTHOR_NAME, "Operator");
