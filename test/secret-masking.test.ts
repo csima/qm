@@ -99,3 +99,16 @@ test("conflicting public metadata cannot exempt an explicitly secret value", () 
     { TOKEN: "protected" },
   );
 });
+
+test("Git author metadata remains visible while actual credentials remain masked", () => {
+  const identity = {
+    GIT_AUTHOR_NAME: "Connected Account",
+    GIT_AUTHOR_EMAIL: "123+account@users.noreply.github.com",
+    GIT_COMMITTER_NAME: "Connected Account",
+    GIT_COMMITTER_EMAIL: "123+account@users.noreply.github.com",
+  };
+  const env = { ...identity, GITHUB_TOKEN: SECRET };
+  assert.deepEqual(executionSecretEnv(env), { GITHUB_TOKEN: SECRET });
+  for (const value of Object.values(identity)) assert.equal(createSecretValueMasker(env)(value), value);
+  assert.equal(createExactSecretValueMasker(Object.values(executionSecretEnv(env)))(SECRET), "<redacted:credential>");
+});

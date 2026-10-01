@@ -15,6 +15,7 @@ import {
   type Sandbox,
   type SandboxHandle,
   type StageOptions,
+  type StartProcessOptions,
   type TeardownOptions,
 } from "./sandbox.ts";
 
@@ -153,6 +154,11 @@ export function createSandboxRouter(opts: RoutingSandboxOptions): Sandbox {
   };
   const some = (pred: (s: Sandbox) => boolean): boolean => constructed(backends).some(pred);
 
+  const processOptions = (handle: SandboxHandle, options?: StartProcessOptions): StartProcessOptions | undefined => {
+    const identity = sandboxGitIdentityEnv(handle.env ?? {}, options?.env);
+    return Object.keys(identity).length ? { ...options, env: { ...options?.env, ...identity } } : options;
+  };
+
   const router: Sandbox = {
     profile: fallback.profile,
 
@@ -249,7 +255,7 @@ export function createSandboxRouter(opts: RoutingSandboxOptions): Sandbox {
           startRegisteredProcess: (handle: SandboxHandle, command: string, register, o?) =>
             useHandle(handle, async () => {
               const sandbox = requireCap(forHandle(handle), "startProcess", handle.scopeId);
-              const started = await sandbox.startProcess(handle, command, o);
+              const started = await sandbox.startProcess(handle, command, processOptions(handle, o));
               try {
                 await register(started.processId);
               } catch (error) {
@@ -270,7 +276,11 @@ export function createSandboxRouter(opts: RoutingSandboxOptions): Sandbox {
             }),
           startProcess: (handle: SandboxHandle, command: string, o?) => {
             const start = () =>
-              requireCap(forHandle(handle), "startProcess", handle.scopeId).startProcess(handle, command, o);
+              requireCap(forHandle(handle), "startProcess", handle.scopeId).startProcess(
+                handle,
+                command,
+                processOptions(handle, o),
+              );
             return useHandle(handle, start);
           },
           readProcess: (handle: SandboxHandle, id: string, o?) =>

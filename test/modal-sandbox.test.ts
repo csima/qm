@@ -1180,5 +1180,16 @@ test("Git identity fallback covers foreground and durable processes without over
     const { processId } = await routed.startProcess(handle, command);
     const result = await pollProcess(routed, handle, processId, { deadlineMs: 5000 });
     assert.equal(result.output, expected);
+    const override = await routed.startProcess(handle, command, {
+      env: { GIT_AUTHOR_NAME: "Carol", GIT_AUTHOR_EMAIL: "carol@example.invalid" },
+    });
+    assert.equal(
+      (await pollProcess(routed, handle, override.processId, { deadlineMs: 5000 })).output,
+      "Carol|carol@example.invalid|Carol|carol@example.invalid",
+    );
+    await assert.rejects(
+      async () => routed.startProcess(handle, command, { env: { GIT_AUTHOR_NAME: "Incomplete" } }),
+      /both NAME and EMAIL/,
+    );
   }
 });
