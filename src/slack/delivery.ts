@@ -2,7 +2,7 @@ import { errMessage, swallowAs } from "../util/errors.ts";
 import { safeChunks, safeClip } from "./safe-cut.ts";
 import { sleep } from "./util.ts";
 import { isExternallyShared, isMpim, type ChannelMeta } from "./identity.ts";
-import { personIds } from "../directory/person.ts";
+import { resolvePersonIds } from "../directory/person.ts";
 
 export interface SlackReplyArgs {
   channel: string;
@@ -256,7 +256,9 @@ export function encodeDeliveryTarget(channel: string, threadTs?: string): string
 }
 
 async function slackUserIdFor(client: any, principalId: string): Promise<string> {
-  const identities = personIds(principalId);
+  const supplied = principalId.trim();
+  const identities =
+    supplied.includes("@") || /^[UW][A-Z0-9]+$/.test(supplied) ? [supplied] : await resolvePersonIds(supplied);
   const slackId = identities.find((id) => /^[UW][A-Z0-9]+$/.test(id));
   if (slackId) return slackId;
   const email = identities.find((id) => id.includes("@"));
