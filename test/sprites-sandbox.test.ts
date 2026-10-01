@@ -322,6 +322,18 @@ test("a checkpoint failure is reported and never fails the teardown", async () =
   assert.ok(fake.checkpoints(h.id).length <= 1);
 });
 
+test("a failed checkpoint waits out the interval before retrying instead of retrying every teardown", async () => {
+  const events: Array<{ code: string }> = [];
+  const s = make({ onError: (e: { code: string }) => events.push(e) });
+  const h = await s.provision(layers);
+  fake.failCheckpoints(h.id, "JuiceFS rename clone: file exists");
+  await s.teardown(h);
+  await s.teardown(h);
+  await s.teardown(h);
+  assert.equal(fake.checkpointAttempts(h.id), 1);
+  assert.equal(events.filter((e) => e.code === "checkpoint_failed").length, 1);
+});
+
 test("computerStatus reports checkpoint recovery and a healthy machine whose shell has stopped answering", async () => {
   const h = await sandbox.provision(layers);
   const fresh = await sandbox.computerStatus!(scope);

@@ -38,6 +38,8 @@ export interface FakeSprites {
   policy(name: string): NetworkRule[] | null;
   resources(name: string): { limitMB: number } | null;
   checkpoints(name: string): string[];
+  failCheckpoints(name: string, error: string): void;
+  checkpointAttempts(name: string): number;
   execScripts(): string[];
   stallAfterRun(name: string): void;
   fail502(name: string): void;
@@ -180,6 +182,8 @@ export function installFakeSprites(origin = `https://fake-sprites-${++nextOrigin
   let refuseDeleteStatus: number | undefined;
   let rateLimitRetryAfter: number | undefined;
   let checkpointSeq = 0;
+  const checkpointFailures = new Map<string, string>();
+  const checkpointAttempts = new Map<string, number>();
   const injected: Array<InjectedFailure & { status: number }> = [];
 
   const ensureDir = (name: string): string => {
@@ -362,6 +366,9 @@ export function installFakeSprites(origin = `https://fake-sprites-${++nextOrigin
       return new Response(null, { status: 204 });
     }
     if (sub === "checkpoint" && method === "POST") {
+      checkpointAttempts.set(name, (checkpointAttempts.get(name) ?? 0) + 1);
+      const failure = checkpointFailures.get(name);
+      if (failure) return ndjson([{ type: "error", error: failure }]);
       const body = JSON.parse(toBuf(init?.body).toString() || "{}") as { comment?: string };
       const id = `v${++checkpointSeq}`;
       const dir = join(root, ".checkpoints", name, id);
@@ -448,6 +455,10 @@ export function installFakeSprites(origin = `https://fake-sprites-${++nextOrigin
     policy: (name) => policies.get(name) ?? null,
     resources: (name) => resources.get(name) ?? null,
     checkpoints: (name) => (checkpoints.get(name) ?? []).map((c) => c.id),
+    failCheckpoints: (name, error) => {
+      checkpointFailures.set(name, error);
+    },
+    checkpointAttempts: (name) => checkpointAttempts.get(name) ?? 0,
     execScripts: () => [...execScripts],
     stallAfterRun: (name) => {
       stallAfterRun.add(name);
@@ -486,6 +497,8 @@ export function installFakeSprites(origin = `https://fake-sprites-${++nextOrigin
     },
     restarts: () => [...restarts],
     reset: () => {
+      checkpointFailures.clear();
+      checkpointAttempts.clear();
       for (const name of Array.from(sprites.keys())) deleteSprite(name);
       execScripts.length = 0;
       calls.length = 0;

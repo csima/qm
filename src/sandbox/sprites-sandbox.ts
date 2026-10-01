@@ -426,6 +426,7 @@ export function createSpritesSandbox(workspace: WorkspaceStore, opts: SpritesSan
       book.lastSnapshotMs = Date.now();
       book.homeDirty = false;
     } catch (e) {
+      book.lastSnapshotMs = Date.now();
       reportError("sandbox_snapshot", "checkpoint_failed", errMessage(e), base.scopeFor(name));
     }
   }
