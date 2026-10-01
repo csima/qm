@@ -207,3 +207,26 @@ Every classification writes one `security_screen.classify` audit record with sta
 `SECURITY_SCREEN_BACKEND`, `SECURITY_SCREEN_ALL_POSTURES`, and `SECURITY_SCREEN_PROXY_ROLLOUT` (and the `backend`, `allPostures`, and `rollout` config keys) are retired. A configuration that only said `backend: "off"` (or `SECURITY_SCREEN_BACKEND=off`) still loads as `mode: "off"` with a deprecation warning; any other use of the old names refuses to start.
 
 New tool-output release approvals deliver the exact saved text without running the tool again. They are once-only and retain the source scope in durable history. A release is refused if the current audience is no longer entitled to that source scope. Legacy persisted screening grants remain effective and are audited; remove those grants explicitly if a deployment requires every result to be classified. New release approvals cannot create session or always grants.
+
+### Sandbox Git commit identity
+
+A deployment can explicitly choose a shared commit identity with
+`sandbox.env.GIT_AUTHOR_NAME` and `sandbox.env.GIT_AUTHOR_EMAIL`. Set both;
+`GIT_COMMITTER_NAME` and `GIT_COMMITTER_EMAIL` default to that author, or may be
+set as a separate complete pair. The core environment representation is
+`FLY_RESIDENT_ENV_GIT_AUTHOR_NAME`, `FLY_RESIDENT_ENV_GIT_AUTHOR_EMAIL`,
+`FLY_RESIDENT_ENV_GIT_COMMITTER_NAME`, and `FLY_RESIDENT_ENV_GIT_COMMITTER_EMAIL`.
+These four keys are applied at command execution on sandbox backends, including
+Sprites. This does not enable arbitrary deployment environment forwarding.
+
+This is an explicit deployment-wide fallback, not automatic connected-account
+selection. Use a verified email or the account's actual GitHub no-reply address;
+QM never guesses private emails or derives an identity from credential labels.
+With multiple authorized accounts, select the transport account deliberately
+and supply all four `GIT_AUTHOR_*` / `GIT_COMMITTER_*` values for that command.
+Per-turn sandbox environment and explicit command exports override the fallback.
+Do not use `git config --global` or shared repository configuration for a personal
+account: those settings outlive the turn and can affect other users. QM's fallback
+is process-local and does not modify Git configuration or credential scope.
+Without a configured fallback, existing Git behavior is unchanged. This does not
+verify Vercel team membership or guarantee acceptance by any downstream service.

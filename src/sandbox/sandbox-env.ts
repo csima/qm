@@ -9,11 +9,28 @@ export const NONINTERACTIVE_ENV: ReadonlyArray<readonly [string, string]> = [
   ["AWS_PAGER", ""],
 ];
 
-export function nonInteractiveShellPrefix(): string {
+export function nonInteractiveShellPrefix(env: NodeJS.ProcessEnv = process.env): string {
   const exports = NONINTERACTIVE_ENV.map(([name, def]) =>
     def === "" ? `export ${name}="\${${name}-}"` : `export ${name}="\${${name}:-${def}}"`,
   ).join("; ");
-  return `exec </dev/null; ${exports}; `;
+  const identity: Record<string, string> = {};
+  for (const role of ["AUTHOR", "COMMITTER"]) {
+    const name = env[`FLY_RESIDENT_ENV_GIT_${role}_NAME`];
+    const email = env[`FLY_RESIDENT_ENV_GIT_${role}_EMAIL`];
+    if (name === undefined && email === undefined) continue;
+    if (!name?.trim() || !email?.trim())
+      throw new Error(`Sandbox Git ${role.toLowerCase()} identity requires both NAME and EMAIL`);
+    identity[`GIT_${role}_NAME`] = name;
+    identity[`GIT_${role}_EMAIL`] = email;
+  }
+  if (identity.GIT_AUTHOR_NAME && !identity.GIT_COMMITTER_NAME) {
+    identity.GIT_COMMITTER_NAME = identity.GIT_AUTHOR_NAME;
+    identity.GIT_COMMITTER_EMAIL = identity.GIT_AUTHOR_EMAIL!;
+  }
+  const gitExports = Object.entries(identity)
+    .map(([key, value]) => `export ${key}=${shq(value)}; `)
+    .join("");
+  return `exec </dev/null; ${exports}; ${gitExports}`;
 }
 
 export const DROPPED_PROXY_ENV = new Set([
