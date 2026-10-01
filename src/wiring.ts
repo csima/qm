@@ -584,6 +584,8 @@ export function buildApp(
     canStart: () => !config.backgroundDeploymentId || backgroundAdmission(),
     onAdmitted: () => noteAdmitted(),
   });
+  const startupWork = createAdmittedWork();
+  const settleOnStop = <T>(work: Promise<T>): Promise<T> => startupWork.run(() => work);
   const createSweeper: typeof createUntrackedSweeper = (work, interval, options) =>
     createUntrackedSweeper(() => admittedWork.run(work), interval, options);
   if (config.databaseUrl && !config.connectorSecretKey) {
@@ -664,7 +666,7 @@ export function buildApp(
     externalMembers: artifactMap<ExternalMember>("external_members"),
     principalLinks,
   });
-  void identity.hydrate();
+  void settleOnStop(identity.hydrate()).catch(swallowAs("wiring: identity hydrate failed", undefined));
   const leaderLease: LeaderLease = pgArtifactMap
     ? createPostgresLeaderLease(pgArtifactMap.pool)
     : createNoopLeaderLease();
@@ -700,7 +702,8 @@ export function buildApp(
     defaultSharingPosture: config.sharingPosture,
     ...(config.connectorSecretKey ? { connectorSecretKey: config.connectorSecretKey } : {}),
   });
-  void configStore.hydrate?.();
+  if (configStore.hydrate)
+    void settleOnStop(configStore.hydrate()).catch(swallowAs("wiring: config hydrate failed", undefined));
   const skills: SkillStore = createSkillStore({
     backing: artifactMap<Skill>("skills"),
     ...(config.skillSigningSecret ? { signingSecret: config.skillSigningSecret } : {}),
@@ -754,7 +757,7 @@ export function buildApp(
         }
       : {}),
   });
-  const deploymentLayerReady = deploymentLayerStore.hydrate();
+  const deploymentLayerReady = settleOnStop(deploymentLayerStore.hydrate());
   const deploymentLayerRefresh = createUntrackedSweeper(() => deploymentLayerStore.hydrate(), 30_000, {
     label: "deployment layer refresh",
   });
@@ -772,10 +775,12 @@ export function buildApp(
         });
       }
     };
-    skillsReady = Promise.all([
-      installCatalogs().catch((e) => console.error("[seed] failed to install seed skills:", errMessage(e))),
-      deploymentLayerReady.catch((e) => console.error("[seed] deployment layer not ready:", errMessage(e))),
-    ]).then(() => undefined);
+    skillsReady = settleOnStop(
+      Promise.all([
+        installCatalogs().catch((e) => console.error("[seed] failed to install seed skills:", errMessage(e))),
+        deploymentLayerReady.catch((e) => console.error("[seed] deployment layer not ready:", errMessage(e))),
+      ]).then(() => undefined),
+    );
   } else {
     skillsReady = deploymentLayerReady.then(
       () => undefined,
@@ -2648,9 +2653,9 @@ export function buildApp(
   );
   const blobSweeper = createSweeper(() => blobTransfer.sweep(BLOB_TTL_MS), 30 * 60_000);
   const BLOB_TRANSFER_EXPIRY_DAYS = 1;
-  void blobTransfer
-    .ensureExpiry?.(BLOB_TRANSFER_EXPIRY_DAYS)
-    .catch((e) =>
+  const blobExpiry = blobTransfer.ensureExpiry?.(BLOB_TRANSFER_EXPIRY_DAYS);
+  if (blobExpiry)
+    void settleOnStop(blobExpiry).catch((e) =>
       console.error("[blob-transfer] S3 lifecycle expiry install failed (sweep remains the fallback):", errMessage(e)),
     );
   const idleSweeper =
@@ -2780,10 +2785,14 @@ export function buildApp(
       await Promise.all(workers.map((w) => w.releaseInFlight()));
     },
     async stop() {
+      startupWork.pause();
       await stopBackground();
       await Promise.all([
         withTimeout(() => admittedWork.drained(), config.shutdownDrainMs, "admitted work drain").catch(
           swallowAs("wiring: admitted work drain failed", undefined),
+        ),
+        withTimeout(() => startupWork.drained(), config.shutdownDrainMs, "startup work drain").catch(
+          swallowAs("wiring: startup work drain failed", undefined),
         ),
         ...workers.map((w) => w.stop(config.shutdownDrainMs)),
       ]).catch(swallowAs("wiring: worker drain failed", undefined));
