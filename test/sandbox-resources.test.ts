@@ -997,17 +997,29 @@ test("a pause left in flight by a retired worker settles before the next worker 
   const record = await resources.create("alice", "personal:alice", "e2b");
   const handle = await router.provision(layers, { sandboxId: record.id });
   const noted: Array<string | null> = [];
-  parking.teardown = async () => {
-    noted.push((await pauses.get(`pausing:${record.id}`))?.pausing ?? null);
+  const pausing = Promise.withResolvers<void>();
+  const probes: Array<boolean | undefined> = [];
+  let state: "running" | "paused" = "running";
+  parking.computerStatus = async (_scope, statusOpts) => {
+    probes.push(statusOpts?.passive);
+    return { machine: "m", guestResponsive: false, lifecycleState: state };
   };
-  await router.teardown(handle);
+  parking.teardown = async (_handle, tdOpts) => {
+    noted.push((await pauses.get(`pausing:${record.id}`))?.pausing ?? null);
+    if (!tdOpts?.keepWarm) await pausing.promise;
+  };
+  const pausingLive = router.teardown(handle);
+  while (!noted.length) await new Promise((resolve) => setImmediate(resolve));
+  const resumedLive = router.provision(layers, { sandboxId: record.id });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.deepEqual(probes, [], "a live pause holds the computer lock, so the next worker waits without probing");
+  pausing.resolve();
+  await Promise.all([pausingLive, resumedLive]);
   await router.teardown(handle, { keepWarm: true });
   assert.deepEqual(noted, [record.id, null]);
   assert.equal(await pauses.get(`pausing:${record.id}`), null);
   await pauses.put(`pausing:${record.id}`, { createdAt: Date.now(), scopeLabel: "", boxes: [], pausing: record.id });
-  let state: "running" | "paused" = "running";
   const resumedWhile: string[] = [];
-  parking.computerStatus = async () => ({ machine: "m", guestResponsive: false, lifecycleState: state });
   const provision = parking.provision.bind(parking);
   parking.provision = async (...args) => {
     resumedWhile.push(state);
@@ -1016,6 +1028,7 @@ test("a pause left in flight by a retired worker settles before the next worker 
   setTimeout(() => (state = "paused"), 200);
   await router.provision(layers, { sandboxId: record.id });
   assert.deepEqual(resumedWhile, ["paused"]);
+  assert.ok(probes.length > 0 && probes.every((passive) => passive === true));
   assert.equal(await pauses.get(`pausing:${record.id}`), null);
 });
 

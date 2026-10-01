@@ -240,7 +240,7 @@ export interface Sandbox {
   listProcesses?(handle: SandboxHandle): Promise<ProcessSession[]>;
   adoptHomeSnapshot?(scopeId: string, blobId: string): Promise<void>;
   persistHomeSnapshot?(scopeId: string): Promise<void>;
-  computerStatus?(scopeId: string): Promise<ComputerStatus>;
+  computerStatus?(scopeId: string, opts?: { passive?: boolean }): Promise<ComputerStatus>;
   restartComputer?(scopeId: string): Promise<void>;
   teardown(handle: SandboxHandle, opts?: TeardownOptions): Promise<void>;
   destroyScope?(scopeId: string): Promise<void>;

@@ -60,21 +60,20 @@ export interface RoutingSandboxOptions {
 }
 
 export const ROUTE_CACHE_TTL_MS = 15_000;
-const PAUSE_SETTLE_MS = 120_000;
+const PAUSE_SETTLE_MS = 30_000;
 
 export function createSandboxRouter(opts: RoutingSandboxOptions): Sandbox {
   const { backends, routes, defaultBackend } = opts;
   const pauseKey = (resourceId: string) => `pausing:${resourceId}`;
   const settlePause = async (sandbox: Sandbox, resourceId: string, backingScopeId: string): Promise<void> => {
-    const deadline = Date.now() + PAUSE_SETTLE_MS;
-    while (await opts.pauses?.get(pauseKey(resourceId))) {
-      const status = await sandbox.computerStatus?.(backingScopeId).catch(() => undefined);
-      if (status?.lifecycleState === "paused" || Date.now() >= deadline) {
-        await opts.pauses!.delete(pauseKey(resourceId));
-        return;
-      }
-      await sleep(1_000);
+    const note = await opts.pauses?.get(pauseKey(resourceId)).catch(swallowAs("sandbox: pause note read", null));
+    if (!note) return;
+    while (Date.now() < note.createdAt + PAUSE_SETTLE_MS) {
+      const status = await sandbox.computerStatus?.(backingScopeId, { passive: true }).catch(() => undefined);
+      if (status?.lifecycleState === "paused") break;
+      await sleep(250);
     }
+    await opts.pauses!.delete(pauseKey(resourceId)).catch(swallowAs("sandbox: pause note clear", undefined));
   };
   const fallback = ((): Sandbox => {
     const s = backends[defaultBackend];
@@ -194,8 +193,14 @@ export function createSandboxRouter(opts: RoutingSandboxOptions): Sandbox {
         const routedLayers = layers.map((layer) =>
           layer.mode === "rw" ? { ...layer, scopeId: resource.backingScopeId } : layer,
         );
-        await settlePause(sandbox, resource.id, resource.backingScopeId);
-        const handle = await opts.resources!.use(resource.id, () => sandbox.provision(routedLayers, provOpts), true);
+        const handle = await opts.resources!.use(
+          resource.id,
+          async () => {
+            await settlePause(sandbox, resource.id, resource.backingScopeId);
+            return sandbox.provision(routedLayers, provOpts);
+          },
+          true,
+        );
         return { ...handle, backend: resource.backend, scopeId: resource.ownerScopeId, resourceId: resource.id };
       }
       const { name, sandbox } = await pick(scope);
@@ -250,16 +255,18 @@ export function createSandboxRouter(opts: RoutingSandboxOptions): Sandbox {
       const { resourceId } = handle;
       const pauses = parks && !tdOpts?.destroy && !tdOpts?.keepWarm && resourceId ? opts.pauses : undefined;
       const action = async () => {
-        await pauses?.put(pauseKey(resourceId!), {
-          createdAt: Date.now(),
-          scopeLabel: handle.scopeId ?? "",
-          boxes: [],
-          pausing: resourceId,
-        });
+        await pauses
+          ?.put(pauseKey(resourceId!), {
+            createdAt: Date.now(),
+            scopeLabel: handle.scopeId ?? "",
+            boxes: [],
+            pausing: resourceId,
+          })
+          .catch(swallowAs("sandbox: pause note write", undefined));
         try {
           await forHandle(handle).teardown(handle, tdOpts);
         } finally {
-          await pauses?.delete(pauseKey(resourceId!));
+          await pauses?.delete(pauseKey(resourceId!)).catch(swallowAs("sandbox: pause note clear", undefined));
         }
       };
       return resourceId && opts.resources
