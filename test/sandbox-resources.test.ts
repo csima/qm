@@ -988,6 +988,37 @@ test("parking teardown waits for active commands on the computer", { timeout: 10
   assert.equal(parked, true);
 });
 
+test("a pause left in flight by a retired worker settles before the next worker resumes the computer", async () => {
+  const { options, backend, layers, routes } = fixture();
+  const parking: Sandbox = { ...backend, profile: { ...backend.profile, parksOnTeardown: true } };
+  const resources = createSandboxResources({ ...options, backends: { e2b: parking }, defaultBackend: "e2b" });
+  const pauses = createMemoryMap<{ createdAt: number; scopeLabel: string; boxes: unknown[]; pausing?: string }>();
+  const router = createSandboxRouter({ routes, backends: { e2b: parking }, defaultBackend: "e2b", resources, pauses });
+  const record = await resources.create("alice", "personal:alice", "e2b");
+  const handle = await router.provision(layers, { sandboxId: record.id });
+  const noted: Array<string | null> = [];
+  parking.teardown = async () => {
+    noted.push((await pauses.get(`pausing:${record.id}`))?.pausing ?? null);
+  };
+  await router.teardown(handle);
+  await router.teardown(handle, { keepWarm: true });
+  assert.deepEqual(noted, [record.id, null]);
+  assert.equal(await pauses.get(`pausing:${record.id}`), null);
+  await pauses.put(`pausing:${record.id}`, { createdAt: Date.now(), scopeLabel: "", boxes: [], pausing: record.id });
+  let state: "running" | "paused" = "running";
+  const resumedWhile: string[] = [];
+  parking.computerStatus = async () => ({ machine: "m", guestResponsive: false, lifecycleState: state });
+  const provision = parking.provision.bind(parking);
+  parking.provision = async (...args) => {
+    resumedWhile.push(state);
+    return provision(...args);
+  };
+  setTimeout(() => (state = "paused"), 200);
+  await router.provision(layers, { sandboxId: record.id });
+  assert.deepEqual(resumedWhile, ["paused"]);
+  assert.equal(await pauses.get(`pausing:${record.id}`), null);
+});
+
 test("a verified live turn can create only its own new scope computer without directory mutations", async () => {
   const { resources, router } = fixture(undefined, []);
   const scope = "channel:external-slack:T1:policy:C1";

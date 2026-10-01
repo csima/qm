@@ -1165,6 +1165,7 @@ export function buildApp(
   const sandboxScrubs = artifactMap<PendingSandboxScrub>("sandbox_scrubs");
   const sandbox: Sandbox = createSandboxRouter({
     resources: sandboxResources,
+    pauses: sandboxScrubs,
     backends: sandboxBackends,
     routes: sandboxRoutes,
     defaultBackend: config.sandboxBackend,

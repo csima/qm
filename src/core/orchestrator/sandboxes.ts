@@ -43,13 +43,15 @@ export interface PendingSandboxScrub {
   createdAt: number;
   scopeLabel: string;
   boxes: Array<{ layers: Resolution["layers"]; sandboxId?: string; egress?: Resolution["egress"]; dirs: string[] }>;
+  pausing?: string;
 }
 
 export async function finishPendingScrubs(
   sandbox: Pick<Sandbox, "provision" | "removeDir" | "teardown">,
   scrubs: DurableMap<PendingSandboxScrub>,
 ): Promise<void> {
-  for (const [id] of await scrubs.entries()) {
+  for (const [id, noted] of await scrubs.entries()) {
+    if (noted.pausing) continue;
     const pending = await scrubs.take(id);
     if (!pending || Date.now() - pending.createdAt > TURN_FILES_MAX_AGE_MS) continue;
     const remaining: PendingSandboxScrub["boxes"] = [];
