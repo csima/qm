@@ -1,0 +1,34 @@
+// Cloudflare Workers + Containers target for qm. scripts/deploy.mjs fills in
+// the deployment-specific vars and secrets; see README.md.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "qm",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-09-01",
+  "workers_dev": true,
+  "observability": { "enabled": true },
+  "containers": [
+    {
+      "class_name": "QmContainer",
+      "image": "./Dockerfile",
+      "image_build_context": "..",
+      // 2 vCPU / 8 GiB / 16 GB: core peaks around Fly's performance-2x (4 GB),
+      // plus web-ui and portal.
+      "instance_type": "standard-3",
+      "max_instances": 1,
+      // Matches core's 300s shutdown drain on Fly.
+      "rollout_active_grace_period": 300,
+    },
+  ],
+  "durable_objects": {
+    "bindings": [{ "name": "QM", "class_name": "QmContainer" }],
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["QmContainer"] }],
+  // Keep-alive: restarts the container if it ever stops.
+  "triggers": { "crons": ["*/5 * * * *"] },
+  "vars": {
+    "QM_HARNESS": "pi",
+    "QM_MODEL_PROVIDER": "anthropic",
+    "QM_SANDBOX_BACKEND": "sprites",
+  },
+}
