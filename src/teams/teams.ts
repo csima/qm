@@ -88,17 +88,17 @@ export async function scopeTeamsToTurn<
   external: boolean,
 ): Promise<T> {
   const teams = external ? [] : ((await deps.teams?.list()) ?? []);
-  if (!teams.length) return input;
   const scope = conversationScope(input.conversation, input.actor.id);
-  const posture =
-    (await deps.config?.resolveSharingPostureDurable(scopeId("personal", input.actor.id), scope)) ?? "isolated";
+  const posture = teams.length
+    ? ((await deps.config?.resolveSharingPostureDurable(scopeId("personal", input.actor.id), scope)) ?? "isolated")
+    : "isolated";
   const { teamIds, note } = teamsForTurn(teams, {
     scope,
     actorId: input.actor.id,
     audience: input.conversation.audience,
     posture,
   });
-  const stamp = (p: Principal): Principal => ({ ...p, teamIds });
+  const stamp = (p: Principal): Principal => ({ ...p, teamIds: p.type === "internal" ? teamIds : [] });
   const header = [input.conversationHeader?.trim(), note].filter(Boolean).join("\n\n");
   return {
     ...input,

@@ -1296,6 +1296,7 @@ export function adminResourceManifest(): AdminResourceManifestEntry[] {
 }
 
 const TEAM_ID = /^[a-z0-9][a-z0-9-]{0,62}$/;
+const TEAM_MAX = 500;
 
 function parseTeam(
   body: unknown,
@@ -1308,11 +1309,15 @@ function parseTeam(
   const people = (v: unknown) => (Array.isArray(v) && v.every((x) => typeof x === "string" && x.trim()) ? v : null);
   const members = people(b.members ?? []);
   const admins = people(b.admins ?? []);
-  if (!members || !admins) return { error: "members and admins must be arrays of person ids" };
+  if (!members || !admins || members.length + admins.length > TEAM_MAX)
+    return { error: `members and admins must be arrays of at most ${TEAM_MAX} person ids` };
   const rooms = Array.isArray(b.rooms) ? b.rooms : [];
-  if (
-    !rooms.every((r) => typeof r === "string" && ["channel", "group"].includes(parseScopeId(r as ScopeId).kind ?? ""))
-  )
+  const room = (r: unknown) => {
+    if (typeof r !== "string") return false;
+    const { kind, ref } = parseScopeId(r as ScopeId);
+    return (kind === "channel" || kind === "group") && !!ref;
+  };
+  if (rooms.length > TEAM_MAX || !rooms.every(room))
     return { error: "rooms must be channel:<id> or group:<id> scopes" };
   return {
     id: b.id,

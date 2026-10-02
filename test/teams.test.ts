@@ -102,8 +102,25 @@ test("scopeTeamsToTurn stamps the turn's teams onto the actor and audience", asy
     out.conversation.audience.map((p) => p.teamIds),
     [["finance"], ["finance"]],
   );
+  const guest = { id: "g@y.com", type: "guest" } as Principal;
+  const mixed = await scopeTeamsToTurn(
+    { actor: person("ann@x.com"), conversation: { ...conversation, audience: [person("ann@x.com"), guest] } },
+    { teams, config: { resolveSharingPostureDurable: async () => "open" as const } },
+    false,
+  );
+  assert.deepEqual(
+    mixed.conversation.audience.map((p) => p.teamIds),
+    [["finance"], []],
+  );
   const external = await scopeTeamsToTurn({ actor: person("ann@x.com"), conversation }, { teams, config }, true);
-  assert.equal(external.actor.teamIds, undefined);
+  assert.deepEqual(external.actor.teamIds, []);
+  const asserted = { ...person("ann@x.com"), teamIds: ["legacy"] };
+  const off = await scopeTeamsToTurn(
+    { actor: asserted, conversation },
+    { teams: await flaggedStore(false), config },
+    false,
+  );
+  assert.deepEqual(off.actor.teamIds, []);
 });
 
 test("team scope read and write follow team membership", async () => {
