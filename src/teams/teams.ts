@@ -88,6 +88,7 @@ export async function scopeTeamsToTurn<
   external: boolean,
 ): Promise<T> {
   const teams = external ? [] : ((await deps.teams?.list()) ?? []);
+  if (!teams.length) return input;
   const scope = conversationScope(input.conversation, input.actor.id);
   const posture = teams.length
     ? ((await deps.config?.resolveSharingPostureDurable(scopeId("personal", input.actor.id), scope)) ?? "isolated")
@@ -98,12 +99,13 @@ export async function scopeTeamsToTurn<
     audience: input.conversation.audience,
     posture,
   });
-  const stamp = (p: Principal): Principal => ({ ...p, teamIds: p.type === "internal" ? teamIds : [] });
+  const stamp = ({ teamIds: _, ...p }: Principal): Principal =>
+    p.type === "internal" && teamIds.length ? { ...p, teamIds } : p;
   const header = [input.conversationHeader?.trim(), note].filter(Boolean).join("\n\n");
   return {
     ...input,
     actor: stamp(input.actor),
-    conversation: { ...input.conversation, audience: input.conversation.audience.map(stamp) },
+    conversation: { ...input.conversation, audience: input.conversation.audience.map(stamp), teamScoped: true },
     ...(header ? { conversationHeader: header } : {}),
   };
 }

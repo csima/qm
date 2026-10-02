@@ -110,17 +110,15 @@ test("scopeTeamsToTurn stamps the turn's teams onto the actor and audience", asy
   );
   assert.deepEqual(
     mixed.conversation.audience.map((p) => p.teamIds),
-    [["finance"], []],
+    [["finance"], undefined],
   );
   const external = await scopeTeamsToTurn({ actor: person("ann@x.com"), conversation }, { teams, config }, true);
-  assert.deepEqual(external.actor.teamIds, []);
+  assert.equal(external.actor.teamIds, undefined);
+  assert.equal(external.conversation.teamScoped, undefined);
+  assert.equal(out.conversation.teamScoped, true);
   const asserted = { ...person("ann@x.com"), teamIds: ["legacy"] };
-  const off = await scopeTeamsToTurn(
-    { actor: asserted, conversation },
-    { teams: await flaggedStore(false), config },
-    false,
-  );
-  assert.deepEqual(off.actor.teamIds, []);
+  const replaced = await scopeTeamsToTurn({ actor: asserted, conversation }, { teams, config }, false);
+  assert.deepEqual(replaced.actor.teamIds, ["finance"]);
 });
 
 test("team scope read and write follow team membership", async () => {

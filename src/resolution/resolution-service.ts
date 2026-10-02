@@ -38,6 +38,7 @@ export function createResolutionService(
     scopeFor,
     async resolve(conversation, actor, external = false): Promise<Resolution> {
       const scope = scopeFor(conversation, actor);
+      const isDm = conversation.kind === "dm";
       const liveConfigScopes = new Set<ScopeId>([orgScope, scope, scopeId("personal", actor.id)]);
       for (const principal of conversation.audience) {
         liveConfigScopes.add(scopeId("personal", principal.id));
@@ -49,7 +50,7 @@ export function createResolutionService(
         ...(!external ? [{ scopeId: orgScope, mountPath: "global", mode: "ro" as const }] : []),
         { scopeId: scope, mountPath: "", mode: "rw" },
       ];
-      if (!external && actor.teamIds) {
+      if (!external && (isDm || conversation.teamScoped) && actor.teamIds) {
         for (const tid of actor.teamIds) {
           layers.push({ scopeId: scopeId("team", tid), mountPath: `team-${tid}`, mode: "ro" });
         }
