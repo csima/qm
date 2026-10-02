@@ -110,6 +110,7 @@ export function buildServiceEnvs(env) {
   };
   if (sandbox === "sprites" && !opt("SPRITES_TOKEN")) problems.push("SPRITES_TOKEN");
   if (sandbox === "cloudflare") {
+    if (!opt("S3_BUCKET")) problems.push("S3_BUCKET");
     Object.assign(core, {
       CLOUDFLARE_SANDBOX_URL: SANDBOX_API_URL,
       CLOUDFLARE_SANDBOX_TOKEN: need("QM_SANDBOX_API_TOKEN"),

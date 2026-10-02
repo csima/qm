@@ -34,6 +34,7 @@ function make(extra: Record<string, unknown> = {}): Sandbox {
     token: FAKE_CLOUDFLARE_SANDBOX_TOKEN,
     namePrefix: "qmt",
     fetchImpl: fake.fetchImpl,
+    snapshots: createMemorySnapshotStore(),
     ...extra,
   });
 }
@@ -44,10 +45,12 @@ beforeEach(() => {
 });
 after(() => fake?.cleanup());
 
-test("a url and token are required", () => {
+test("a url, a token and a snapshot store are required", () => {
+  const ws = () => createLocalWorkspaceStore(mkdtempSync(join(tmpdir(), "cf-ws-")));
+  assert.throws(() => createCloudflareSandbox(ws()), /CLOUDFLARE_SANDBOX_URL/);
   assert.throws(
-    () => createCloudflareSandbox(createLocalWorkspaceStore(mkdtempSync(join(tmpdir(), "cf-ws-")))),
-    /CLOUDFLARE_SANDBOX_URL/,
+    () => createCloudflareSandbox(ws(), { url: FAKE_CLOUDFLARE_SANDBOX_URL, token: FAKE_CLOUDFLARE_SANDBOX_TOKEN }),
+    /CLOUDFLARE_SANDBOX_SNAPSHOT_S3_BUCKET/,
   );
 });
 
@@ -144,19 +147,55 @@ test("a sandbox that restarts mid-turn fails loudly instead of running on an emp
   assert.equal(await s.readFile(next, "unsaved.txt"), null);
 });
 
-test("a core adopts a boot another core already restored instead of failing", async () => {
-  const snapshots = createMemorySnapshotStore();
+test("a handle from before a restart keeps failing after another turn restored the sandbox", async () => {
+  const held = await sandbox.provision(layers);
+  await sandbox.writeFile(held, "saved.txt", "v1\n");
+  await sandbox.teardown(held);
+  const stale = await sandbox.provision(layers);
+  await sandbox.writeFile(stale, "unsaved.txt", "x");
+  fake.stop(stale.id);
+  const fresh = await sandbox.provision(layers);
+  assert.equal(await sandbox.readFile(fresh, "saved.txt"), "v1\n");
+  await assert.rejects(sandbox.run(stale, "true"), SandboxBootLostError);
+  await assert.rejects(sandbox.readFile(stale, "saved.txt"), SandboxBootLostError);
+  await assert.rejects(sandbox.writeFile(stale, "late.txt", "x"), SandboxBootLostError);
+  assert.equal((await sandbox.run(fresh, "echo ok")).stdout.trim(), "ok");
+});
+
+test("a handle from before a restart fails on a core that did not see the restart", async () => {
   const store = createMemoryMap<StoredCloudflareSandbox>();
   const advisoryLock = createMemoryAdvisoryLock();
+  const snapshots = createMemorySnapshotStore();
   const a = make({ snapshots, store, advisoryLock });
   const b = make({ snapshots, store, advisoryLock });
   const ha = await a.provision(layers);
   await a.writeFile(ha, "shared.txt", "v1\n");
   await a.teardown(ha);
-  fake.stop(ha.id);
+  const held = await a.provision(layers);
+  await a.writeFile(held, "unsaved.txt", "x");
+  fake.stop(held.id);
   const hb = await b.provision(layers);
   assert.equal(await b.readFile(hb, "shared.txt"), "v1\n");
-  assert.equal(await a.readFile(ha, "shared.txt"), "v1\n");
+  await assert.rejects(a.readFile(held, "shared.txt"), SandboxBootLostError);
+  const again = await a.provision(layers);
+  assert.equal(await a.readFile(again, "unsaved.txt"), null);
+});
+
+test("a teardown on a stale handle never overwrites the snapshot", async () => {
+  const counting = instrumentedSnapshotStore();
+  const errors: string[] = [];
+  const s = make({ snapshots: counting.store, onError: (e: { code: string }) => errors.push(e.code) });
+  const first = await s.provision(layers);
+  await s.writeFile(first, "keep.txt", "good\n");
+  await s.teardown(first);
+  const stale = await s.provision(layers);
+  fake.stop(stale.id);
+  const fresh = await s.provision(layers);
+  const puts = counting.puts();
+  await s.teardown(stale);
+  assert.equal(counting.puts(), puts, "the stale handle's empty boot is not snapshotted");
+  assert.ok(errors.includes("teardown_snapshot_failed"));
+  assert.equal(await s.readFile(fresh, "keep.txt"), "good\n");
 });
 
 test("a failed hydration deletes the empty sandbox and never cold-starts over the snapshot", async () => {
@@ -176,14 +215,27 @@ test("a failed hydration deletes the empty sandbox and never cold-starts over th
   assert.equal(await s.readFile(b, "precious.txt"), "irreplaceable\n");
 });
 
-test("teardown snapshots are throttled and skipped for scratch sandboxes", async () => {
+test("every teardown of a changed home snapshots it and scratch sandboxes are never snapshotted", async () => {
   const counting = instrumentedSnapshotStore();
-  const s = make({ snapshots: counting.store, snapshotIntervalMs: 60 * 60_000 });
+  const s = make({ snapshots: counting.store });
   await s.teardown(await s.provision(layers));
   await s.teardown(await s.provision(layers));
-  assert.equal(counting.puts(), 1);
+  assert.equal(counting.puts(), 2);
+  await s.teardown(await s.provision(layers), { homeUnchanged: true });
+  assert.equal(counting.puts(), 2, "an unchanged, already-snapshotted home is not snapshotted again");
   await s.teardown(await s.provision(layers, { scratch: { key: "job" } }));
-  assert.equal(counting.puts(), 1);
+  assert.equal(counting.puts(), 2);
+});
+
+test("persistHomeSnapshot stores the home on demand", async () => {
+  const snapshots = createMemorySnapshotStore();
+  const s = make({ snapshots });
+  const h = await s.provision(layers);
+  await s.writeFile(h, "explicit.txt", "saved\n");
+  await s.persistHomeSnapshot!(scope);
+  fake.stop(h.id);
+  const next = await s.provision(layers);
+  assert.equal(await s.readFile(next, "explicit.txt"), "saved\n");
 });
 
 test("scratch sandboxes are fresh and deleted at release", async () => {
@@ -196,6 +248,7 @@ test("scratch sandboxes are fresh and deleted at release", async () => {
 
 test("computerStatus distinguishes never provisioned, running and stopped", async () => {
   assert.deepEqual(await sandbox.computerStatus!(scope), {
+    recovery: { strategy: "workspace_snapshot" },
     machine: "no sandbox provisioned yet",
     provisioned: false,
     guestResponsive: false,
@@ -233,5 +286,5 @@ test("profile advertises snapshot persistence, process sessions and no egress en
   assert.equal(sandbox.profile.writablePersistence, "snapshot_to_workspace");
   assert.equal(sandbox.profile.processSessions, true);
   assert.equal(sandbox.profile.egressEnforcement, "none");
-  assert.equal(sandbox.persistHomeSnapshot, undefined);
+  assert.equal(typeof sandbox.persistHomeSnapshot, "function");
 });

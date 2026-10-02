@@ -854,6 +854,30 @@ test("Modal native retention and interval configuration are independent of legac
   assert.equal(config.modalSandbox.snapshotIntervalSec, 315360000);
 });
 
+test("Cloudflare sandbox settings are parsed, the prefix is validated, and the backend needs its bucket", () => {
+  const env = {
+    CLOUDFLARE_SANDBOX_URL: "http://sandbox.qm.internal",
+    CLOUDFLARE_SANDBOX_TOKEN: "tok",
+    CLOUDFLARE_SANDBOX_SNAPSHOT_S3_BUCKET: "qm-data",
+    CLOUDFLARE_SANDBOX_NAME_PREFIX: "qm-prod",
+  };
+  const config = loadConfig(env);
+  assert.deepEqual(config.cloudflareSandbox, {
+    url: "http://sandbox.qm.internal",
+    token: "tok",
+    namePrefix: "qm-prod",
+    snapshotS3Bucket: "qm-data",
+  });
+  assert.ok(enabledSandboxBackends(config).includes("cloudflare"));
+  assert.ok(
+    !enabledSandboxBackends(loadConfig({ ...env, CLOUDFLARE_SANDBOX_SNAPSHOT_S3_BUCKET: "" })).includes("cloudflare"),
+  );
+  assert.equal(loadConfig({ ...env, SANDBOX_BACKEND: "cloudflare" }).sandboxBackend, "cloudflare");
+  assert.throws(() => loadConfig({ SANDBOX_BACKEND: "cloudflare" }), /CLOUDFLARE_SANDBOX_TOKEN/);
+  for (const prefix of ["QM", "qm_prod", "-qm", "x".repeat(41)])
+    assert.throws(() => loadConfig({ CLOUDFLARE_SANDBOX_NAME_PREFIX: prefix }), /CLOUDFLARE_SANDBOX_NAME_PREFIX/);
+});
+
 test("Smolmachines lifecycle, egress, and snapshot knobs are parsed into Config", () => {
   const config = loadConfig({
     SMOLMACHINES_TOKEN: "smk_test",

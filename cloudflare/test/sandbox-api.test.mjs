@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  MAX_WRITE_BYTES,
+  MAX_TRANSFER_BYTES,
   authorizedSandboxCaller,
   routeSandboxRequest,
   sandboxIdleMs,
@@ -20,7 +20,7 @@ function fakeStub() {
       start: async () => ({ bootId: BOOT }),
       exec: async (boot, script, timeoutSec) => {
         calls.push(["exec", boot, script, timeoutSec]);
-        return boot === BOOT ? { ok: { stdout: "out", stderr: "", code: 0 } } : { lost: true };
+        return boot === BOOT ? { ok: { stdout: "out", stderr: "", code: 0, timedOut: false } } : { lost: true };
       },
       writeFile: async (boot, path, data) => {
         if (boot !== BOOT) return { lost: true };
@@ -31,7 +31,7 @@ function fakeStub() {
       readFile: async (boot, path) => {
         if (boot !== BOOT) return { lost: true };
         const bytes = files.get(path);
-        return { ok: bytes ? new Response(bytes).body : null };
+        return { ok: bytes ?? null };
       },
       remove: async () => {
         calls.push(["remove"]);
@@ -93,11 +93,17 @@ test("exec forwards the pinned boot and reports a lost boot as 409", async () =>
       body: JSON.stringify(body),
     });
   const ok = await exec(BOOT, { script: "echo hi", timeoutSec: 30 });
-  assert.deepEqual(await ok.json(), { stdout: "out", stderr: "", code: 0 });
+  assert.deepEqual(await ok.json(), { stdout: "out", stderr: "", code: 0, timedOut: false });
   assert.deepEqual(calls.at(-1), ["exec", BOOT, "echo hi", 30]);
   assert.equal((await exec("old-boot", { script: "echo hi", timeoutSec: 30 })).status, 409);
   assert.equal((await exec(BOOT, { script: "echo hi" })).status, 400);
   assert.equal((await exec(BOOT, { script: "echo hi", timeoutSec: 0 })).status, 400);
+  const malformed = await call(stub, "/v1/sandboxes/qm-a/exec", {
+    method: "POST",
+    headers: { "x-qm-boot": BOOT, "content-type": "application/json" },
+    body: "{not json",
+  });
+  assert.equal(malformed.status, 400);
 });
 
 test("files stream both ways, missing files are 404 and a lost boot is 409", async () => {
@@ -110,7 +116,7 @@ test("files stream both ways, missing files are 404 and a lost boot is 409", asy
   const missing = await call(stub, `/v1/sandboxes/qm-a/files?path=/root/none`, { headers: { "x-qm-boot": BOOT } });
   assert.equal(missing.status, 404);
   assert.equal((await call(stub, path, { headers: { "x-qm-boot": "stale" } })).status, 409);
-  const tooBig = new Uint8Array(MAX_WRITE_BYTES + 1);
+  const tooBig = new Uint8Array(MAX_TRANSFER_BYTES + 1);
   assert.equal((await call(stub, path, { method: "PUT", headers: { "x-qm-boot": BOOT }, body: tooBig })).status, 413);
 });
 
@@ -120,6 +126,7 @@ test("instance size and idle timeout come from Worker vars with safe defaults", 
   assert.throws(() => sandboxInstance({ QM_SANDBOX_INSTANCE: "huge" }), /QM_SANDBOX_INSTANCE/);
   assert.equal(sandboxIdleMs({}), 30 * 60_000);
   assert.equal(sandboxIdleMs({ QM_SANDBOX_IDLE_MINUTES: "5" }), 5 * 60_000);
-  assert.equal(sandboxIdleMs({ QM_SANDBOX_IDLE_MINUTES: "9999" }), 360 * 60_000);
+  assert.equal(sandboxIdleMs({ QM_SANDBOX_IDLE_MINUTES: "360" }), 360 * 60_000);
+  assert.throws(() => sandboxIdleMs({ QM_SANDBOX_IDLE_MINUTES: "361" }), /QM_SANDBOX_IDLE_MINUTES/);
   assert.throws(() => sandboxIdleMs({ QM_SANDBOX_IDLE_MINUTES: "0" }), /QM_SANDBOX_IDLE_MINUTES/);
 });

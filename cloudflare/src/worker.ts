@@ -1,6 +1,7 @@
 import { Container, type OutboundHandler } from "@cloudflare/containers";
 import { DurableObject } from "cloudflare:workers";
 import {
+  MAX_TRANSFER_BYTES,
   authorizedSandboxCaller,
   routeSandboxRequest,
   sandboxIdleMs,
@@ -10,7 +11,7 @@ import {
 
 export { ContainerProxy } from "@cloudflare/containers";
 
-const WORKER_ONLY = new Set(["QM", "QM_SANDBOX"]);
+const WORKER_ONLY = new Set(["QM", "QM_SANDBOX", "QM_SANDBOX_INSTANCE", "QM_SANDBOX_IDLE_MINUTES"]);
 
 export interface Env {
   QM: DurableObjectNamespace<QmContainer>;
@@ -111,20 +112,67 @@ export class QmContainer extends Container<Env> {
 }
 
 const textDecoder = new TextDecoder();
+const OUTPUT_CAP_BYTES = 4 * 1024 * 1024;
+const OUTPUT_DEADLINE_GRACE_MS = 15_000;
+const TIMEOUT_EXIT_CODES = new Set([124, 137]);
+const TRUNCATED_NOTICE = "[cloudflare sandbox: output truncated at 4 MiB; redirect large output to a file]";
+const DEADLINE_NOTICE = "[cloudflare sandbox: the command outlived its timeout with its output still open; killed]";
+const MISSING_FILE_EXIT = 44;
+const RUN_WITH_IMAGE_ENV =
+  'while IFS= read -r -d "" kv; do export "$kv"; done </proc/1/environ; cd "$HOME" 2>/dev/null; exec timeout --kill-after=5 "$1" sh -c "$2"';
 
 export interface SandboxExecResult {
   stdout: string;
   stderr: string;
   code: number;
+  timedOut: boolean;
 }
 
 export type SandboxReply<T> = { ok: T } | { lost: true };
 
+async function drain(
+  stream: ReadableStream<Uint8Array> | null,
+  cap: number,
+): Promise<{ bytes: Uint8Array; truncated: boolean }> {
+  if (!stream) return { bytes: new Uint8Array(), truncated: false };
+  const chunks: Uint8Array[] = [];
+  let kept = 0;
+  let truncated = false;
+  const reader = stream.getReader();
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    const room = cap - kept;
+    if (value.length > room) truncated = true;
+    if (room > 0) {
+      const take = value.subarray(0, room);
+      chunks.push(take);
+      kept += take.length;
+    }
+  }
+  const bytes = new Uint8Array(kept);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return { bytes, truncated };
+}
+
 export class QmSandbox extends DurableObject<Env> {
+  private starting: Promise<{ bootId: string }> | undefined;
+
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     const container = ctx.container;
-    if (container?.running) void ctx.blockConcurrencyWhile(() => container.setInactivityTimeout(sandboxIdleMs(env)));
+    if (container?.running)
+      void ctx.blockConcurrencyWhile(async () => {
+        try {
+          await container.setInactivityTimeout(sandboxIdleMs(env));
+        } catch (error) {
+          console.error("sandbox inactivity timeout not restored", error);
+        }
+      });
   }
 
   private get container(): NonNullable<DurableObjectState["container"]> {
@@ -142,23 +190,28 @@ export class QmSandbox extends DurableObject<Env> {
     return { running: this.container.running, ...(bootId ? { bootId } : {}) };
   }
 
-  async start(): Promise<{ bootId: string }> {
+  start(): Promise<{ bootId: string }> {
+    this.starting ??= this.boot().finally(() => {
+      this.starting = undefined;
+    });
+    return this.starting;
+  }
+
+  private async boot(): Promise<{ bootId: string }> {
     const container = this.container;
+    const idleMs = sandboxIdleMs(this.env);
     const known = await this.currentBoot();
     if (known) {
-      await container.setInactivityTimeout(sandboxIdleMs(this.env));
+      await container.setInactivityTimeout(idleMs);
       return { bootId: known };
     }
+    await this.ctx.storage.delete("boot");
     if (!container.running) {
-      container.start({
-        image: container.images.sandbox!,
-        instance: sandboxInstance(this.env),
-        enableInternet: true,
-      });
+      container.start({ image: container.images.sandbox!, instance: sandboxInstance(this.env), enableInternet: true });
     }
     const bootId = crypto.randomUUID();
     try {
-      await container.setInactivityTimeout(sandboxIdleMs(this.env));
+      await container.setInactivityTimeout(idleMs);
       const probe = await (await container.exec(["true"])).output();
       if (probe.exitCode !== 0) throw new Error(`sandbox did not come up (exit ${probe.exitCode})`);
       await this.ctx.storage.put("boot", bootId);
@@ -172,13 +225,34 @@ export class QmSandbox extends DurableObject<Env> {
   async exec(bootId: string, script: string, timeoutSec: number): Promise<SandboxReply<SandboxExecResult>> {
     if ((await this.currentBoot()) !== bootId) return { lost: true };
     const seconds = Math.max(1, Math.ceil(timeoutSec));
-    const proc = await this.container.exec(["timeout", "--kill-after=5", String(seconds), "sh", "-c", script], {
-      cwd: "/root",
-      env: { HOME: "/root" },
+    const started = Date.now();
+    const proc = await this.container.exec(["bash", "-c", RUN_WITH_IMAGE_ENV, "bash", String(seconds), script]);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<"deadline">((resolve) => {
+      timer = setTimeout(() => resolve("deadline"), seconds * 1000 + OUTPUT_DEADLINE_GRACE_MS);
     });
-    const out = await proc.output();
+    const collected = Promise.all([
+      drain(proc.stdout, OUTPUT_CAP_BYTES),
+      drain(proc.stderr, OUTPUT_CAP_BYTES),
+      proc.exitCode,
+    ]);
+    const settled = await Promise.race([collected, deadline]).finally(() => {
+      if (timer !== undefined) clearTimeout(timer);
+    });
+    if (settled === "deadline") {
+      proc.kill(9);
+      return { ok: { stdout: "", stderr: DEADLINE_NOTICE, code: 137, timedOut: true } };
+    }
+    const [stdout, stderr, code] = settled;
+    const truncated = stdout.truncated || stderr.truncated;
+    const errText = textDecoder.decode(stderr.bytes);
     return {
-      ok: { stdout: textDecoder.decode(out.stdout), stderr: textDecoder.decode(out.stderr), code: out.exitCode },
+      ok: {
+        stdout: textDecoder.decode(stdout.bytes),
+        stderr: truncated ? `${errText}\n${TRUNCATED_NOTICE}` : errText,
+        code,
+        timedOut: TIMEOUT_EXIT_CODES.has(code) && Date.now() - started >= seconds * 1000,
+      },
     };
   }
 
@@ -192,13 +266,24 @@ export class QmSandbox extends DurableObject<Env> {
     return { ok: true };
   }
 
-  async readFile(bootId: string, path: string): Promise<SandboxReply<ReadableStream<Uint8Array> | null>> {
+  async readFile(bootId: string, path: string): Promise<SandboxReply<Uint8Array | null>> {
     if ((await this.currentBoot()) !== bootId) return { lost: true };
-    const found = await (await this.container.exec(["test", "-f", path])).output();
-    if (found.exitCode !== 0) return { ok: null };
-    const proc = await this.container.exec(["cat", path], { stderr: "ignore" });
-    if (!proc.stdout) throw new Error(`read ${path}: no stdout`);
-    return { ok: proc.stdout };
+    const proc = await this.container.exec([
+      "sh",
+      "-c",
+      `[ -f "$1" ] || exit ${MISSING_FILE_EXIT}; cat "$1"`,
+      "sh",
+      path,
+    ]);
+    const [stdout, stderr, code] = await Promise.all([
+      drain(proc.stdout, MAX_TRANSFER_BYTES),
+      drain(proc.stderr, 4096),
+      proc.exitCode,
+    ]);
+    if (code === MISSING_FILE_EXIT) return { ok: null };
+    if (code !== 0) throw new Error(`read ${path}: ${textDecoder.decode(stderr.bytes).slice(0, 200)}`);
+    if (stdout.truncated) throw new Error(`read ${path}: larger than ${MAX_TRANSFER_BYTES} bytes`);
+    return { ok: stdout.bytes };
   }
 
   async remove(): Promise<void> {

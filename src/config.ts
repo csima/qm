@@ -516,24 +516,23 @@ interface CloudflareSandboxEnv {
   token?: string;
   namePrefix?: string;
   snapshotS3Bucket?: string;
-  snapshotIntervalSec?: number;
   defaultTimeoutSec?: number;
 }
 
 function cloudflareSandboxEnv(env: NodeJS.ProcessEnv): CloudflareSandboxEnv {
-  const snapshotIntervalSec = numEnvStrict(
-    "CLOUDFLARE_SANDBOX_SNAPSHOT_INTERVAL_SEC",
-    env.CLOUDFLARE_SANDBOX_SNAPSHOT_INTERVAL_SEC,
-  );
+  const namePrefix = env.CLOUDFLARE_SANDBOX_NAME_PREFIX?.trim();
+  if (namePrefix && !/^[a-z0-9][a-z0-9-]{0,39}$/.test(namePrefix))
+    throw new Error(
+      "CLOUDFLARE_SANDBOX_NAME_PREFIX must be 1-40 lowercase letters, digits or hyphens, starting with a letter or digit",
+    );
   const defaultTimeoutSec = numEnvStrict("SANDBOX_TIMEOUT_SEC", env.SANDBOX_TIMEOUT_SEC);
   return {
     ...(env.CLOUDFLARE_SANDBOX_URL ? { url: env.CLOUDFLARE_SANDBOX_URL } : {}),
     ...(env.CLOUDFLARE_SANDBOX_TOKEN ? { token: env.CLOUDFLARE_SANDBOX_TOKEN } : {}),
-    ...(env.CLOUDFLARE_SANDBOX_NAME_PREFIX ? { namePrefix: env.CLOUDFLARE_SANDBOX_NAME_PREFIX } : {}),
+    ...(namePrefix ? { namePrefix } : {}),
     ...(env.CLOUDFLARE_SANDBOX_SNAPSHOT_S3_BUCKET
       ? { snapshotS3Bucket: env.CLOUDFLARE_SANDBOX_SNAPSHOT_S3_BUCKET }
       : {}),
-    ...(snapshotIntervalSec !== undefined ? { snapshotIntervalSec } : {}),
     ...(defaultTimeoutSec !== undefined ? { defaultTimeoutSec } : {}),
   };
 }
@@ -1028,7 +1027,9 @@ export function enabledSandboxBackends(config: Config): Array<Config["sandboxBac
     local: Boolean(config.localSandbox?.image),
     sprites: Boolean(config.spritesSandbox?.token),
     smolmachines: Boolean(config.smolmachinesSandbox?.token),
-    cloudflare: Boolean(config.cloudflareSandbox?.url && config.cloudflareSandbox?.token),
+    cloudflare: Boolean(
+      config.cloudflareSandbox?.url && config.cloudflareSandbox?.token && config.cloudflareSandbox?.snapshotS3Bucket,
+    ),
     agent37: Boolean(config.agent37Sandbox?.apiKey),
     superserve: Boolean(config.superserveSandbox?.apiKey && config.superserveSandbox?.template),
     e2b: Boolean(config.e2bSandbox?.apiKey),
@@ -1271,10 +1272,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     console.warn(
       "[config] SANDBOX_BACKEND=cloudflare runs sandboxes with open outbound networking and NO egress enforcement (fail-open).",
     );
-    if (!env.CLOUDFLARE_SANDBOX_SNAPSHOT_S3_BUCKET)
-      console.warn(
-        "[config] SANDBOX_BACKEND=cloudflare without CLOUDFLARE_SANDBOX_SNAPSHOT_S3_BUCKET — a Cloudflare sandbox's disk is wiped whenever it stops for inactivity; set CLOUDFLARE_SANDBOX_SNAPSHOT_S3_BUCKET so its home is snapshotted and restored.",
-      );
   }
   if (env.SANDBOX_BACKEND === "smolmachines" && !env.SMOLMACHINES_EGRESS_PROXY_URL) {
     console.warn(

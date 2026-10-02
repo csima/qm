@@ -80,6 +80,9 @@ test("reports missing configuration instead of starting half-configured", () => 
   assert.ok(problems.includes("DATABASE_URL"));
   assert.ok(problems.includes("QM_SANDBOX_API_TOKEN"));
   assert.ok(buildServiceEnvs({ ...base, QM_SANDBOX_BACKEND: "sprites" }).problems.includes("SPRITES_TOKEN"));
+  const noBucket = { ...base };
+  delete noBucket.S3_BUCKET;
+  assert.ok(buildServiceEnvs(noBucket).problems.includes("S3_BUCKET"));
   assert.ok(problems.some((p) => p.startsWith("QM_CORE_ENV_JSON")));
 });
 

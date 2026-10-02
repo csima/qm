@@ -67,9 +67,17 @@ The script:
 5. waits for `/healthz`, then prints a one-time admin sign-in link (first deploy only).
 
 Re-run it to ship a new image or update operator secrets. Other options: `--name` (Worker name, default
-`qm`), `--model-provider anthropic|openai|openrouter`, `--model`, `--sandbox cloudflare|sprites|e2b|modal` (default `cloudflare`; the others need their own credentials, e.g.
-`QM_SPRITES_TOKEN`),
+`qm`), `--model-provider anthropic|openai|openrouter`, `--model`, `--sandbox cloudflare|sprites|e2b|modal`,
 `--allowed-email-domain`.
+
+`--sandbox` defaults to `cloudflare` on a first deploy. A re-deploy keeps the backend the Worker already
+runs (and stops if it cannot read it), because switching moves every scope's default to an empty computer on
+the new backend while the old ones keep running; pass `--sandbox` to switch deliberately, and move homes with
+the sandbox migration in Admin. Backends other than `cloudflare` need their own credentials, e.g.
+`QM_SPRITES_TOKEN`.
+
+The sandbox Durable Object class arrives in migration `v2`, so `wrangler rollback` to a version from before
+it is refused.
 
 ## Signing in
 
@@ -92,13 +100,16 @@ Then re-run `npm run deploy`. Admit more people with `QM_ALLOWED_EMAILS` (comma-
 
 ## Optional settings
 
+`QM_SANDBOX_INSTANCE` (Cloudflare sandbox size: `lite` or `standard-1`…`standard-4`, default `standard-3`) and
+`QM_SANDBOX_IDLE_MINUTES` (idle minutes before a sandbox stops and its disk is wiped, 1–360, default 30) in the
+deploy environment become Worker vars; changing them does not restart core.
+
 Any of these in the deploy environment are stored as Worker secrets and passed to the right process:
 
 | Variable                                                      | Effect                                                                          |
 | ------------------------------------------------------------- | ------------------------------------------------------------------------------- |
 | `QM_OPENAI_API_KEY`, `QM_OPENROUTER_API_KEY`                  | extra model providers                                                           |
 | `QM_SLACK_BOT_TOKEN`, `QM_SLACK_APP_TOKEN`                    | Slack bot (socket mode); or enter them in Admin → Slack                         |
-| `QM_SANDBOX_INSTANCE`, `QM_SANDBOX_IDLE_MINUTES`              | Cloudflare sandbox size (default `standard-3`) and idle stop (default 30, ≤360) |
 | `QM_SPRITES_EGRESS_PROXY_URL`                                 | force sandbox egress through an egress proxy (otherwise fail-open)              |
 | `QM_E2B_API_KEY`, `QM_MODAL_TOKEN_ID`/`QM_MODAL_TOKEN_SECRET` | other sandbox backends (with `--sandbox`)                                       |
 | `QM_GOOGLE_OAUTH_CLIENT_SECRET` etc.                          | connector client secrets (client ids go in `QM_CORE_ENV_JSON`)                  |

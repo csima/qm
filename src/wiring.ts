@@ -903,10 +903,9 @@ export function buildApp(
   };
   const cloudflareBodies = artifactMap<StoredCloudflareSandbox>("cloudflare_sandbox_bodies");
   const buildCloudflare = (): Sandbox => {
-    const { snapshotS3Bucket, snapshotIntervalSec, ...cf } = config.cloudflareSandbox;
+    const { snapshotS3Bucket, ...cf } = config.cloudflareSandbox;
     return createCloudflareSandbox(workspace, {
       ...cf,
-      ...(snapshotIntervalSec !== undefined ? { snapshotIntervalMs: snapshotIntervalSec * 1000 } : {}),
       blobTransfer,
       extraTools: deploymentLayer.advertisedTools,
       credentialPaths: deploymentLayer.credentialPaths,

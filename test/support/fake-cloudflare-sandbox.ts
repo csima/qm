@@ -113,6 +113,7 @@ export function installFakeCloudflareSandbox(): FakeCloudflareSandbox {
         stdout: (r.stdout ?? Buffer.alloc(0)).toString("utf8"),
         stderr: (r.stderr ?? Buffer.alloc(0)).toString("utf8"),
         code: r.status ?? (r.signal ? 137 : -1),
+        timedOut: r.status === 124,
       });
     }
     if (op === "files") {

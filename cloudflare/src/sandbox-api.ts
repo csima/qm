@@ -6,7 +6,7 @@ const DEFAULT_INSTANCE: InstanceType = "standard-3";
 const DEFAULT_IDLE_MINUTES = 30;
 const MAX_IDLE_MINUTES = 360;
 const NAME = /^[a-z0-9][a-z0-9-]{0,99}$/;
-export const MAX_WRITE_BYTES = 32 * 1024 * 1024;
+export const MAX_TRANSFER_BYTES = 24 * 1024 * 1024;
 
 type Reply<T> = { ok: T } | { lost: true };
 
@@ -17,9 +17,9 @@ export interface SandboxStub {
     bootId: string,
     script: string,
     timeoutSec: number,
-  ): Promise<Reply<{ stdout: string; stderr: string; code: number }>>;
+  ): Promise<Reply<{ stdout: string; stderr: string; code: number; timedOut: boolean }>>;
   writeFile(bootId: string, path: string, data: Uint8Array): Promise<Reply<true>>;
-  readFile(bootId: string, path: string): Promise<Reply<ReadableStream<Uint8Array> | null>>;
+  readFile(bootId: string, path: string): Promise<Reply<Uint8Array | null>>;
   remove(): Promise<void>;
 }
 
@@ -32,8 +32,9 @@ export function sandboxInstance(env: { QM_SANDBOX_INSTANCE?: string }): Instance
 
 export function sandboxIdleMs(env: { QM_SANDBOX_IDLE_MINUTES?: string }): number {
   const minutes = Number(env.QM_SANDBOX_IDLE_MINUTES?.trim() || DEFAULT_IDLE_MINUTES);
-  if (!Number.isFinite(minutes) || minutes <= 0) throw new Error("QM_SANDBOX_IDLE_MINUTES must be a positive number");
-  return Math.min(minutes, MAX_IDLE_MINUTES) * 60_000;
+  if (!Number.isFinite(minutes) || minutes <= 0 || minutes > MAX_IDLE_MINUTES)
+    throw new Error(`QM_SANDBOX_IDLE_MINUTES must be a number of minutes between 1 and ${MAX_IDLE_MINUTES}`);
+  return minutes * 60_000;
 }
 
 export function authorizedSandboxCaller(request: Request, token: string | undefined): boolean {
@@ -68,7 +69,7 @@ export async function routeSandboxRequest(request: Request, stubFor: (name: stri
   }
   if (route === "POST start") return Response.json(await sandbox.start());
   if (route === "POST exec") {
-    const body = (await request.json()) as { script?: unknown; timeoutSec?: unknown };
+    const body = (await request.json().catch(() => ({}))) as { script?: unknown; timeoutSec?: unknown };
     if (typeof body.script !== "string" || typeof body.timeoutSec !== "number" || !(body.timeoutSec > 0))
       return new Response("need script and timeoutSec", { status: 400 });
     const reply = await sandbox.exec(boot, body.script, body.timeoutSec);
@@ -79,9 +80,9 @@ export async function routeSandboxRequest(request: Request, stubFor: (name: stri
     if (!path) return new Response("need an absolute path without ..", { status: 400 });
     if (request.method === "PUT") {
       const declared = Number(request.headers.get("content-length") ?? "0");
-      if (declared > MAX_WRITE_BYTES) return new Response("file too large", { status: 413 });
+      if (declared > MAX_TRANSFER_BYTES) return new Response("file too large", { status: 413 });
       const data = new Uint8Array(await request.arrayBuffer());
-      if (data.length > MAX_WRITE_BYTES) return new Response("file too large", { status: 413 });
+      if (data.length > MAX_TRANSFER_BYTES) return new Response("file too large", { status: 413 });
       const reply = await sandbox.writeFile(boot, path, data);
       return "lost" in reply ? lost() : new Response(null, { status: 204 });
     }
