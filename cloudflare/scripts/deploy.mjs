@@ -99,7 +99,7 @@ if (!env[`QM_${providerKey}`]?.trim()) missing.push(`QM_${providerKey}`);
 if (!args.org || !/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(args.org)) missing.push("--org <lowercase-slug>");
 if (!args.admin) missing.push("--admin <email>");
 if (missing.length) fail(`missing: ${missing.join(", ")}`);
-if (/pooler|pgbouncer|:6543\b/.test(env.QM_DATABASE_URL)) {
+if (/pooler|pgbouncer|:6543\b|:6432\b/.test(env.QM_DATABASE_URL)) {
   console.warn(
     "⚠ QM_DATABASE_URL looks like a pooled endpoint. qm needs LISTEN/NOTIFY and session advisory locks — use the direct URL.",
   );

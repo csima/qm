@@ -39,8 +39,11 @@ browser ──▶ Worker (qm) ──▶ Durable Object "main" ──▶ Containe
   QM's bucket; otherwise it derives S3 credentials from this token, which gives the container the token's
   R2 access. To narrow that, create an R2 token scoped to `<name>-data` and set
   `QM_R2_ACCESS_KEY_ID`/`QM_R2_SECRET_ACCESS_KEY`.
-- Postgres: a [Neon](https://neon.tech) project's **direct** connection string (not the `-pooler` host).
-  QM uses LISTEN/NOTIFY and session advisory locks.
+- Postgres, through its **direct** connection string. QM uses LISTEN/NOTIFY and session advisory locks, which
+  connection poolers break. Either a [Neon](https://neon.tech) project (not the `-pooler` host), or a PlanetScale
+  Postgres database billed to the Cloudflare account (dashboard → Workers → Hyperdrive → Create a PlanetScale
+  database), using port 5432 rather than its PgBouncer port 6432. QM connects to it directly, not through
+  Hyperdrive, which only serves Worker code.
 - A model provider key (Anthropic by default).
 - Node 22+, npm, and Docker with Buildx (wrangler builds the image locally and pushes it to Cloudflare's
   registry).
