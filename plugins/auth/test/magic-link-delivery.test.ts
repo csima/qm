@@ -38,8 +38,8 @@ test("a requested sign-in link is delivered over SMTP and the delivered link sig
   assert.equal(mail.from, "no-reply@example.com");
   assert.deepEqual(headerOf(mail.data, "Subject"), ["Sign in to Acme QM"]);
   const text = mimePart(mail.data, "text/plain");
-  const link = new RegExp(`${ISSUER.replace(/[.]/g, "\\.")}/verify#token=[A-Za-z0-9._~%-]+`).exec(text)?.[0];
-  assert.ok(link, "the plain-text part carries the sign-in link");
+  const link = /\S+\/verify#token=[A-Za-z0-9._~%-]+/.exec(text)?.[0] ?? "";
+  assert.ok(link.startsWith(`${ISSUER}/verify#token=`), "the plain-text part carries the sign-in link");
   assert.ok(mimePart(mail.data, "text/html").includes(`href="${link}"`), "the HTML part links to the same address");
 
   const token = new URLSearchParams(new URL(link).hash.slice(1)).get("token")!;
