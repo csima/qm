@@ -15,6 +15,7 @@ export default tseslint.config(
       ".claude/",
       ".context/",
       ".generated/",
+      "cloudflare/.wrangler/",
     ],
   },
   js.configs.recommended,

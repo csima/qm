@@ -68,6 +68,9 @@
     },
     "deploy/connector-sdk": {
       "ignoreDependencies": ["@composio/core"]
+    },
+    "cloudflare": {
+      "entry": ["supervisor.mjs", "scripts/*.mjs", "test/**/*.test.mjs"]
     }
   }
 }
