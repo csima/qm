@@ -78,3 +78,27 @@ test("old provider save cannot clear pending state in a reopened dialog", async 
   assert.equal((dom.window.document.getElementById("custom-provider-dialog") as HTMLDialogElement).open, false);
   dom.window.close();
 });
+
+test("editing a provider keeps per-model fields the line editor does not show", () => {
+  const { ui } = fixture();
+  ui.openProvider({
+    id: "lite",
+    name: "Lite",
+    baseUrl: "https://api.example.com",
+    protocol: "openai",
+    models: [
+      { id: "think", name: "Think", contextWindow: 200000, reasoning: true, input: 3, output: 15 },
+      { id: "plain" },
+    ],
+  });
+  ui.provider.draft.models += "\nnew-model";
+  const body = ui.providerBody();
+  assert.deepEqual(JSON.parse(JSON.stringify(body.models)), [
+    { reasoning: true, input: 3, output: 15, id: "think", name: "Think", contextWindow: 200000 },
+    { id: "plain" },
+    { id: "new-model" },
+  ]);
+  ui.openProvider();
+  ui.provider.draft.models = "think";
+  assert.deepEqual(JSON.parse(JSON.stringify(ui.providerBody().models)), [{ id: "think" }]);
+});
