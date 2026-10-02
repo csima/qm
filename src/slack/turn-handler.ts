@@ -534,7 +534,16 @@ export function createTurnHandler(deps: {
     const turn: Omit<CoreTurnBody, "approval"> = {
       actor,
       ...(inc.userId
-        ? { slackSource: { accountId: deps.accountId ?? "default", teamId: ids.ownTeamId, userId: inc.userId } }
+        ? {
+            slackSource: {
+              accountId: deps.accountId ?? "default",
+              teamId: ids.ownTeamId,
+              userId: inc.userId,
+              ...(deps.externalAccess
+                ? { externalPolicyNamespace: externalSlackNamespace(ids.ownTeamId, deps.externalAccess) }
+                : {}),
+            },
+          }
         : {}),
       ...(deps.externalAccess && inc.kind === "channel" && inc.userId
         ? {

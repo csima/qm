@@ -656,12 +656,13 @@ export interface ClientToolResult {
 }
 
 export interface TurnRequest {
-  slackSource?: { accountId: string; teamId: string; userId: string };
+  slackSource?: { accountId: string; teamId: string; userId: string; externalPolicyNamespace?: string };
   externalSlack?: {
     accountId: string;
     teamId: string;
     userId: string;
     companyDomains: string[];
+    companyTeamIds: string[];
     serviceCredentials: string[];
   };
   sessionSenderId?: string;
