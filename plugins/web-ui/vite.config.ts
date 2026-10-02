@@ -57,6 +57,7 @@ export default defineConfig({
     alias: [
       { find: /^katex$/, replacement: here("src/lazy-katex.ts") },
       { find: "katex-real", replacement: here("node_modules/katex/dist/katex.mjs") },
+      { find: /^fonts\/(KaTeX_[\w-]+\.(?:woff2|woff|ttf))$/, replacement: here("node_modules/katex/dist/fonts/$1") },
       { find: /^highlight\.js\/lib\/core$/, replacement: here("src/lazy-hljs.ts") },
       { find: "hljs-real-javascript", replacement: here("node_modules/highlight.js/lib/languages/javascript.js") },
       { find: "hljs-real-typescript", replacement: here("node_modules/highlight.js/lib/languages/typescript.js") },

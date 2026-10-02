@@ -45,3 +45,18 @@ test("the real-library aliases point INTO the packages, never back at the facade
   assert.match(vite, /find: "katex-real", replacement: here\("node_modules\/katex\/dist\/katex\.mjs"\)/);
   assert.match(vite, /find: "hljs-real", replacement: here\("node_modules\/highlight\.js\/lib\/core\.js"\)/);
 });
+
+test("every KaTeX font the bundled stylesheet references resolves to a shipped font file", async () => {
+  const { default: config } = await import("../vite.config.ts");
+  const aliases = (config as { resolve: { alias: Array<{ find: string | RegExp; replacement: string }> } }).resolve
+    .alias;
+  const css = readFileSync(new URL("../node_modules/@earendil-works/pi-web-ui/dist/app.css", import.meta.url), "utf8");
+  const urls = [...new Set([...css.matchAll(/url\(["']?(fonts\/KaTeX_[^"')]+)["']?\)/g)].map((m) => m[1]!))];
+  assert.ok(urls.length > 0, "the stylesheet references KaTeX fonts");
+  for (const url of urls) {
+    const alias = aliases.find((a) => (typeof a.find === "string" ? url === a.find : a.find.test(url)));
+    assert.ok(alias, `${url} has an alias`);
+    const target = url.replace(alias.find, alias.replacement);
+    assert.doesNotThrow(() => readFileSync(target), `${url} resolves to ${target}`);
+  }
+});
