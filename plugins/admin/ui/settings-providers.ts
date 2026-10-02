@@ -16,6 +16,7 @@ export const provider = {
   message: "",
   error: false,
   rows: [] as any[],
+  ids: [] as string[],
   revision: 0,
   session: 0,
 };
@@ -96,6 +97,12 @@ async function saveProvider() {
     redraw();
     return;
   }
+  if (!provider.editing && provider.ids.includes(id)) {
+    provider.message = `A provider with the id "${id}" already exists. Choose another id, or edit that provider instead.`;
+    provider.error = true;
+    redraw();
+    return;
+  }
   const revision = provider.revision;
   const session = provider.session;
   provider.saving = true;
@@ -141,7 +148,9 @@ async function removeProvider(item: any) {
 export async function loadProviders() {
   const res = await config.api("GET", "/api/custom-providers");
   if (!res.ok) return;
-  provider.rows = (res.data?.providers || []).filter((p: any) => !p.disabled);
+  const all = res.data?.providers || [];
+  provider.ids = all.map((p: any) => p.id);
+  provider.rows = all.filter((p: any) => !p.disabled);
   renderRows();
 }
 function renderRows() {

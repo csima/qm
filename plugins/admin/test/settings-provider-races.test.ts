@@ -78,3 +78,36 @@ test("old provider save cannot clear pending state in a reopened dialog", async 
   assert.equal((dom.window.document.getElementById("custom-provider-dialog") as HTMLDialogElement).open, false);
   dom.window.close();
 });
+
+test("adding a provider with an existing id is refused instead of replacing it", async () => {
+  const { dom, ui, requests } = fixture();
+  const load = ui.loadProviders();
+  requests[0].resolve({
+    ok: true,
+    data: {
+      providers: [
+        { id: "acme", name: "Acme", models: [] },
+        { id: "old", disabled: true, models: [] },
+      ],
+    },
+  });
+  await load;
+  for (const id of ["acme", "old"]) {
+    ui.openProvider();
+    Object.assign(ui.provider.draft, { id, name: "Other", url: "https://other.example.com", models: "m1" });
+    dom.window.document.getElementById("custom-provider-save")!.click();
+    await tick();
+    assert.equal(requests.length, 1, `no PUT is sent for the taken id ${id}`);
+    assert.match(ui.provider.message, new RegExp(`"${id}" already exists`));
+  }
+  ui.openProvider({
+    id: "acme",
+    name: "Acme",
+    baseUrl: "https://api.example.com",
+    protocol: "openai",
+    models: [{ id: "m1" }],
+  });
+  dom.window.document.getElementById("custom-provider-save")!.click();
+  assert.equal(requests.length, 2, "editing the existing provider still saves");
+  dom.window.close();
+});
