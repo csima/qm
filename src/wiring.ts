@@ -2563,6 +2563,7 @@ export function buildApp(
     run: (req) => app.turn(req),
     directory,
     currentScopeMembers,
+    inflight: replayDedupe,
   });
   const backgroundOwnership = config.backgroundDeploymentId
     ? {
