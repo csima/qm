@@ -6,10 +6,12 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
+import { experimental_readRawConfig } from "wrangler";
 import { GENERATED_SECRETS, adminLoginUrl, nodePostgresUrl } from "./lib.mjs";
 
 const HERE = join(dirname(fileURLToPath(import.meta.url)), "..");
 const API = "https://api.cloudflare.com/client/v4";
+const DEPLOY_CONFIG = join(HERE, ".wrangler-deploy.json");
 
 const OPTIONAL_SECRETS = [
   "OPENAI_API_KEY",
@@ -114,10 +116,22 @@ const admins = args.admin
 for (const email of admins)
   if (!/^[^@\s,;<>"]+@[^@\s,;<>"]+\.[^@\s,;<>"]+$/.test(email)) fail(`bad admin email ${email}`);
 
+step(`Checking for an existing "${name}" deployment`);
+const settings = await cf(`/accounts/${account}/workers/scripts/${name}/settings`).catch((e) =>
+  e.status === 404 ? null : fail(`could not read the existing "${name}" deployment (${e.message})`),
+);
+const existingVar = (key) => settings?.bindings?.find((b) => b.type === "plain_text" && b.name === key)?.text;
+console.log(settings ? "  found; unflagged settings keep their current values" : "  none (first deploy)");
+
 step("Resolving public URL");
+const existingHost = existingVar("QM_PUBLIC_URL") ? new URL(existingVar("QM_PUBLIC_URL")).host : undefined;
+const domain =
+  args.domain?.replace(/^https?:\/\//, "").replace(/\/.*$/, "") ??
+  (existingHost && !existingHost.endsWith(".workers.dev") ? existingHost : undefined);
 let publicUrl;
-if (args.domain) {
-  publicUrl = `https://${args.domain.replace(/^https?:\/\//, "").replace(/\/.*$/, "")}`;
+if (domain) {
+  publicUrl = `https://${domain}`;
+  if (!args.domain) console.log("  keeping this deployment's custom domain (pass --domain to change it)");
 } else {
   const sub = await cf(`/accounts/${account}/workers/subdomain`).catch((e) =>
     fail(`could not read the account's workers.dev subdomain (${e.message}); pass --domain instead`),
@@ -141,17 +155,10 @@ if (listed.status === 0) {
 console.log(existing.size ? `  ${existing.size} secrets already set` : "  none (first deploy)");
 
 let sandbox = args.sandbox;
-if (!sandbox) {
-  const settings = await cf(`/accounts/${account}/workers/scripts/${name}/settings`).catch((e) =>
-    e.status === 404
-      ? null
-      : fail(`could not read the existing "${name}" deployment (${e.message}); pass --sandbox explicitly`),
-  );
-  if (settings) {
-    sandbox = settings.bindings?.find((b) => b.type === "plain_text" && b.name === "QM_SANDBOX_BACKEND")?.text;
-    if (!sandbox) fail(`the existing "${name}" deployment has no QM_SANDBOX_BACKEND; pass --sandbox explicitly`);
-    console.log(`  keeping this deployment's sandbox backend: ${sandbox} (pass --sandbox to change it)`);
-  }
+if (!sandbox && settings) {
+  sandbox = existingVar("QM_SANDBOX_BACKEND");
+  if (!sandbox) fail(`the existing "${name}" deployment has no QM_SANDBOX_BACKEND; pass --sandbox explicitly`);
+  console.log(`  keeping this deployment's sandbox backend: ${sandbox} (pass --sandbox to change it)`);
 }
 sandbox ??= "cloudflare";
 if (sandbox === "sprites" && !env.QM_SPRITES_TOKEN?.trim() && !existing.has("SPRITES_TOKEN"))
@@ -250,18 +257,30 @@ step(`Deploying Worker "${name}" and building the container image (first build t
 const dir = mkdtempSync(join(tmpdir(), "qm-cf-"));
 const secretsFile = join(dir, "secrets.json");
 writeFileSync(secretsFile, JSON.stringify(secrets), { mode: 0o600 });
+const { rawConfig } = experimental_readRawConfig({ config: join(HERE, "wrangler.jsonc") });
+const { $schema: _schema, ...baseConfig } = rawConfig;
+writeFileSync(
+  DEPLOY_CONFIG,
+  JSON.stringify({
+    ...baseConfig,
+    workers_dev: !domain,
+    ...(domain ? { routes: [{ pattern: domain, custom_domain: true }] } : {}),
+  }),
+);
 try {
   wrangler([
     "deploy",
+    "--config",
+    DEPLOY_CONFIG,
     "--name",
     name,
     "--secrets-file",
     secretsFile,
     ...Object.entries(vars).flatMap(([k, v]) => ["--var", `${k}:${v}`]),
-    ...(args.domain ? ["--domain", new URL(publicUrl).host] : []),
   ]);
 } finally {
   rmSync(dir, { recursive: true, force: true });
+  rmSync(DEPLOY_CONFIG, { force: true });
 }
 
 if (!args["skip-health"]) {

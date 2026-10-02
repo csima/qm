@@ -44,17 +44,28 @@ const put = spawnSync(
 if (put.status !== 0) fail("wrangler secret put failed");
 
 console.log("Waiting for the container to restart with the new key (up to ~6 minutes)…");
-const deadline = Date.now() + 8 * 60_000;
+const rotatedAt = Date.now();
+const deadline = rotatedAt + 8 * 60_000;
+const ACCESS_SETTLE_MS = 90_000;
+let behindAccess = false;
 for (;;) {
-  const probe = adminLoginUrl({ publicUrl, secret, email }).split("#token=")[1];
-  const r = await fetch(`${publicUrl}/auth/admin-login`, {
-    method: "POST",
-    redirect: "manual",
-    headers: { "content-type": "application/x-www-form-urlencoded", origin: new URL(publicUrl).origin },
-    body: new URLSearchParams({ token: probe }),
-    signal: AbortSignal.timeout(60_000),
-  }).catch(() => undefined);
-  if (r?.status === 303) break;
+  if (behindAccess) {
+    const health = await fetch(`${publicUrl}/healthz`, { signal: AbortSignal.timeout(60_000) }).catch(() => undefined);
+    if (health?.ok && Date.now() - rotatedAt > ACCESS_SETTLE_MS) break;
+  } else {
+    const probe = adminLoginUrl({ publicUrl, secret, email }).split("#token=")[1];
+    const r = await fetch(`${publicUrl}/auth/admin-login`, {
+      method: "POST",
+      redirect: "manual",
+      headers: { "content-type": "application/x-www-form-urlencoded", origin: new URL(publicUrl).origin },
+      body: new URLSearchParams({ token: probe }),
+      signal: AbortSignal.timeout(60_000),
+    }).catch(() => undefined);
+    if (r?.status === 303) break;
+    behindAccess = /\.cloudflareaccess\.com\//.test(r?.headers.get("location") ?? "");
+    if (behindAccess)
+      console.log("  the site is behind Cloudflare Access; waiting for /healthz after the restart instead");
+  }
   if (Date.now() > deadline)
     fail(`portal did not accept the new key in time; check \`npx wrangler tail ${args.name}\``);
   await new Promise((r) => setTimeout(r, 10_000));
@@ -63,3 +74,4 @@ for (;;) {
 console.log(
   `\nOne-time admin sign-in link for ${email} (single use, expires in 5 minutes — keep it private):\n\n  ${adminLoginUrl({ publicUrl, secret, email })}\n`,
 );
+if (behindAccess) console.log(`Sign in to Cloudflare Access at ${publicUrl} first, then open the link.`);

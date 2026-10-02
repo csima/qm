@@ -73,6 +73,9 @@ Re-run it to ship a new image or update operator secrets. Other options: `--name
 `qm`), `--model-provider anthropic|openai|openrouter`, `--model`, `--sandbox cloudflare|sprites|e2b|modal`,
 `--allowed-email-domain`.
 
+With `--domain`, the Worker is served only on that custom domain and its workers.dev address is turned off.
+A re-deploy keeps the current domain (or workers.dev) unless `--domain` is passed.
+
 `--sandbox` defaults to `cloudflare` on a first deploy. A re-deploy keeps the backend the Worker already
 runs (and stops if it cannot read it), because switching moves every scope's default to an empty computer on
 the new backend while the old ones keep running; pass `--sandbox` to switch deliberately, and move homes with
