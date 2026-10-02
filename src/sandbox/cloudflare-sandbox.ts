@@ -12,7 +12,7 @@ import {
   type BlobStagingOptions,
 } from "./exec-file-ops.ts";
 import { ephemeralCredLinkPaths, type CredentialPathSpec } from "../credentials/resident-paths.ts";
-import { visibleNotInstalled, visibleTools } from "./sandbox.ts";
+import { cleanupFailedProvision, visibleNotInstalled, visibleTools } from "./sandbox.ts";
 import { createExecSandboxBase, sandboxScopeName } from "./exec-sandbox-base.ts";
 import { createLayerToolInstaller } from "./layer-tool-install.ts";
 import { createHomeSnapshotOps, HOME_SNAPSHOT_PRUNE, snapshotDue, type HomeSnapshotStore } from "./home-snapshot.ts";
@@ -37,6 +37,7 @@ const FILE_TRANSFER_TIMEOUT_MS = 300_000;
 const EXIT_GRACE_MS = 60_000;
 const GUEST_PROBE_TIMEOUT_SEC = 15;
 const pinnedBoot = new AsyncLocalStorage<string>();
+const provisioningBoot = new AsyncLocalStorage<{ bootId?: string }>();
 
 interface SandboxStatus {
   running: boolean;
@@ -117,8 +118,7 @@ export function createCloudflareSandbox(workspace: WorkspaceStore, opts: Cloudfl
   }
 
   async function bootCall(name: string, send: (bootId: string) => Promise<Response>): Promise<Response> {
-    const held = pinnedBoot.getStore();
-    const bootId = held ?? bootByName.get(name);
+    const bootId = pinnedBoot.getStore() ?? provisioningBoot.getStore()?.bootId ?? bootByName.get(name);
     if (!bootId) throw new SandboxBootLostError(name);
     const res = await send(bootId);
     if (res.status !== 409) return res;
@@ -203,7 +203,7 @@ export function createCloudflareSandbox(workspace: WorkspaceStore, opts: Cloudfl
       await pinnedBoot.run(bootId, () => homeSnapshots.snapshotHome(scope, name));
       await mergeStored(scope, { lastSnapshotMs: Date.now(), homeDirty: false, snapshotError: undefined });
     } catch (e) {
-      await mergeStored(scope, { snapshotError: errMessage(e) });
+      if (!(e instanceof SandboxBootLostError)) await mergeStored(scope, { snapshotError: errMessage(e) });
       throw e;
     }
   }
@@ -216,6 +216,7 @@ export function createCloudflareSandbox(workspace: WorkspaceStore, opts: Cloudfl
     const [stored, current] = await Promise.all([store.get(scope), status(name)]);
     if (current.running && current.bootId && current.bootId === stored?.bootId && !stored.initializationPending) {
       bootByName.set(name, current.bootId);
+      claimProvisioningBoot(current.bootId);
       return { coldStart: false };
     }
     bootByName.delete(name);
@@ -228,8 +229,13 @@ export function createCloudflareSandbox(workspace: WorkspaceStore, opts: Cloudfl
     const bootId = await start(name);
     try {
       const hydrated = await pinnedBoot.run(bootId, () => homeSnapshots.hydrateHome(scope, name));
-      await mergeStored(scope, { bootId, initializationPending: undefined, ...(hydrated ? { homeDirty: false } : {}) });
+      await mergeStored(scope, {
+        bootId,
+        initializationPending: undefined,
+        ...(hydrated ? { homeDirty: false, snapshotError: undefined } : {}),
+      });
       bootByName.set(name, bootId);
+      claimProvisioningBoot(bootId);
       return { coldStart: !hydrated };
     } catch (e) {
       await deleteSandbox(name).catch(swallowAs("cloudflare-sandbox: delete after failed hydration", undefined));
@@ -244,6 +250,11 @@ export function createCloudflareSandbox(workspace: WorkspaceStore, opts: Cloudfl
         { cause: e },
       );
     }
+  }
+
+  function claimProvisioningBoot(bootId: string): void {
+    const holder = provisioningBoot.getStore();
+    if (holder) holder.bootId = bootId;
   }
 
   const ensureSandbox = (name: string, scope: string, onStatus?: (text: string) => void) =>
@@ -266,7 +277,9 @@ export function createCloudflareSandbox(workspace: WorkspaceStore, opts: Cloudfl
     isProvisioned: (name) => bootByName.has(name),
     async recreateScratch(name) {
       await deleteSandbox(name).catch(swallowAs("cloudflare-sandbox: stale scratch delete", undefined));
-      bootByName.set(name, await start(name));
+      const bootId = await start(name);
+      bootByName.set(name, bootId);
+      claimProvisioningBoot(bootId);
     },
     deleteInstance: (name) =>
       advisoryLock.withLock(lifecycleKey(base.scopeFor(name) ?? name), () => deleteSandbox(name)),
@@ -367,12 +380,18 @@ export function createCloudflareSandbox(workspace: WorkspaceStore, opts: Cloudfl
     }),
 
     provision(layers: WorkspaceLayer[], provOpts?: ProvisionOptions): Promise<SandboxHandle> {
-      return pinnedBoot.exit(async () => {
-        const handle = await base.provision(layers, provOpts);
-        const bootId = bootByName.get(handle.id);
-        if (!bootId) throw new SandboxBootLostError(handle.id);
-        return { ...handle, providerSandboxId: bootId };
-      });
+      const holder: { bootId?: string } = {};
+      return pinnedBoot.exit(() =>
+        provisioningBoot.run(holder, async () => {
+          const handle = await base.provision(layers, provOpts);
+          const bootId = holder.bootId ?? bootByName.get(handle.id);
+          if (!bootId) {
+            await cleanupFailedProvision(base, handle);
+            throw new SandboxBootLostError(handle.id);
+          }
+          return { ...handle, providerSandboxId: bootId };
+        }),
+      );
     },
 
     async persistHomeSnapshot(scopeId: string): Promise<void> {

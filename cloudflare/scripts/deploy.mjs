@@ -141,12 +141,17 @@ if (listed.status === 0) {
 console.log(existing.size ? `  ${existing.size} secrets already set` : "  none (first deploy)");
 
 let sandbox = args.sandbox;
-if (!sandbox && existing.size) {
-  const settings = await cf(`/accounts/${account}/workers/scripts/${name}/settings`).catch(() => undefined);
-  sandbox = settings?.bindings?.find((b) => b.type === "plain_text" && b.name === "QM_SANDBOX_BACKEND")?.text;
-  if (!sandbox)
-    fail(`could not read the sandbox backend of the existing "${name}" deployment; pass --sandbox explicitly`);
-  console.log(`  keeping this deployment's sandbox backend: ${sandbox} (pass --sandbox to change it)`);
+if (!sandbox) {
+  const settings = await cf(`/accounts/${account}/workers/scripts/${name}/settings`).catch((e) =>
+    e.status === 404
+      ? null
+      : fail(`could not read the existing "${name}" deployment (${e.message}); pass --sandbox explicitly`),
+  );
+  if (settings) {
+    sandbox = settings.bindings?.find((b) => b.type === "plain_text" && b.name === "QM_SANDBOX_BACKEND")?.text;
+    if (!sandbox) fail(`the existing "${name}" deployment has no QM_SANDBOX_BACKEND; pass --sandbox explicitly`);
+    console.log(`  keeping this deployment's sandbox backend: ${sandbox} (pass --sandbox to change it)`);
+  }
 }
 sandbox ??= "cloudflare";
 if (sandbox === "sprites" && !env.QM_SPRITES_TOKEN?.trim() && !existing.has("SPRITES_TOKEN"))

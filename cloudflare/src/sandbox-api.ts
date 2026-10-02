@@ -32,7 +32,7 @@ export function sandboxInstance(env: { QM_SANDBOX_INSTANCE?: string }): Instance
 
 export function sandboxIdleMs(env: { QM_SANDBOX_IDLE_MINUTES?: string }): number {
   const minutes = Number(env.QM_SANDBOX_IDLE_MINUTES?.trim() || DEFAULT_IDLE_MINUTES);
-  if (!Number.isFinite(minutes) || minutes <= 0 || minutes > MAX_IDLE_MINUTES)
+  if (!Number.isInteger(minutes) || minutes < 1 || minutes > MAX_IDLE_MINUTES)
     throw new Error(`QM_SANDBOX_IDLE_MINUTES must be a number of minutes between 1 and ${MAX_IDLE_MINUTES}`);
   return minutes * 60_000;
 }
@@ -69,7 +69,8 @@ export async function routeSandboxRequest(request: Request, stubFor: (name: stri
   }
   if (route === "POST start") return Response.json(await sandbox.start());
   if (route === "POST exec") {
-    const body = (await request.json().catch(() => ({}))) as { script?: unknown; timeoutSec?: unknown };
+    const parsed: unknown = await request.json().catch(() => null);
+    const body = (parsed && typeof parsed === "object" ? parsed : {}) as { script?: unknown; timeoutSec?: unknown };
     if (typeof body.script !== "string" || typeof body.timeoutSec !== "number" || !(body.timeoutSec > 0))
       return new Response("need script and timeoutSec", { status: 400 });
     const reply = await sandbox.exec(boot, body.script, body.timeoutSec);

@@ -104,6 +104,12 @@ test("exec forwards the pinned boot and reports a lost boot as 409", async () =>
     body: "{not json",
   });
   assert.equal(malformed.status, 400);
+  const nullBody = await call(stub, "/v1/sandboxes/qm-a/exec", {
+    method: "POST",
+    headers: { "x-qm-boot": BOOT, "content-type": "application/json" },
+    body: "null",
+  });
+  assert.equal(nullBody.status, 400);
 });
 
 test("files stream both ways, missing files are 404 and a lost boot is 409", async () => {
@@ -129,4 +135,5 @@ test("instance size and idle timeout come from Worker vars with safe defaults", 
   assert.equal(sandboxIdleMs({ QM_SANDBOX_IDLE_MINUTES: "360" }), 360 * 60_000);
   assert.throws(() => sandboxIdleMs({ QM_SANDBOX_IDLE_MINUTES: "361" }), /QM_SANDBOX_IDLE_MINUTES/);
   assert.throws(() => sandboxIdleMs({ QM_SANDBOX_IDLE_MINUTES: "0" }), /QM_SANDBOX_IDLE_MINUTES/);
+  assert.throws(() => sandboxIdleMs({ QM_SANDBOX_IDLE_MINUTES: "0.5" }), /QM_SANDBOX_IDLE_MINUTES/);
 });

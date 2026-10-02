@@ -195,6 +195,7 @@ test("a teardown on a stale handle never overwrites the snapshot", async () => {
   await s.teardown(stale);
   assert.equal(counting.puts(), puts, "the stale handle's empty boot is not snapshotted");
   assert.ok(errors.includes("teardown_snapshot_failed"));
+  assert.equal((await s.computerStatus!(scope)).recovery?.error, undefined, "a lost boot is not a snapshot failure");
   assert.equal(await s.readFile(fresh, "keep.txt"), "good\n");
 });
 

@@ -114,12 +114,15 @@ export class QmContainer extends Container<Env> {
 const textDecoder = new TextDecoder();
 const OUTPUT_CAP_BYTES = 4 * 1024 * 1024;
 const OUTPUT_DEADLINE_GRACE_MS = 15_000;
+const DETACHED_OUTPUT_GRACE_MS = 2_000;
 const TIMEOUT_EXIT_CODES = new Set([124, 137]);
 const TRUNCATED_NOTICE = "[cloudflare sandbox: output truncated at 4 MiB; redirect large output to a file]";
 const DEADLINE_NOTICE = "[cloudflare sandbox: the command outlived its timeout with its output still open; killed]";
+const DETACHED_NOTICE =
+  "[cloudflare sandbox: the command exited but background processes still hold its output; redirect their output to a file]";
 const MISSING_FILE_EXIT = 44;
 const RUN_WITH_IMAGE_ENV =
-  'while IFS= read -r -d "" kv; do export "$kv"; done </proc/1/environ; cd "$HOME" 2>/dev/null; exec timeout --kill-after=5 "$1" sh -c "$2"';
+  'while IFS= read -r -d "" kv; do export "$kv"; done </proc/1/environ; export HOME="${HOME:-/root}"; cd "$HOME"; exec timeout --kill-after=5 "$1" sh -c "$2"';
 
 export interface SandboxExecResult {
   stdout: string;
@@ -130,33 +133,50 @@ export interface SandboxExecResult {
 
 export type SandboxReply<T> = { ok: T } | { lost: true };
 
-async function drain(
-  stream: ReadableStream<Uint8Array> | null,
-  cap: number,
-): Promise<{ bytes: Uint8Array; truncated: boolean }> {
-  if (!stream) return { bytes: new Uint8Array(), truncated: false };
+interface Capture {
+  done: Promise<void>;
+  cancel(): void;
+  bytes(): Uint8Array;
+  truncated(): boolean;
+}
+
+function capture(stream: ReadableStream<Uint8Array> | null, cap: number): Capture {
   const chunks: Uint8Array[] = [];
   let kept = 0;
   let truncated = false;
-  const reader = stream.getReader();
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    const room = cap - kept;
-    if (value.length > room) truncated = true;
-    if (room > 0) {
-      const take = value.subarray(0, room);
-      chunks.push(take);
-      kept += take.length;
+  const reader = stream?.getReader();
+  const done = (async () => {
+    if (!reader) return;
+    for (;;) {
+      const { done: ended, value } = await reader.read();
+      if (ended) return;
+      const room = cap - kept;
+      if (value.length > room) truncated = true;
+      if (room > 0) {
+        const take = value.subarray(0, room);
+        chunks.push(take);
+        kept += take.length;
+      }
     }
-  }
-  const bytes = new Uint8Array(kept);
-  let offset = 0;
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset);
-    offset += chunk.length;
-  }
-  return { bytes, truncated };
+  })().catch(() => undefined);
+  return {
+    done,
+    cancel: () => void reader?.cancel().catch(() => undefined),
+    bytes: () => {
+      const bytes = new Uint8Array(kept);
+      let offset = 0;
+      for (const chunk of chunks) {
+        bytes.set(chunk, offset);
+        offset += chunk.length;
+      }
+      return bytes;
+    },
+    truncated: () => truncated,
+  };
+}
+
+function after<T>(ms: number, value: T, timers: Array<ReturnType<typeof setTimeout>>): Promise<T> {
+  return new Promise((resolve) => timers.push(setTimeout(() => resolve(value), ms)));
 }
 
 export class QmSandbox extends DurableObject<Env> {
@@ -227,31 +247,37 @@ export class QmSandbox extends DurableObject<Env> {
     const seconds = Math.max(1, Math.ceil(timeoutSec));
     const started = Date.now();
     const proc = await this.container.exec(["bash", "-c", RUN_WITH_IMAGE_ENV, "bash", String(seconds), script]);
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const deadline = new Promise<"deadline">((resolve) => {
-      timer = setTimeout(() => resolve("deadline"), seconds * 1000 + OUTPUT_DEADLINE_GRACE_MS);
+    const stdout = capture(proc.stdout, OUTPUT_CAP_BYTES);
+    const stderr = capture(proc.stderr, OUTPUT_CAP_BYTES);
+    const timers: Array<ReturnType<typeof setTimeout>> = [];
+    let exitCode: number | undefined;
+    const exited = proc.exitCode.then((code) => {
+      exitCode = code;
     });
-    const collected = Promise.all([
-      drain(proc.stdout, OUTPUT_CAP_BYTES),
-      drain(proc.stderr, OUTPUT_CAP_BYTES),
-      proc.exitCode,
-    ]);
-    const settled = await Promise.race([collected, deadline]).finally(() => {
-      if (timer !== undefined) clearTimeout(timer);
+    const drained = Promise.all([stdout.done, stderr.done, exited]).then(() => "drained" as const);
+    const detached = exited.then(() => after(DETACHED_OUTPUT_GRACE_MS, "detached" as const, timers));
+    const deadline = after(seconds * 1000 + OUTPUT_DEADLINE_GRACE_MS, "deadline" as const, timers);
+    const outcome = await Promise.race([drained, detached, deadline]).finally(() => {
+      for (const timer of timers) clearTimeout(timer);
     });
-    if (settled === "deadline") {
-      proc.kill(9);
-      return { ok: { stdout: "", stderr: DEADLINE_NOTICE, code: 137, timedOut: true } };
+    if (outcome !== "drained") {
+      if (outcome === "deadline") proc.kill(9);
+      stdout.cancel();
+      stderr.cancel();
     }
-    const [stdout, stderr, code] = settled;
-    const truncated = stdout.truncated || stderr.truncated;
-    const errText = textDecoder.decode(stderr.bytes);
+    const notices = [
+      ...(stdout.truncated() || stderr.truncated() ? [TRUNCATED_NOTICE] : []),
+      ...(outcome === "detached" ? [DETACHED_NOTICE] : []),
+      ...(outcome === "deadline" ? [DEADLINE_NOTICE] : []),
+    ];
+    const errText = [textDecoder.decode(stderr.bytes()), ...notices].filter(Boolean).join("\n");
+    const code = exitCode ?? 137;
     return {
       ok: {
-        stdout: textDecoder.decode(stdout.bytes),
-        stderr: truncated ? `${errText}\n${TRUNCATED_NOTICE}` : errText,
+        stdout: textDecoder.decode(stdout.bytes()),
+        stderr: errText,
         code,
-        timedOut: TIMEOUT_EXIT_CODES.has(code) && Date.now() - started >= seconds * 1000,
+        timedOut: outcome === "deadline" || (TIMEOUT_EXIT_CODES.has(code) && Date.now() - started >= seconds * 1000),
       },
     };
   }
@@ -275,15 +301,13 @@ export class QmSandbox extends DurableObject<Env> {
       "sh",
       path,
     ]);
-    const [stdout, stderr, code] = await Promise.all([
-      drain(proc.stdout, MAX_TRANSFER_BYTES),
-      drain(proc.stderr, 4096),
-      proc.exitCode,
-    ]);
+    const stdout = capture(proc.stdout, MAX_TRANSFER_BYTES);
+    const stderr = capture(proc.stderr, 4096);
+    const [code] = await Promise.all([proc.exitCode, stdout.done, stderr.done]);
     if (code === MISSING_FILE_EXIT) return { ok: null };
-    if (code !== 0) throw new Error(`read ${path}: ${textDecoder.decode(stderr.bytes).slice(0, 200)}`);
-    if (stdout.truncated) throw new Error(`read ${path}: larger than ${MAX_TRANSFER_BYTES} bytes`);
-    return { ok: stdout.bytes };
+    if (code !== 0) throw new Error(`read ${path}: ${textDecoder.decode(stderr.bytes()).slice(0, 200)}`);
+    if (stdout.truncated()) throw new Error(`read ${path}: larger than ${MAX_TRANSFER_BYTES} bytes`);
+    return { ok: stdout.bytes() };
   }
 
   async remove(): Promise<void> {
