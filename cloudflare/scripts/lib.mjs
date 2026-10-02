@@ -35,3 +35,9 @@ export const GENERATED_SECRETS = {
 function hex() {
   return randomBytes(32).toString("hex");
 }
+
+export function nodePostgresUrl(url) {
+  const parsed = new URL(url.trim());
+  if (parsed.searchParams.get("sslrootcert") === "system") parsed.searchParams.delete("sslrootcert");
+  return parsed.toString();
+}

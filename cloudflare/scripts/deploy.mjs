@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { GENERATED_SECRETS, adminLoginUrl } from "./lib.mjs";
+import { GENERATED_SECRETS, adminLoginUrl, nodePostgresUrl } from "./lib.mjs";
 
 const HERE = join(dirname(fileURLToPath(import.meta.url)), "..");
 const API = "https://api.cloudflare.com/client/v4";
@@ -224,7 +224,7 @@ if (env.QM_R2_ACCESS_KEY_ID && env.QM_R2_SECRET_ACCESS_KEY) {
   }
 }
 
-secrets.DATABASE_URL = env.QM_DATABASE_URL;
+secrets.DATABASE_URL = nodePostgresUrl(env.QM_DATABASE_URL);
 secrets[providerKey] = env[`QM_${providerKey}`];
 if (env.QM_SPRITES_TOKEN) secrets.SPRITES_TOKEN = env.QM_SPRITES_TOKEN;
 for (const n of OPTIONAL_SECRETS) if (env[`QM_${n}`]?.trim()) secrets[n] = env[`QM_${n}`];
