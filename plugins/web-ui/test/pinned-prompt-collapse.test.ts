@@ -264,6 +264,22 @@ test("a stuck prompt keeps the transcript slot it had at rest", () => {
   }
 });
 
+test("a pane resize while stuck remeasures the prompt at its resting size", () => {
+  const f = fixture();
+  try {
+    const rest = f.row.style.getPropertyValue("--pin-rest-height");
+    f.row.getBoundingClientRect = () =>
+      ({ top: 0, height: f.content.clientHeight + 24 - (f.row.classList.contains("stuck") ? 52 : 0) }) as DOMRect;
+    f.scroll(500);
+    assert.equal(f.row.classList.contains("stuck"), true);
+    f.resize(301);
+    assert.equal(f.row.style.getPropertyValue("--pin-rest-height"), rest);
+    assert.equal(f.row.classList.contains("stuck"), true);
+  } finally {
+    f.close();
+  }
+});
+
 test("the prompt condenses in step with the scroll, one pixel of height per pixel scrolled", () => {
   const f = fixture();
   try {
