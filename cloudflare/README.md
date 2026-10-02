@@ -101,6 +101,17 @@ everyone out), waits for the restart, then signs the link. For day-to-day sign-i
 Then re-run `npm run deploy`. Admit more people with `QM_ALLOWED_EMAILS` (comma-separated) or
 `--allowed-email-domain`.
 
+## Cloudflare Access
+
+To put the deployment behind Cloudflare Access, create a self-hosted Access application for the public
+hostname, plus a second application with a Bypass policy for the paths that machines call:
+
+- `/healthz`: the deploy script's health check.
+- `/v1/webhooks/incoming`: inbound webhooks, which qm verifies by signature.
+
+Sign in to Access before opening an admin sign-in link. The link's token travels in the URL fragment, which
+does not survive the Access login redirect.
+
 ## Optional settings
 
 `QM_SANDBOX_INSTANCE` (Cloudflare sandbox size: `lite` or `standard-1`…`standard-4`, default `standard-3`) and
