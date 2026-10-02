@@ -301,7 +301,12 @@ test("delivery recovery routes private result only through its originating accou
           idempotencyKey: "run:dm-run",
           text: "Synthetic private result",
           createdAt: Date.now() - 30_000,
-          destination: { type: "slack", target: "DPRIVATE", slackAccountId: "partner" },
+          destination: {
+            type: "slack",
+            target: "DPRIVATE",
+            slackAccountId: "partner",
+            slackPolicyNamespace: externalSlackNamespace("TPARTNER", policy),
+          },
         },
       ];
     },
@@ -320,6 +325,7 @@ test("delivery recovery routes private result only through its originating accou
       assert.equal(id, "partner");
       return client;
     },
+    externalNamespace: () => externalSlackNamespace("TPARTNER", policy),
   });
   await poller.pollDeliveries({
     chat: {
@@ -367,8 +373,13 @@ test("external workspace refuses legacy personal-agent approval before reading i
   assert.equal(acknowledged, true);
 });
 
-test("external account poller neither claims default identity nor releases pre-policy shared answers", async () => {
-  for (const hasDefault of [false, true]) {
+test("external account poller neither claims default identity nor releases pre-policy answers", async () => {
+  for (const [hasDefault, target, slackPolicyNamespace] of [
+    [false, "CSHARED", undefined],
+    [true, "CSHARED", undefined],
+    [true, "DPRIVATE", undefined],
+    [true, "DPRIVATE", externalSlackNamespace("TPARTNER", { ...policy, companyTeamIds: ["TOTHER"] })],
+  ] as const) {
     let pending = true;
     const acks: string[] = [];
     const core = {
@@ -382,7 +393,7 @@ test("external account poller neither claims default identity nor releases pre-p
             idempotencyKey: "run:legacy",
             text: "Synthetic pre-policy private answer",
             createdAt: 1,
-            destination: { type: "slack", target: "CSHARED" },
+            destination: { type: "slack", target, slackPolicyNamespace },
           },
         ];
       },
@@ -406,7 +417,7 @@ test("external account poller neither claims default identity nor releases pre-p
         assert.equal(id, "default");
         return hasDefault ? client : undefined;
       },
-      externalAccount: () => true,
+      externalNamespace: () => externalSlackNamespace("TPARTNER", policy),
     });
     await poller.pollDeliveries(client);
     assert.deepEqual(acks, hasDefault ? ["legacy"] : []);

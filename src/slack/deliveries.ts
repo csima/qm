@@ -57,7 +57,7 @@ function mergeSlackApiMs(body: unknown, slackApiMs: number | undefined): unknown
 
 export function createDeliveryPoller(deps: {
   clientForAccount?: (accountId: string, teamId?: string) => any;
-  externalAccount?: (accountId: string) => boolean;
+  externalNamespace?: (accountId: string) => string | undefined;
   continuePrivate?: (runId: string, task: string) => Promise<void>;
   core: SlackCoreClient;
   webUiPublicUrl?: string;
@@ -200,15 +200,17 @@ export function createDeliveryPoller(deps: {
         const destinationClient = deliveryClient(defaultClient, d.destination);
         if (!destinationClient) return;
         const client = destinationClient;
+        const runId = d.idempotencyKey?.startsWith("run:") ? d.idempotencyKey.slice("run:".length) : undefined;
+        const namespace = deps.externalNamespace?.(d.destination.slackAccountId ?? "default");
         if (
-          deps.externalAccount?.(d.destination.slackAccountId ?? "default") &&
-          !parseDeliveryTarget(d.destination.target).channel.startsWith("D") &&
-          !d.provenance?.sourceThreadRef.startsWith("external-slack:")
+          namespace &&
+          (parseDeliveryTarget(d.destination.target).channel.startsWith("D")
+            ? runId && d.destination.slackPolicyNamespace !== namespace
+            : !d.provenance?.sourceThreadRef.startsWith(`${namespace}:`))
         ) {
           await ackDelivery(d.id);
           return;
         }
-        const runId = d.idempotencyKey?.startsWith("run:") ? d.idempotencyKey.slice("run:".length) : undefined;
         if (runId && inFlightRuns.has(runId)) return;
         if (runId && typeof d.createdAt === "number" && Date.now() - d.createdAt < RUN_RECOVERY_GRACE_MS) return;
         let slackApiMs: number | undefined;

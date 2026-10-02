@@ -207,6 +207,7 @@ export interface TriggerBase {
 export interface Destination {
   slackAccountId?: string;
   slackTeamId?: string;
+  slackPolicyNamespace?: string;
   keychainAskId?: string;
   deploymentAccess?: { deploymentId: string; requesterId: string };
   commandApprovalId?: string;
