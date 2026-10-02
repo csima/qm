@@ -191,6 +191,13 @@ export const FIRST_PARTY_SECRET_SPECS: readonly SecretSpec[] = [
     generate: "create an API key in the smolmachines console (https://smolmachines.com/console)",
   },
   {
+    name: "CLOUDFLARE_SANDBOX_TOKEN",
+    service: "core",
+    required: { when: { kind: "sandbox-backend", backend: "cloudflare" } },
+    description: "Bearer token for the Cloudflare Worker's private sandbox API (QM_SANDBOX_API_TOKEN on the Worker).",
+    generate: "minted by cloudflare/scripts/deploy.mjs as the QM_SANDBOX_API_TOKEN Worker secret",
+  },
+  {
     name: "AGENT37_API_KEY",
     service: "core",
     required: {

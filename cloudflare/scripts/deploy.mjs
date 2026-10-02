@@ -1,16 +1,4 @@
 #!/usr/bin/env node
-// Deploys qm to Cloudflare Workers + Containers. Idempotent: generated signing
-// keys are minted once and live only as Worker secrets; re-running updates the
-// image, vars, and any operator secrets present in the environment.
-//
-//   node scripts/deploy.mjs --org <slug> --admin <email>[,<email>] [--name qm] [--domain agent.example.com]
-//
-// Reads from the environment (see README.md):
-//   CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID   wrangler + REST API
-//   QM_DATABASE_URL                               direct (non-pooled) Postgres URL
-//   QM_SPRITES_TOKEN                              sandbox backend (sprites)
-//   QM_ANTHROPIC_API_KEY | QM_OPENAI_API_KEY | QM_OPENROUTER_API_KEY
-//   optional: QM_R2_ACCESS_KEY_ID + QM_R2_SECRET_ACCESS_KEY, and any of OPTIONAL_SECRETS below.
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -23,7 +11,6 @@ import { GENERATED_SECRETS, adminLoginUrl } from "./lib.mjs";
 const HERE = join(dirname(fileURLToPath(import.meta.url)), "..");
 const API = "https://api.cloudflare.com/client/v4";
 
-// QM_<NAME> in the deploy environment becomes <NAME> in the container.
 const OPTIONAL_SECRETS = [
   "OPENAI_API_KEY",
   "OPENROUTER_API_KEY",
@@ -49,7 +36,6 @@ const OPTIONAL_SECRETS = [
   "LINEAR_OAUTH_CLIENT_SECRET",
   "DATABASE_CA_CERT",
 ];
-// Passed through under their own names (JSON maps of extra per-service env).
 const PASSTHROUGH = ["QM_CORE_ENV_JSON", "QM_WEB_ENV_JSON", "QM_PORTAL_ENV_JSON", "QM_ALLOWED_EMAILS"];
 
 const { values: args } = parseArgs({
@@ -60,7 +46,7 @@ const { values: args } = parseArgs({
     domain: { type: "string" },
     "model-provider": { type: "string", default: "anthropic" },
     model: { type: "string" },
-    sandbox: { type: "string", default: "sprites" },
+    sandbox: { type: "string", default: "cloudflare" },
     "allowed-email-domain": { type: "string" },
     "skip-health": { type: "boolean", default: false },
   },
@@ -102,8 +88,6 @@ async function cf(path, init = {}) {
   return body.result;
 }
 
-// --- preflight -------------------------------------------------------------
-
 const env = process.env;
 const missing = ["CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID", "QM_DATABASE_URL"].filter((n) => !env[n]?.trim());
 const provider = args["model-provider"];
@@ -131,8 +115,6 @@ const admins = args.admin
 for (const email of admins)
   if (!/^[^@\s,;<>"]+@[^@\s,;<>"]+\.[^@\s,;<>"]+$/.test(email)) fail(`bad admin email ${email}`);
 
-// --- public URL ------------------------------------------------------------
-
 step("Resolving public URL");
 let publicUrl;
 if (args.domain) {
@@ -146,8 +128,6 @@ if (args.domain) {
   publicUrl = `https://${name}.${sub.subdomain}.workers.dev`;
 }
 console.log(`  ${publicUrl}`);
-
-// --- existing secrets ------------------------------------------------------
 
 step(`Reading existing secrets on Worker "${name}"`);
 const listed = wrangler(["secret", "list", "--name", name, "--format", "json"], { allowFail: true, quiet: true });
@@ -172,8 +152,6 @@ for (const [key, mint] of Object.entries(GENERATED_SECRETS)) {
 if (generated.length && generated.length !== Object.keys(GENERATED_SECRETS).length) {
   console.warn(`  minting only the missing generated secrets: ${generated.join(", ")}`);
 }
-
-// --- R2 --------------------------------------------------------------------
 
 step(`Ensuring R2 bucket ${bucket}`);
 try {
@@ -211,9 +189,6 @@ if (env.QM_R2_ACCESS_KEY_ID && env.QM_R2_SECRET_ACCESS_KEY) {
     secrets.AWS_SECRET_ACCESS_KEY = createHash("sha256").update(token.value).digest("hex");
     console.log(`  created account token "${name} R2 ${bucket}"`);
   } catch (e) {
-    // Fall back to S3 credentials derived from the deploy token itself
-    // (https://developers.cloudflare.com/r2/api/tokens/): access key = token id,
-    // secret = SHA-256 of the token. It carries the deploy token's R2 access.
     console.warn(`  could not mint a scoped token (${e.message})`);
     const verified =
       (await cf(`/accounts/${account}/tokens/verify`).catch(() => undefined)) ??
@@ -233,15 +208,11 @@ if (env.QM_R2_ACCESS_KEY_ID && env.QM_R2_SECRET_ACCESS_KEY) {
   }
 }
 
-// --- operator secrets --------------------------------------------------------
-
 secrets.DATABASE_URL = env.QM_DATABASE_URL;
 secrets[providerKey] = env[`QM_${providerKey}`];
 if (env.QM_SPRITES_TOKEN) secrets.SPRITES_TOKEN = env.QM_SPRITES_TOKEN;
 for (const n of OPTIONAL_SECRETS) if (env[`QM_${n}`]?.trim()) secrets[n] = env[`QM_${n}`];
 for (const n of PASSTHROUGH) if (env[n]?.trim()) secrets[n] = env[n];
-
-// --- deploy ----------------------------------------------------------------
 
 const vars = {
   QM_PUBLIC_URL: publicUrl,
@@ -254,6 +225,8 @@ const vars = {
   S3_REGION: "auto",
   AWS_ENDPOINT_URL_S3: `https://${account}.r2.cloudflarestorage.com`,
   ...(args.model ? { QM_MODEL: args.model } : {}),
+  ...(env.QM_SANDBOX_INSTANCE?.trim() ? { QM_SANDBOX_INSTANCE: env.QM_SANDBOX_INSTANCE.trim() } : {}),
+  ...(env.QM_SANDBOX_IDLE_MINUTES?.trim() ? { QM_SANDBOX_IDLE_MINUTES: env.QM_SANDBOX_IDLE_MINUTES.trim() } : {}),
   ...(args["allowed-email-domain"] ? { QM_ALLOWED_EMAIL_DOMAIN: args["allowed-email-domain"] } : {}),
 };
 
@@ -274,8 +247,6 @@ try {
 } finally {
   rmSync(dir, { recursive: true, force: true });
 }
-
-// --- health ----------------------------------------------------------------
 
 if (!args["skip-health"]) {
   step("Waiting for the container to report healthy (cold start pulls the image)");

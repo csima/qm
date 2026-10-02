@@ -221,6 +221,7 @@ import { createAwsSandbox, type StoredMicrovm } from "./sandbox/aws-sandbox.ts";
 import { createLocalSandbox } from "./sandbox/local-sandbox.ts";
 import { createSpritesSandbox } from "./sandbox/sprites-sandbox.ts";
 import { createSmolmachinesSandbox, type StoredSmolmachinesSandbox } from "./sandbox/smolmachines-sandbox.ts";
+import { createCloudflareSandbox, type StoredCloudflareSandbox } from "./sandbox/cloudflare-sandbox.ts";
 import { createAgent37Sandbox } from "./sandbox/agent37-sandbox.ts";
 import {
   createConfigEpochResolver,
@@ -900,6 +901,27 @@ export function buildApp(
       onError: sandboxOnError,
     });
   };
+  const cloudflareBodies = artifactMap<StoredCloudflareSandbox>("cloudflare_sandbox_bodies");
+  const buildCloudflare = (): Sandbox => {
+    const { snapshotS3Bucket, snapshotIntervalSec, ...cf } = config.cloudflareSandbox;
+    return createCloudflareSandbox(workspace, {
+      ...cf,
+      ...(snapshotIntervalSec !== undefined ? { snapshotIntervalMs: snapshotIntervalSec * 1000 } : {}),
+      blobTransfer,
+      extraTools: deploymentLayer.advertisedTools,
+      credentialPaths: deploymentLayer.credentialPaths,
+      layerToolFiles: () => deploymentLayer.installFiles,
+      ...(config.signingSecret ? { signingSecret: config.signingSecret } : {}),
+      ...(config.capabilitySecret ? { capabilitySecret: config.capabilitySecret } : {}),
+      ...(config.apiBaseUrl ? { apiBaseUrl: config.apiBaseUrl } : {}),
+      store: cloudflareBodies,
+      advisoryLock,
+      ...(snapshotS3Bucket
+        ? { snapshots: createS3SnapshotStore({ bucket: snapshotS3Bucket, prefix: "cloudflare-home" }) }
+        : {}),
+      onError: sandboxOnError,
+    });
+  };
   const e2bBodies = artifactMap<StoredE2bSandbox>("e2b_sandbox_bodies");
   const modalBodies = artifactMap<StoredModalSandbox>("modal_sandbox_bodies");
   const awsBodies = artifactMap<StoredMicrovm>("aws_sandbox_bodies");
@@ -1080,6 +1102,7 @@ export function buildApp(
     local: buildLocal,
     sprites: buildSprites,
     smolmachines: buildSmolmachines,
+    cloudflare: buildCloudflare,
     e2b: buildE2b,
     modal: buildModal,
     aws: buildAws,

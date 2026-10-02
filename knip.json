@@ -70,7 +70,8 @@
       "ignoreDependencies": ["@composio/core"]
     },
     "cloudflare": {
-      "entry": ["supervisor.mjs", "scripts/*.mjs", "test/**/*.test.mjs"]
+      "entry": ["supervisor.mjs", "scripts/*.mjs", "test/**/*.test.mjs"],
+      "ignoreDependencies": ["cloudflare"]
     }
   }
 }

@@ -1,10 +1,23 @@
-import { Container } from "@cloudflare/containers";
+import { Container, type OutboundHandler } from "@cloudflare/containers";
+import { DurableObject } from "cloudflare:workers";
+import {
+  authorizedSandboxCaller,
+  routeSandboxRequest,
+  sandboxIdleMs,
+  sandboxInstance,
+  SANDBOX_API_HOST,
+} from "./sandbox-api";
 
-// Bindings that are not passed through to the container.
-const WORKER_ONLY = new Set(["QM"]);
+export { ContainerProxy } from "@cloudflare/containers";
+
+const WORKER_ONLY = new Set(["QM", "QM_SANDBOX"]);
 
 export interface Env {
   QM: DurableObjectNamespace<QmContainer>;
+  QM_SANDBOX: DurableObjectNamespace<QmSandbox>;
+  QM_SANDBOX_API_TOKEN?: string;
+  QM_SANDBOX_INSTANCE?: string;
+  QM_SANDBOX_IDLE_MINUTES?: string;
   [name: string]: unknown;
 }
 
@@ -26,13 +39,15 @@ async function fingerprint(vars: Record<string, string>): Promise<string> {
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-/**
- * One always-on container running core, web-ui, and portal (see supervisor.mjs).
- * Core owns crons, background work, and Slack socket mode, so the container is
- * never put to sleep for inactivity. When the Worker's vars or secrets change,
- * the next request or cron tick restarts the container with the new values.
- */
+const sandboxApi: OutboundHandler<Env> = (request, env) => {
+  if (!authorizedSandboxCaller(request, env.QM_SANDBOX_API_TOKEN)) return new Response("unauthorized", { status: 401 });
+  return routeSandboxRequest(request, (name) => env.QM_SANDBOX.getByName(name));
+};
+
 export class QmContainer extends Container<Env> {
+  static {
+    this.outboundByHost = { [SANDBOX_API_HOST]: sandboxApi };
+  }
   defaultPort = 8080;
   requiredPorts = [8080];
   sleepAfter = "1h";
@@ -45,7 +60,6 @@ export class QmContainer extends Container<Env> {
   }
 
   override async onActivityExpired(): Promise<void> {
-    // Stay up: renew instead of stopping.
     this.renewActivityTimeout();
   }
 
@@ -61,7 +75,6 @@ export class QmContainer extends Container<Env> {
     console.error("qm container error", error);
   }
 
-  /** Restart the container if its configuration changed since it last started. */
   async ensureCurrent(): Promise<void> {
     this.refreshing ??= (async () => {
       const want = await fingerprint(this.envVars ?? {});
@@ -89,12 +102,108 @@ export class QmContainer extends Container<Env> {
     return super.fetch(request);
   }
 
-  /** Cron keep-alive: start the container if it is down and report core's health. */
   async heartbeat(): Promise<string> {
     await this.ensureCurrent();
     await this.startAndWaitForPorts();
     const res = await this.containerFetch("http://container/healthz", { method: "GET" }, 8080);
     return `${res.status}`;
+  }
+}
+
+const textDecoder = new TextDecoder();
+
+export interface SandboxExecResult {
+  stdout: string;
+  stderr: string;
+  code: number;
+}
+
+export type SandboxReply<T> = { ok: T } | { lost: true };
+
+export class QmSandbox extends DurableObject<Env> {
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+    const container = ctx.container;
+    if (container?.running) void ctx.blockConcurrencyWhile(() => container.setInactivityTimeout(sandboxIdleMs(env)));
+  }
+
+  private get container(): NonNullable<DurableObjectState["container"]> {
+    const container = this.ctx.container;
+    if (!container) throw new Error("QmSandbox has no container binding");
+    return container;
+  }
+
+  private async currentBoot(): Promise<string | undefined> {
+    return this.container.running ? this.ctx.storage.get<string>("boot") : undefined;
+  }
+
+  async status(): Promise<{ running: boolean; bootId?: string }> {
+    const bootId = await this.currentBoot();
+    return { running: this.container.running, ...(bootId ? { bootId } : {}) };
+  }
+
+  async start(): Promise<{ bootId: string }> {
+    const container = this.container;
+    const known = await this.currentBoot();
+    if (known) {
+      await container.setInactivityTimeout(sandboxIdleMs(this.env));
+      return { bootId: known };
+    }
+    if (!container.running) {
+      container.start({
+        image: container.images.sandbox!,
+        instance: sandboxInstance(this.env),
+        enableInternet: true,
+      });
+    }
+    const bootId = crypto.randomUUID();
+    try {
+      await container.setInactivityTimeout(sandboxIdleMs(this.env));
+      const probe = await (await container.exec(["true"])).output();
+      if (probe.exitCode !== 0) throw new Error(`sandbox did not come up (exit ${probe.exitCode})`);
+      await this.ctx.storage.put("boot", bootId);
+    } catch (error) {
+      await container.destroy().catch(() => undefined);
+      throw error;
+    }
+    return { bootId };
+  }
+
+  async exec(bootId: string, script: string, timeoutSec: number): Promise<SandboxReply<SandboxExecResult>> {
+    if ((await this.currentBoot()) !== bootId) return { lost: true };
+    const seconds = Math.max(1, Math.ceil(timeoutSec));
+    const proc = await this.container.exec(["timeout", "--kill-after=5", String(seconds), "sh", "-c", script], {
+      cwd: "/root",
+      env: { HOME: "/root" },
+    });
+    const out = await proc.output();
+    return {
+      ok: { stdout: textDecoder.decode(out.stdout), stderr: textDecoder.decode(out.stderr), code: out.exitCode },
+    };
+  }
+
+  async writeFile(bootId: string, path: string, data: Uint8Array): Promise<SandboxReply<true>> {
+    if ((await this.currentBoot()) !== bootId) return { lost: true };
+    const proc = await this.container.exec(["sh", "-c", 'mkdir -p "$(dirname "$1")" && cat > "$1"', "sh", path], {
+      stdin: new Response(data).body!,
+    });
+    const out = await proc.output();
+    if (out.exitCode !== 0) throw new Error(`write ${path}: ${textDecoder.decode(out.stderr).slice(0, 200)}`);
+    return { ok: true };
+  }
+
+  async readFile(bootId: string, path: string): Promise<SandboxReply<ReadableStream<Uint8Array> | null>> {
+    if ((await this.currentBoot()) !== bootId) return { lost: true };
+    const found = await (await this.container.exec(["test", "-f", path])).output();
+    if (found.exitCode !== 0) return { ok: null };
+    const proc = await this.container.exec(["cat", path], { stderr: "ignore" });
+    if (!proc.stdout) throw new Error(`read ${path}: no stdout`);
+    return { ok: proc.stdout };
+  }
+
+  async remove(): Promise<void> {
+    if (this.container.running) await this.container.destroy();
+    await this.ctx.storage.delete("boot");
   }
 }
 
@@ -108,8 +217,6 @@ export default {
       return Response.redirect(url.toString(), 301);
     }
     const headers = new Headers(request.headers);
-    // Portal trusts exactly one X-Forwarded-For hop (PORTAL_XFF_TRUSTED_HOPS=1):
-    // replace whatever the client sent with the address Cloudflare saw.
     headers.set("x-forwarded-for", request.headers.get("cf-connecting-ip") ?? "unknown");
     headers.set("x-forwarded-proto", url.protocol.slice(0, -1));
     headers.set("x-forwarded-host", url.host);

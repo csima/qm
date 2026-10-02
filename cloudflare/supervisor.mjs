@@ -1,8 +1,3 @@
-// Runs core, web-ui, and portal in one Cloudflare Container and wires them
-// over loopback, deriving each service's environment the same way the qm CLI
-// does for its docker and fly targets (cli/src/services.ts). Each process only
-// receives the variables it needs; if any process exits, the rest are stopped
-// and the container exits so the Worker restarts it.
 import { spawn } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -13,6 +8,7 @@ const PORTS = { portal: 8080, core: 8081, web: 8082 };
 const AUTH_CLIENT_ID = "qm-portal";
 const AUTH_PREFIX = "/idp";
 const AUTH_LOOPBACK = "http://127.0.0.1:8099";
+const SANDBOX_API_URL = "http://sandbox.qm.internal";
 
 export function buildServiceEnvs(env) {
   const problems = [];
@@ -63,7 +59,7 @@ export function buildServiceEnvs(env) {
     PORTAL_IDENTITY_SECRET: need("PORTAL_IDENTITY_SECRET"),
   };
 
-  const sandbox = opt("QM_SANDBOX_BACKEND") ?? "sprites";
+  const sandbox = opt("QM_SANDBOX_BACKEND") ?? "cloudflare";
   const core = {
     ...base,
     ...shared,
@@ -113,9 +109,13 @@ export function buildServiceEnvs(env) {
     ]),
   };
   if (sandbox === "sprites" && !opt("SPRITES_TOKEN")) problems.push("SPRITES_TOKEN");
+  if (sandbox === "cloudflare") {
+    Object.assign(core, {
+      CLOUDFLARE_SANDBOX_URL: SANDBOX_API_URL,
+      CLOUDFLARE_SANDBOX_TOKEN: need("QM_SANDBOX_API_TOKEN"),
+    });
+  }
   if (opt("QM_MODEL_PROVIDER") === "anthropic" && !opt("ANTHROPIC_API_KEY")) problems.push("ANTHROPIC_API_KEY");
-  // Object storage: R2 through its S3-compatible API. The AWS SDK picks up
-  // AWS_ENDPOINT_URL_S3 and the access keys from the environment.
   if (opt("S3_BUCKET")) {
     Object.assign(core, {
       SNAPSHOT_STORE: "s3",
@@ -128,6 +128,7 @@ export function buildServiceEnvs(env) {
       AWS_ENDPOINT_URL_S3: need("AWS_ENDPOINT_URL_S3"),
       ...(sandbox === "sprites" ? { SPRITES_SNAPSHOT_S3_BUCKET: env.S3_BUCKET.trim() } : {}),
       ...(sandbox === "e2b" ? { E2B_SNAPSHOT_S3_BUCKET: env.S3_BUCKET.trim() } : {}),
+      ...(sandbox === "cloudflare" ? { CLOUDFLARE_SANDBOX_SNAPSHOT_S3_BUCKET: env.S3_BUCKET.trim() } : {}),
     });
   }
   Object.assign(core, extra("QM_CORE_ENV_JSON"));
@@ -152,11 +153,9 @@ export function buildServiceEnvs(env) {
     CORE_ORG_ID: orgId,
     PORTAL_PUBLIC_URL: publicUrl,
     PORTAL_SESSION_SECRET: need("PORTAL_SESSION_SECRET"),
-    // The Worker overwrites X-Forwarded-For with exactly the client's address.
     PORTAL_XFF_TRUSTED_HOPS: "1",
     WEB_UI_UPSTREAM: webUrl,
     ADMIN_UPSTREAM: `${webUrl}/admin`,
-    // Embedded auth broker, wired as brokerWiring("portal") in cli/src/services.ts.
     AUTH_BROKER_UPSTREAM: AUTH_LOOPBACK,
     AUTH_EMBEDDED: "1",
     AUTH_ISSUER: issuer,
@@ -230,7 +229,6 @@ function main() {
     stopping = true;
     process.exitCode = code;
     for (const child of children.values()) child.kill(signal);
-    // Core drains in-flight turns on SIGTERM; give it the same window Fly does.
     setTimeout(() => {
       for (const child of children.values()) child.kill("SIGKILL");
       process.exit(code);

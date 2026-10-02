@@ -1,13 +1,4 @@
 #!/usr/bin/env node
-// Prints a one-time administrator sign-in link, like `qm admin-login`.
-//
-// The portal session key exists only as a Worker secret, so this rotates
-// PORTAL_SESSION_SECRET, waits for the container to restart with it, and signs
-// a link with the new key. Rotation signs everyone out of the web UI; use it to
-// bootstrap or recover admin access, and set up email or password sign-in for
-// day-to-day use (README.md).
-//
-//   node scripts/admin-login.mjs [--name qm] [--email admin@example.com]
 import { spawnSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -52,24 +43,18 @@ const put = spawnSync(
 );
 if (put.status !== 0) fail("wrangler secret put failed");
 
-// The next request restarts the container with the new key. Probe with a
-// throwaway link until the portal accepts this key, then mint the real one.
 console.log("Waiting for the container to restart with the new key (up to ~6 minutes)…");
 const deadline = Date.now() + 8 * 60_000;
 for (;;) {
   const probe = adminLoginUrl({ publicUrl, secret, email }).split("#token=")[1];
-  try {
-    const r = await fetch(`${publicUrl}/auth/admin-login`, {
-      method: "POST",
-      redirect: "manual",
-      headers: { "content-type": "application/x-www-form-urlencoded", origin: new URL(publicUrl).origin },
-      body: new URLSearchParams({ token: probe }),
-      signal: AbortSignal.timeout(60_000),
-    });
-    if (r.status === 303) break;
-  } catch {
-    // container restarting
-  }
+  const r = await fetch(`${publicUrl}/auth/admin-login`, {
+    method: "POST",
+    redirect: "manual",
+    headers: { "content-type": "application/x-www-form-urlencoded", origin: new URL(publicUrl).origin },
+    body: new URLSearchParams({ token: probe }),
+    signal: AbortSignal.timeout(60_000),
+  }).catch(() => undefined);
+  if (r?.status === 303) break;
   if (Date.now() > deadline)
     fail(`portal did not accept the new key in time; check \`npx wrangler tail ${args.name}\``);
   await new Promise((r) => setTimeout(r, 10_000));

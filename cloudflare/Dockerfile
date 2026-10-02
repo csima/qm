@@ -1,9 +1,3 @@
-# One image that runs core, web-ui (with the admin module), and portal (with the
-# embedded auth broker) side by side for Cloudflare Containers. The repository
-# layout is preserved under /srv/qm so every cross-plugin relative import
-# resolves exactly as it does in the per-service images under deploy/.
-# Build context: the repository root.
-
 FROM node:24-alpine@sha256:a0b9bf06e4e6193cf7a0f58816cc935ff8c2a908f81e6f1a95432d679c54fbfd AS connector-sdk-build
 WORKDIR /app
 COPY deploy/connector-sdk ./deploy/connector-sdk
@@ -29,7 +23,6 @@ RUN apk add --no-cache ca-certificates curl git util-linux tini
 
 WORKDIR /srv/qm
 
-# core
 COPY package.json package-lock.json ./
 COPY .husky/install.mjs .husky/install.mjs
 RUN npm ci --omit=dev && npm audit --omit=dev --audit-level=moderate \
@@ -44,7 +37,6 @@ COPY plugins/onboarding ./plugins/onboarding
 COPY plugins/chassis ./plugins/chassis
 COPY tsconfig.json ./
 
-# web-ui + admin
 COPY plugins/web-ui/package.json plugins/web-ui/package-lock.json ./plugins/web-ui/
 RUN npm ci --prefix plugins/web-ui --omit=dev && rm -rf /root/.npm /tmp/node-compile-cache
 COPY plugins/web-ui/server ./plugins/web-ui/server
@@ -56,7 +48,6 @@ COPY plugins/admin/src ./plugins/admin/src
 COPY plugins/admin/ui ./plugins/admin/ui
 COPY plugins/admin/public ./plugins/admin/public
 
-# portal + embedded auth broker (auth shares portal's dependencies, as in deploy/portal)
 COPY plugins/portal/package.json plugins/portal/package-lock.json ./plugins/portal/
 RUN npm ci --prefix plugins/portal --omit=dev && rm -rf /root/.npm /tmp/node-compile-cache
 COPY plugins/portal/src ./plugins/portal/src

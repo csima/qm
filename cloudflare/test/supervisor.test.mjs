@@ -10,7 +10,7 @@ const base = {
   QM_MODEL_PROVIDER: "anthropic",
   DATABASE_URL: "postgres://u:p@db/qm",
   ANTHROPIC_API_KEY: "sk-ant-x",
-  SPRITES_TOKEN: "sprites",
+  QM_SANDBOX_API_TOKEN: "sandbox-token",
   S3_BUCKET: "qm-data",
   AWS_ACCESS_KEY_ID: "id",
   AWS_SECRET_ACCESS_KEY: "secret",
@@ -40,7 +40,10 @@ test("wires core, web-ui, and portal over loopback", () => {
   assert.equal(core.PUBLIC_API_URL, "https://qm.acme.workers.dev");
   assert.equal(core.ADMIN_GRANTS, "admin@acme.com:org_admin");
   assert.equal(core.SNAPSHOT_STORE, "s3");
-  assert.equal(core.SPRITES_SNAPSHOT_S3_BUCKET, "qm-data");
+  assert.equal(core.SANDBOX_BACKEND, "cloudflare");
+  assert.equal(core.CLOUDFLARE_SANDBOX_URL, "http://sandbox.qm.internal");
+  assert.equal(core.CLOUDFLARE_SANDBOX_TOKEN, "sandbox-token");
+  assert.equal(core.CLOUDFLARE_SANDBOX_SNAPSHOT_S3_BUCKET, "qm-data");
   assert.equal(web.CORE_API_URL, "http://127.0.0.1:8081");
   assert.equal(portal.PORT, "8080");
   assert.equal(portal.WEB_UI_UPSTREAM, "http://127.0.0.1:8082");
@@ -56,7 +59,8 @@ test("keeps each secret with the process that needs it", () => {
     for (const key of [
       "DATABASE_URL",
       "ANTHROPIC_API_KEY",
-      "SPRITES_TOKEN",
+      "CLOUDFLARE_SANDBOX_TOKEN",
+      "QM_SANDBOX_API_TOKEN",
       "AWS_SECRET_ACCESS_KEY",
       "CONNECTOR_SECRET_KEY",
     ])
@@ -71,10 +75,11 @@ test("keeps each secret with the process that needs it", () => {
 test("reports missing configuration instead of starting half-configured", () => {
   const rest = { ...base };
   delete rest.DATABASE_URL;
-  delete rest.SPRITES_TOKEN;
+  delete rest.QM_SANDBOX_API_TOKEN;
   const { problems } = buildServiceEnvs({ ...rest, QM_CORE_ENV_JSON: "[1]" });
   assert.ok(problems.includes("DATABASE_URL"));
-  assert.ok(problems.includes("SPRITES_TOKEN"));
+  assert.ok(problems.includes("QM_SANDBOX_API_TOKEN"));
+  assert.ok(buildServiceEnvs({ ...base, QM_SANDBOX_BACKEND: "sprites" }).problems.includes("SPRITES_TOKEN"));
   assert.ok(problems.some((p) => p.startsWith("QM_CORE_ENV_JSON")));
 });
 
@@ -87,4 +92,13 @@ test("per-service JSON overrides apply last", () => {
   assert.equal(core.SECURITY_SCREEN, "observe");
   assert.equal(core.GOOGLE_OAUTH_CLIENT_ID, "abc");
   assert.equal(portal.PORTAL_PLAYGROUND, "1");
+});
+
+test("other sandbox backends get their own wiring and no Cloudflare sandbox credentials", () => {
+  const { problems, services } = buildServiceEnvs({ ...base, QM_SANDBOX_BACKEND: "sprites", SPRITES_TOKEN: "sprites" });
+  assert.deepEqual(problems, []);
+  assert.equal(services.core.SANDBOX_BACKEND, "sprites");
+  assert.equal(services.core.SPRITES_SNAPSHOT_S3_BUCKET, "qm-data");
+  assert.equal(services.core.CLOUDFLARE_SANDBOX_TOKEN, undefined);
+  assert.equal(services.core.CLOUDFLARE_SANDBOX_SNAPSHOT_S3_BUCKET, undefined);
 });

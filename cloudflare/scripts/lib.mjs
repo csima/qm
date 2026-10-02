@@ -1,6 +1,5 @@
 import { createHmac, randomBytes, generateKeyPairSync } from "node:crypto";
 
-/** Same token format as `qm admin-login` (cli/src/commands/admin-login.ts). */
 export function adminLoginUrl({ publicUrl, secret, email, now = Math.floor(Date.now() / 1000) }) {
   const origin = new URL(publicUrl).origin;
   if (secret.trim().length < 32) throw new Error("PORTAL_SESSION_SECRET must be at least 32 characters");
@@ -18,7 +17,6 @@ export function adminLoginUrl({ publicUrl, secret, email, now = Math.floor(Date.
   return `${origin}/auth/admin-login#token=${body}.${signature}`;
 }
 
-/** Secrets the deploy script mints once and stores only as Worker secrets. */
 export const GENERATED_SECRETS = {
   CORE_SIGNING_SECRET: hex,
   DEPLOYMENT_CONTROL_SECRET: hex,
@@ -29,6 +27,7 @@ export const GENERATED_SECRETS = {
   PORTAL_SESSION_SECRET: hex,
   AUTH_TOKEN_SECRET: hex,
   AUTH_CLIENT_SECRET: hex,
+  QM_SANDBOX_API_TOKEN: hex,
   AUTH_SIGNING_JWK: () =>
     JSON.stringify(generateKeyPairSync("ec", { namedCurve: "P-256" }).privateKey.export({ format: "jwk" })),
 };

@@ -18,7 +18,7 @@ import {
 } from "./sandbox.ts";
 
 export type SandboxBackendName =
-  "sprites" | "aws" | "local" | "smolmachines" | "e2b" | "modal" | "porter" | "agent37" | "superserve";
+  "sprites" | "aws" | "local" | "smolmachines" | "e2b" | "modal" | "porter" | "agent37" | "superserve" | "cloudflare";
 
 export type SandboxScopeDefaults = Partial<Record<ScopeKind, SandboxBackendName>>;
 
