@@ -167,7 +167,7 @@ async function setWebhookEnabled(ctx: ApiCtx, enabled: boolean): Promise<void> {
       ...(portalCaller ? { message: "not your webhook" } : {}),
     });
   }
-  await app.setWebhookEnabled(id, enabled);
+  await app.setWebhookEnabled(id, enabled, principalId ?? undefined);
   return sendJson(res, 200, { ok: true });
 }
 
