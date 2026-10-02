@@ -93,7 +93,7 @@ function smtpMailer(cfg: AuthConfig): Mailer {
         textEncoding: "base64",
         headers: { "Auto-Submitted": "auto-generated" },
       });
-      return info.response;
+      return info.response ?? "accepted";
     },
     async verify() {
       await transporter.verify();
