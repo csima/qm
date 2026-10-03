@@ -73,10 +73,6 @@
       "entry": ["supervisor.mjs", "scripts/*.mjs", "test/**/*.test.mjs"],
       "ignoreDependencies": ["cloudflare"]
     },
-    "deploy/layers/sima/agent-host": {
-      "entry": ["scripts/*.mjs", "runtime/*.mjs", "test/**/*.test.{ts,mjs}"],
-      "ignoreDependencies": ["cloudflare"]
-    },
     "deploy/layers/sima/librechat": {}
   }
 }

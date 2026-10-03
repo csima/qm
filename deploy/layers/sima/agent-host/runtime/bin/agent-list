@@ -1,2 +1,0 @@
-#!/bin/sh
-exec node /opt/agent-host/agent-call.mjs list "$@"
