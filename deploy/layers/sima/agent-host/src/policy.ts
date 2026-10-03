@@ -15,20 +15,29 @@ export function can(caller: Caller, row: Pick<InstanceRow, "owner" | "sharing">,
   return false;
 }
 
+export function isEmail(value: string): boolean {
+  return EMAIL.test(value);
+}
+
+export function parseEmailList(raw: unknown, label: string): string[] {
+  const list = raw ?? [];
+  if (!Array.isArray(list)) throw new Error(`${label} must be a list of emails`);
+  return [
+    ...new Set(
+      list.map((e) => {
+        const value = typeof e === "string" ? e.trim().toLowerCase() : "";
+        if (!(value === "*" || EMAIL.test(value))) throw new Error(`${label} has an invalid entry`);
+        return value;
+      }),
+    ),
+  ];
+}
+
 export function parseSharing(input: unknown): Sharing {
   const value = (input ?? {}) as Record<string, unknown>;
-  const list = (key: keyof Sharing): string[] => {
-    const raw = value[key] ?? [];
-    if (!Array.isArray(raw)) throw new Error(`sharing.${key} must be a list of emails`);
-    return [
-      ...new Set(
-        raw.map((e) => {
-          if (typeof e !== "string" || !(e === "*" || EMAIL.test(e)))
-            throw new Error(`sharing.${key} has an invalid entry`);
-          return e.toLowerCase();
-        }),
-      ),
-    ];
+  return {
+    message: parseEmailList(value.message, "sharing.message"),
+    attach: parseEmailList(value.attach, "sharing.attach"),
+    admin: parseEmailList(value.admin, "sharing.admin"),
   };
-  return { message: list("message"), attach: list("attach"), admin: list("admin") };
 }

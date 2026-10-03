@@ -3,11 +3,13 @@ import { SESSION_NAME, imageKey } from "../shared/naming.js";
 import { modelEnvironment, systemPrompt } from "./boot-env.ts";
 import type { Env, InstanceConfig } from "./env.ts";
 import { putStream } from "./r2.ts";
-import { openCredentials } from "./secrets.ts";
+import { applyChange, type CredentialChange } from "./credentials.ts";
+import { openCredentials, sealCredentials } from "./secrets.ts";
 import { audit, setInstanceStatus, type TaskRow } from "./store.ts";
 
 const ALARM_MS = 60_000;
 const SNAPSHOT_EVERY_MS = 5 * 60_000;
+const ONE_OFF_MAX_MS = 2 * 60 * 60_000;
 const START_TIMEOUT_MS = 120_000;
 const INACTIVITY_MS = 5 * 60 * 60_000;
 const RECORDING_LIMIT = 20 * 1024 * 1024;
@@ -160,7 +162,7 @@ export class Instance extends DurableObject<Env> {
     try {
       const image = this.container.images[imageKey(config.agent, config.version)];
       if (!image) throw new Error(`version ${config.version} of ${config.agent} is not deployed on this host`);
-      if (this.container.running && (await this.ctx.storage.get("bootId")))
+      if (!config.ephemeral && this.container.running && (await this.ctx.storage.get("bootId")))
         await this.snapshot(config.id, true).catch((e) =>
           console.error(`pre-reboot save of ${config.id} failed: ${errText(e)}`),
         );
@@ -172,7 +174,7 @@ export class Instance extends DurableObject<Env> {
         exports.HostCallback({ props: { instance: config.id } }),
       );
       await this.container.setInactivityTimeout(INACTIVITY_MS);
-      await this.restoreState(config.id);
+      if (!config.ephemeral) await this.restoreState(config.id);
       const credentials = await openCredentials(this.env.CREDENTIALS_KEY, config.credentials, config.id);
       const bootId = crypto.randomUUID();
       const out = await this.must(
@@ -285,6 +287,7 @@ export class Instance extends DurableObject<Env> {
   }
 
   private async snapshot(id: string, force = false): Promise<boolean> {
+    if ((await this.config()).ephemeral) return false;
     const changed = await this.must(["agent-state", "changed"]);
     if (!force && changed.trim() !== "yes") return false;
     const key = `state/${id}/home-${Date.now()}.tar.gz`;
@@ -306,6 +309,10 @@ export class Instance extends DurableObject<Env> {
   async alarm(): Promise<void> {
     const config = await this.ctx.storage.get<InstanceConfig>("config");
     if (!config) return;
+    if (config.ephemeral && Date.now() - (config.createdAt ?? 0) > ONE_OFF_MAX_MS) {
+      await this.teardown("one-off instance reached its two-hour limit");
+      return;
+    }
     try {
       await this.expireStaleTasks(config.id);
       await this.ensureRunning();
@@ -317,6 +324,46 @@ export class Instance extends DurableObject<Env> {
     } finally {
       await this.ctx.storage.setAlarm(Date.now() + ALARM_MS);
     }
+  }
+
+  async teardown(reason: string): Promise<void> {
+    const config = await this.ctx.storage.get<InstanceConfig>("config");
+    if (!config) return;
+    if (!config.ephemeral) throw new Error("only one-off instances are torn down automatically");
+    if (this.ctx.container?.running) await this.container.destroy().catch(() => undefined);
+    await this.ctx.storage.deleteAlarm();
+    await this.ctx.storage.deleteAll();
+    const now = Date.now();
+    await this.env.DB.batch([
+      this.env.DB.prepare(
+        "UPDATE instances SET status = 'deleted', last_error = NULL, updated_at = ? WHERE id = ?",
+      ).bind(now, config.id),
+      this.env.DB.prepare(
+        "UPDATE tasks SET status = 'failed', error = 'the one-off instance was removed', finished_at = ? WHERE instance = ? AND status IN ('queued', 'running')",
+      ).bind(now, config.id),
+    ]);
+    await audit(this.env, {
+      actor: `instance:${config.id}`,
+      via: "agent",
+      action: "instance.teardown",
+      instance: config.id,
+      detail: { reason },
+    });
+  }
+
+  async credentialNames(): Promise<string[]> {
+    const config = await this.config();
+    return Object.keys(await openCredentials(this.env.CREDENTIALS_KEY, config.credentials, config.id)).sort();
+  }
+
+  async updateCredentials(change: CredentialChange, required: string[]): Promise<string[]> {
+    const config = await this.config();
+    const next = applyChange(await openCredentials(this.env.CREDENTIALS_KEY, config.credentials, config.id), change);
+    const missing = required.filter((name) => !next[name]);
+    if (missing.length) throw new Error(`these credentials are required: ${missing.join(", ")}`);
+    config.credentials = await sealCredentials(this.env.CREDENTIALS_KEY, next, config.id);
+    await this.ctx.storage.put("config", config);
+    return Object.keys(next).sort();
   }
 
   private async expireStaleTasks(id: string): Promise<void> {

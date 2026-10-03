@@ -1,6 +1,6 @@
 import { WorkerEntrypoint } from "cloudflare:workers";
 import type { Env } from "./env.ts";
-import { audit, getTask, isTerminal, type AuditEntry } from "./store.ts";
+import { audit, getInstance, getTask, isTerminal, type AuditEntry } from "./store.ts";
 
 const MAX_RESULT = 200_000;
 const MAX_TOOLS = 200;
@@ -83,6 +83,13 @@ export class HostCallback extends WorkerEntrypoint<Env> {
       session: task.session,
       detail: { task: id, caller: task.caller, ...(error ? { error } : {}) },
     });
+    const instance = await getInstance(this.env, this.instance);
+    if (instance?.ephemeral)
+      this.ctx.waitUntil(
+        this.env.INSTANCE.getByName(this.instance)
+          .teardown(`one-off task ${update.status}`)
+          .catch((e) => console.error(`teardown ${this.instance}: ${(e as Error).message}`)),
+      );
     if (task.callback_url) {
       const finished = await getTask(this.env, id);
       this.ctx.waitUntil(notify(task.callback_url, { task: finished }));

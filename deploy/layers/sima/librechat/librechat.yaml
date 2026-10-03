@@ -26,3 +26,16 @@ registration:
 endpoints:
   agents:
     disableBuilder: false
+  custom:
+    - name: "Agent host"
+      apiKey: "internal"
+      baseURL: "http://agents.internal/v1"
+      models:
+        default: ["notes-main"]
+        fetch: true
+      titleConvo: false
+      modelDisplayLabel: "Agent host"
+      headers:
+        X-User-Email: "{{LIBRECHAT_USER_EMAIL}}"
+        X-Conversation-Id: "{{LIBRECHAT_BODY_CONVERSATIONID}}"
+      dropParams: ["temperature", "top_p", "frequency_penalty", "presence_penalty", "stop", "user", "max_tokens"]

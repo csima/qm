@@ -5,16 +5,18 @@ export { ContainerProxy } from "@cloudflare/containers";
 const MEILI_HOST = "meili.internal";
 const RAG_HOST = "rag.internal";
 const EMBEDDINGS_HOST = "embeddings.internal";
+const AGENT_HOST = "agents.internal";
 const EMBEDDINGS_MODEL = "@cf/baai/bge-m3";
 const EMBEDDINGS_BATCH = 50;
 const RAG_ONLY_PREFIX = "RAGSVC_";
-const BINDINGS = new Set(["LIBRECHAT", "MEILI", "RAG", "AI"]);
+const BINDINGS = new Set(["LIBRECHAT", "MEILI", "RAG", "AI", "AGENT_HOST"]);
 
 export interface Env {
   LIBRECHAT: DurableObjectNamespace<LibreChat>;
   MEILI: DurableObjectNamespace<Meili>;
   RAG: DurableObjectNamespace<RagApi>;
   AI: Ai;
+  AGENT_HOST: Fetcher;
   MEILI_MASTER_KEY: string;
   JWT_SECRET: string;
   RAGSVC_DB_HOST: string;
@@ -164,6 +166,7 @@ export class LibreChat extends ConfiguredContainer {
     this.outboundByHost = {
       [MEILI_HOST]: (request: Request, env: Env) => env.MEILI.getByName("main").fetch(request),
       [RAG_HOST]: (request: Request, env: Env) => env.RAG.getByName("main").fetch(request),
+      [AGENT_HOST]: (request: Request, env: Env) => env.AGENT_HOST.fetch(request),
     };
   }
   defaultPort = 3080;

@@ -45,21 +45,35 @@ version an instance runs, stay deployed.
 `/api/v1/*` takes `Authorization: Bearer <API key>` (Cloudflare Access bypasses this path; the
 Worker checks the key). The browser uses the same handlers under `/ui/v1/*` with its Access session.
 
-| Method          | Path                                               | Who                             | Does                                                                    |
-| --------------- | -------------------------------------------------- | ------------------------------- | ----------------------------------------------------------------------- |
-| GET             | `/agents`                                          | anyone signed in                | Agents and their versions                                               |
-| GET/POST        | `/instances`                                       | list: anyone; create: admins    | Create `{id, agent, version?, owner?, credentials, sharing, sessions?}` |
-| GET             | `/instances/:id`                                   | view                            | Status, runtime, recent tasks                                           |
-| POST            | `/instances/:id/tasks`                             | message                         | `{message, session?, callback_url?}` → task id, runs async              |
-| GET             | `/tasks/:id?wait=50`                               | task's caller or instance admin | Long-polls until done or failed                                         |
-| POST            | `/instances/:id/sessions`                          | message                         | `{name}` adds a session                                                 |
-| GET (WebSocket) | `/instances/:id/attach?session=main`               | attach                          | Joins the live terminal; recorded to R2                                 |
-| POST            | `/instances/:id/restart`, `/instances/:id/upgrade` | admin                           | Save state, reboot (on a newer version)                                 |
-| GET             | `/instances/:id/audit`                             | admin                           | Audit trail                                                             |
-| POST            | `/keys`                                            | anyone signed in                | Mint an API key for yourself (shown once)                               |
+| Method              | Path                                               | Who                                                          | Does                                                                                               |
+| ------------------- | -------------------------------------------------- | ------------------------------------------------------------ | -------------------------------------------------------------------------------------------------- |
+| GET                 | `/agents`                                          | anyone signed in                                             | Agents you may use, with declared credentials (admins also see each use list)                      |
+| PUT                 | `/agents/:agent/access`                            | admins                                                       | `{use: [emails or "*"]}` sets who may use an agent; nobody but admins by default                   |
+| POST                | `/agents/:agent/run`                               | agent users                                                  | `{message, credentials?}` one-off run in a fresh container, removed when the task ends (2 h cap)   |
+| GET / PUT           | `/credentials`, `/credentials/:agent`              | agent users                                                  | Your saved credentials per agent: `{set: {NAME: value}, clear: [NAME]}`; values never returned     |
+| GET / POST          | `/instances`                                       | list: anyone; create: agent users (3 each, admins unlimited) | Create `{id, agent, version?, credentials?, sharing?}`; blank credentials come from your saved set |
+| GET                 | `/instances/:id`                                   | view                                                         | Status, runtime, recent tasks                                                                      |
+| POST                | `/instances/:id/tasks`                             | message                                                      | `{message, session?, callback_url?}` → task id, runs async                                         |
+| GET                 | `/tasks/:id?wait=50`                               | task's caller or instance admin                              | Long-polls until done or failed                                                                    |
+| PUT                 | `/instances/:id/sharing`                           | admin                                                        | `{message, attach, admin}` email lists                                                             |
+| GET / PUT           | `/instances/:id/credentials`                       | admin                                                        | Names set; `{set, clear}` replaces values, applied on restart                                      |
+| POST                | `/instances/:id/sessions`                          | admin                                                        | `{name}` adds a session (8 max)                                                                    |
+| GET (WebSocket)     | `/instances/:id/attach?session=main`               | attach                                                       | Joins the live terminal; recorded to R2                                                            |
+| POST                | `/instances/:id/restart`, `/instances/:id/upgrade` | admin                                                        | Save state, reboot (on a newer version)                                                            |
+| GET                 | `/instances/:id/audit`                             | admin                                                        | Audit trail                                                                                        |
+| GET / POST / DELETE | `/keys`, `/keys/:id`                               | anyone signed in                                             | List, mint (shown once) and revoke your API keys                                                   |
 
 Sharing lists on an instance: `message`, `attach`, `admin` (emails, or `*`). Owners and
 `ADMIN_EMAILS` have everything. Every message reaches the harness with a header naming the caller.
+
+## LibreChat
+
+LibreChat's Worker has a service binding to this Worker's `LibreChatGateway` entrypoint, reachable
+only through that binding, and maps `http://agents.internal` inside the LibreChat container to it.
+The "Agent host" custom endpoint lists each instance you can message as a model; `<id>+private`
+(instance admins) gives the LibreChat conversation its own session. LibreChat sends the signed-in
+user's email in `X-User-Email`, so agent-host trusts LibreChat's account emails: keep LibreChat
+registration closed to people you would not let claim an email address.
 
 ## Configuration
 
@@ -72,9 +86,9 @@ minting personal keys). Deploy with `npm run deploy`, which regenerates the imag
 Access apps: "Agent host" (owner-only) and "Agent host machine paths" (bypass for `/api/` and
 `/healthz`).
 
-## Not in phase 1
+## Not yet built
 
-LibreChat integration, per-person credentials and instance creation by non-admins, fresh-container
-instances, pause/kill/delete, agent-to-agent registry and delegation, cost reports, Codex. Accepted
+Pause, kill and delete for persistent instances, drift checks, agent-to-agent registry and
+delegation, cost reports, Codex. Accepted
 risks: full-auto agents with open egress, secrets typed into messages persist in session logs and
 state, and typing in an attached terminal can collide with queued messages.

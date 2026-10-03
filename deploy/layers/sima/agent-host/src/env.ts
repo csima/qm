@@ -14,7 +14,7 @@ export interface Env {
   DEFAULT_CLAUDE_CODE_OAUTH_TOKEN?: string;
 }
 
-export type Via = "access" | "api_key" | "admin_token" | "agent";
+export type Via = "access" | "api_key" | "admin_token" | "agent" | "librechat";
 
 export interface Caller {
   email: string;
@@ -37,6 +37,7 @@ export interface InstanceRow {
   size: string;
   status: string;
   last_error: string | null;
+  ephemeral: number;
   created_at: number;
   updated_at: number;
 }
@@ -59,4 +60,6 @@ export interface InstanceConfig {
   size: string;
   sessions: string[];
   credentials: string;
+  ephemeral?: boolean;
+  createdAt?: number;
 }

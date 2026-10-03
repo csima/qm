@@ -62,11 +62,17 @@ function parseInstance(row: Record<string, unknown> | null): InstanceRow | null 
 }
 
 export async function getInstance(env: Pick<Env, "DB">, id: string): Promise<InstanceRow | null> {
-  return parseInstance(await env.DB.prepare("SELECT * FROM instances WHERE id = ?").bind(id).first());
+  return parseInstance(
+    await env.DB.prepare("SELECT * FROM instances WHERE id = ? AND status != 'deleted'").bind(id).first(),
+  );
+}
+
+export async function instanceIdTaken(env: Pick<Env, "DB">, id: string): Promise<boolean> {
+  return (await env.DB.prepare("SELECT 1 FROM instances WHERE id = ?").bind(id).first()) !== null;
 }
 
 export async function listInstances(env: Pick<Env, "DB">): Promise<InstanceRow[]> {
-  const { results } = await env.DB.prepare("SELECT * FROM instances ORDER BY id").all();
+  const { results } = await env.DB.prepare("SELECT * FROM instances WHERE status != 'deleted' ORDER BY id").all();
   return results.map((r) => parseInstance(r)!);
 }
 
