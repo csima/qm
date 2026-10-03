@@ -27,12 +27,12 @@ a{color:var(--accent)}code{font:13px ui-monospace,monospace}
 .running{color:var(--ok);border-color:currentColor}.error{color:var(--bad);border-color:currentColor}
 .bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:8px 0}
 select,input,textarea,button{font:inherit;color:var(--ink);background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:6px 10px}
-button{cursor:pointer}button.primary{background:var(--accent);color:#fff;border-color:var(--accent)}
+button{cursor:pointer}button:disabled{opacity:.5;cursor:default}button.primary{background:var(--accent);color:#fff;border-color:var(--accent)}
 textarea{width:100%;min-height:72px;resize:vertical}
 #term{height:min(60vh,560px);background:var(--term);border-radius:8px;padding:6px;overflow:hidden}
 .muted{color:var(--quiet);font-size:13px}.result{white-space:pre-wrap;font-size:14px}
 .key{padding:12px;border:1px solid var(--line);border-radius:8px;background:var(--panel);word-break:break-all}
-@media (max-width:640px){th:nth-child(n+4),td:nth-child(n+4){display:none}}
+@media (max-width:640px){.tasks th:first-child,.tasks td:first-child,.instances th:nth-child(n+4),.instances td:nth-child(n+4){display:none}}
 `;
 
 export function page(title: string, caller: Caller, body: string, head = ""): Response {
@@ -55,7 +55,7 @@ const pill = (status: string) => `<span class="pill ${esc(status)}">${esc(status
 export function homePage(caller: Caller, rows: InstanceRow[]): Response {
   const visible = rows.filter((r) => can(caller, r, "view"));
   const body = visible.length
-    ? `<table><thead><tr><th>Instance</th><th>Agent</th><th>Status</th><th>Version</th><th>Owner</th></tr></thead><tbody>${visible
+    ? `<table class="instances"><thead><tr><th>Instance</th><th>Agent</th><th>Status</th><th>Version</th><th>Owner</th></tr></thead><tbody>${visible
         .map(
           (r) =>
             `<tr><td><a href="/i/${esc(r.id)}">${esc(r.id)}</a></td><td>${esc(r.agent)}</td><td>${pill(r.status)}</td><td><code>${esc(r.version)}</code></td><td>${esc(r.owner)}</td></tr>`,
@@ -82,7 +82,7 @@ ${
 <div class="bar"><button id="send" class="primary">Send</button><span id="send-status" class="muted"></span></div>`
     : ""
 }
-<h2>Recent tasks</h2><table><thead><tr><th>When</th><th>From</th><th>Status</th><th>Message / result</th></tr></thead><tbody id="tasks"></tbody></table>
+<h2>Recent tasks</h2><table class="tasks"><thead><tr><th>When</th><th>From</th><th>Status</th><th>Message / result</th></tr></thead><tbody id="tasks"></tbody></table>
 <script type="module">
 const id = ${JSON.stringify(row.id)};
 const $ = (s) => document.querySelector(s);
