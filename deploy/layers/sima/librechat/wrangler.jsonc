@@ -1,0 +1,38 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "librechat",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-10-01",
+  "workers_dev": false,
+  "routes": [{ "pattern": "librechat.calebsima.com", "custom_domain": true }],
+  "observability": { "enabled": true },
+  "containers": [
+    {
+      "class_name": "LibreChat",
+      "image": "./Dockerfile",
+      "instance_type": "standard-1",
+      "max_instances": 1,
+      "ssh": { "enabled": false },
+    },
+  ],
+  "durable_objects": {
+    "bindings": [{ "name": "LIBRECHAT", "class_name": "LibreChat" }],
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["LibreChat"] }],
+  "vars": {
+    "DOMAIN_CLIENT": "https://librechat.calebsima.com",
+    "DOMAIN_SERVER": "https://librechat.calebsima.com",
+    "TRUST_PROXY": "1",
+    "NO_INDEX": "true",
+    "SEARCH": "false",
+    "ALLOW_EMAIL_LOGIN": "true",
+    "ALLOW_REGISTRATION": "true",
+    "ALLOW_SOCIAL_LOGIN": "false",
+    "ALLOW_SOCIAL_REGISTRATION": "false",
+    "ENDPOINTS": "agents,anthropic",
+    "AWS_ENDPOINT_URL": "https://2e95467d53149ad81f57ebb41234e38d.r2.cloudflarestorage.com",
+    "AWS_REGION": "auto",
+    "AWS_BUCKET_NAME": "librechat-files",
+    "AWS_FORCE_PATH_STYLE": "true",
+  },
+}

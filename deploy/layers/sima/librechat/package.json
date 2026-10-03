@@ -1,0 +1,17 @@
+{
+  "name": "sima-librechat",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "deploy": "NODE_USE_ENV_PROXY=1 wrangler deploy",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@cloudflare/containers": "0.3.7"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "5.20261002.1",
+    "typescript": "^5.9.0",
+    "wrangler": "4.146.0"
+  }
+}
