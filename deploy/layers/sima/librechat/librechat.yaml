@@ -28,7 +28,7 @@ endpoints:
     disableBuilder: false
   custom:
     - name: "Agent host"
-      apiKey: "internal"
+      apiKey: "${AGENT_GATEWAY_KEY}"
       baseURL: "http://agents.internal/v1"
       models:
         default: ["notes-main"]
@@ -37,5 +37,4 @@ endpoints:
       modelDisplayLabel: "Agent host"
       headers:
         X-User-Email: "{{LIBRECHAT_USER_EMAIL}}"
-        X-Conversation-Id: "{{LIBRECHAT_BODY_CONVERSATIONID}}"
       dropParams: ["temperature", "top_p", "frequency_penalty", "presence_penalty", "stop", "user", "max_tokens"]

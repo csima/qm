@@ -11,6 +11,24 @@ export interface TaskInput {
   callbackUrl?: unknown;
 }
 
+export interface ValidTask {
+  message: string;
+  session: string;
+  callbackUrl: string | null;
+}
+
+export function validateTask(input: TaskInput): ValidTask {
+  const message = input.message;
+  if (typeof message !== "string" || !message.trim() || message.length > MAX_MESSAGE)
+    throw new HttpError(400, `message must be 1–${MAX_MESSAGE} characters`);
+  const session = input.session === undefined ? "main" : input.session;
+  if (typeof session !== "string") throw new HttpError(400, "session must be a name");
+  const callbackUrl = input.callbackUrl;
+  if (callbackUrl !== undefined && (typeof callbackUrl !== "string" || !/^https:\/\/[^\s]+$/.test(callbackUrl)))
+    throw new HttpError(400, "callback_url must be an https URL");
+  return { message, session, callbackUrl: (callbackUrl as string | undefined) ?? null };
+}
+
 export async function submitTask(
   env: Env,
   ctx: ExecutionContext,
@@ -18,20 +36,14 @@ export async function submitTask(
   row: InstanceRow,
   input: TaskInput,
 ): Promise<TaskRow> {
-  const message = input.message;
-  if (typeof message !== "string" || !message.trim() || message.length > MAX_MESSAGE)
-    throw new HttpError(400, `message must be 1–${MAX_MESSAGE} characters`);
-  const session = typeof input.session === "string" ? input.session : "main";
+  const { message, session, callbackUrl } = validateTask(input);
   const stub = env.INSTANCE.getByName(row.id);
   if (!(await stub.sessions()).includes(session)) throw new HttpError(404, `no session named ${session}`);
-  const callbackUrl = input.callbackUrl;
-  if (callbackUrl !== undefined && (typeof callbackUrl !== "string" || !/^https:\/\/[^\s]+$/.test(callbackUrl)))
-    throw new HttpError(400, "callback_url must be an https URL");
   const id = `t_${hex(10)}`;
   await env.DB.prepare(
     "INSERT INTO tasks (id, instance, session, caller, via, message, status, callback_url, created_at) VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?)",
   )
-    .bind(id, row.id, session, caller.email, caller.via, message, callbackUrl ?? null, Date.now())
+    .bind(id, row.id, session, caller.email, caller.via, message, callbackUrl, Date.now())
     .run();
   await audit(env, auditBy(caller, "task.create", { instance: row.id, session, detail: { task: id } }));
   ctx.waitUntil(

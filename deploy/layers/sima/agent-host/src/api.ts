@@ -18,7 +18,7 @@ import {
 import { listKeys, mintKey, revokeKey } from "./keys.ts";
 import { can } from "./policy.ts";
 import { audit, auditBy, getTask, getVersion, listInstances, recentTasks } from "./store.ts";
-import { TASK_ID, pollTask, submitTask } from "./tasks.ts";
+import { TASK_ID, pollTask, submitTask, validateTask } from "./tasks.ts";
 
 export { HttpError, json } from "./http.ts";
 export { attachRequest, instanceFor } from "./instances.ts";
@@ -39,6 +39,7 @@ async function agentsRoute(req: Request, env: Env, ctx: ExecutionContext, caller
     return json({ agent: name, use: await setUseList(env, caller, name, (await readBody(req)).use) });
   if (name && sub === "run" && req.method === "POST") {
     const input = await readBody(req);
+    const valid = validateTask({ message: input.message, callbackUrl: input.callback_url });
     const row = await createInstance(env, ctx, caller, {
       id: oneOffId(name),
       agent: name,
@@ -46,7 +47,15 @@ async function agentsRoute(req: Request, env: Env, ctx: ExecutionContext, caller
       credentials: input.credentials,
       ephemeral: true,
     });
-    const task = await submitTask(env, ctx, caller, row, { message: input.message, callbackUrl: input.callback_url });
+    const task = await submitTask(env, ctx, caller, row, {
+      message: valid.message,
+      callbackUrl: valid.callbackUrl ?? undefined,
+    }).catch(async (error) => {
+      await stub(env, row.id)
+        .teardown("the one-off task could not be submitted")
+        .catch(() => undefined);
+      throw error;
+    });
     return json({ instance: publicInstance(row, caller), task }, 202);
   }
   throw new HttpError(404, "not found");

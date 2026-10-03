@@ -113,3 +113,19 @@ test("replies cover done, failed and still-running tasks", () => {
   );
   assert.match(replyText({ ...base, status: "running" }, row("mine"), "https://h"), /https:\/\/h\/i\/mine/);
 });
+
+test("non-admins can only share with people on the agent's use list", async () => {
+  const { outsideUseList } = await import("../src/instances.ts");
+  const sharing = { message: ["a@x.io", "*"], attach: ["b@x.io"], admin: [] };
+  assert.deepEqual(outsideUseList(sharing, ["a@x.io", "b@x.io"]), ["*"]);
+  assert.deepEqual(outsideUseList(sharing, ["*"]), []);
+  assert.deepEqual(outsideUseList({ message: ["c@x.io"], attach: [], admin: ["c@x.io"] }, ["a@x.io"]), ["c@x.io"]);
+});
+
+test("task input is validated before anything is created", async () => {
+  const { validateTask } = await import("../src/tasks.ts");
+  assert.deepEqual(validateTask({ message: "hi" }), { message: "hi", session: "main", callbackUrl: null });
+  assert.throws(() => validateTask({ message: "  " }), /message must be/);
+  assert.throws(() => validateTask({ message: "hi", callbackUrl: "http://x" }), /https/);
+  assert.throws(() => validateTask({ message: "hi", session: 3 }), /session/);
+});

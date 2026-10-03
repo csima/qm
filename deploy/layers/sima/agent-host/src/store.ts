@@ -77,7 +77,9 @@ export async function listInstances(env: Pick<Env, "DB">): Promise<InstanceRow[]
 }
 
 export async function setInstanceStatus(env: Pick<Env, "DB">, id: string, status: string, error: string | null = null) {
-  await env.DB.prepare("UPDATE instances SET status = ?, last_error = ?, updated_at = ? WHERE id = ?")
+  await env.DB.prepare(
+    "UPDATE instances SET status = ?, last_error = ?, updated_at = ? WHERE id = ? AND status != 'deleted'",
+  )
     .bind(status, error, Date.now(), id)
     .run();
 }

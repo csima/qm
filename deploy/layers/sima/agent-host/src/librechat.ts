@@ -1,5 +1,5 @@
 import { WorkerEntrypoint } from "cloudflare:workers";
-import { adminEmails, sha256Hex } from "./auth.ts";
+import { adminEmails, constantTimeEqual, sha256Hex } from "./auth.ts";
 import type { Caller, Env, InstanceRow } from "./env.ts";
 import { HttpError } from "./http.ts";
 import { instanceFor, stub } from "./instances.ts";
@@ -44,8 +44,15 @@ export class LibreChatGateway extends WorkerEntrypoint<Env> {
     return { email, via: "librechat", admin: adminEmails(this.env).has(email) };
   }
 
+  private authorized(req: Request): boolean {
+    const key = this.env.LIBRECHAT_GATEWAY_KEY;
+    const match = /^Bearer (\S+)$/.exec(req.headers.get("authorization") ?? "");
+    return Boolean(key && key.length >= 32 && match && constantTimeEqual(match[1], key));
+  }
+
   async fetch(req: Request): Promise<Response> {
     const url = new URL(req.url);
+    if (!this.authorized(req)) return error(401, "the gateway key is missing or wrong");
     try {
       if (req.method === "GET" && url.pathname === "/v1/models") {
         const models = modelsFor(this.caller(req), await listInstances(this.env));
@@ -63,12 +70,10 @@ export class LibreChatGateway extends WorkerEntrypoint<Env> {
     }
   }
 
-  private async session(caller: Caller, row: InstanceRow, isPrivate: boolean, conversation: string): Promise<string> {
+  private async session(caller: Caller, row: InstanceRow, isPrivate: boolean): Promise<string> {
     if (!isPrivate) return "main";
     if (!can(caller, row, "admin")) throw new HttpError(403, "private sessions need admin access to the instance");
-    if (!/^[A-Za-z0-9-]{8,64}$/.test(conversation))
-      throw new HttpError(400, "private sessions need a saved conversation; send a first message, then retry");
-    const name = `c-${(await sha256Hex(conversation)).slice(0, 12)}`;
+    const name = `p-${(await sha256Hex(caller.email)).slice(0, 12)}`;
     await stub(this.env, row.id)
       .addSession(name)
       .catch((e) => {
@@ -91,7 +96,7 @@ export class LibreChatGateway extends WorkerEntrypoint<Env> {
     const row = await instanceFor(this.env, caller, id, "message");
     if (row.ephemeral) throw new HttpError(404, "one-off runs are not available as models");
     const message = lastUserText(body.messages);
-    const session = await this.session(caller, row, isPrivate, req.headers.get("x-conversation-id") ?? "");
+    const session = await this.session(caller, row, isPrivate);
     const task = await submitTask(this.env, this.ctx, caller, row, { message, session });
     const model = body.model;
     if (body.stream !== true) {

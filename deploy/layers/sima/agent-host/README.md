@@ -64,16 +64,19 @@ Worker checks the key). The browser uses the same handlers under `/ui/v1/*` with
 | GET / POST / DELETE | `/keys`, `/keys/:id`                               | anyone signed in                                             | List, mint (shown once) and revoke your API keys                                                   |
 
 Sharing lists on an instance: `message`, `attach`, `admin` (emails, or `*`). Owners and
-`ADMIN_EMAILS` have everything. Every message reaches the harness with a header naming the caller.
+`ADMIN_EMAILS` have everything. Non-admin owners can only share with people on the agent's use list
+(and `*` only when the use list is `*`). Every message reaches the harness with a header naming the caller.
 
 ## LibreChat
 
-LibreChat's Worker has a service binding to this Worker's `LibreChatGateway` entrypoint, reachable
-only through that binding, and maps `http://agents.internal` inside the LibreChat container to it.
-The "Agent host" custom endpoint lists each instance you can message as a model; `<id>+private`
-(instance admins) gives the LibreChat conversation its own session. LibreChat sends the signed-in
-user's email in `X-User-Email`, so agent-host trusts LibreChat's account emails: keep LibreChat
-registration closed to people you would not let claim an email address.
+LibreChat's Worker has a service binding to this Worker's `LibreChatGateway` entrypoint and maps
+`http://agents.internal` inside the LibreChat container to it. The custom endpoint "Agent host"
+authenticates with a shared key (`LIBRECHAT_GATEWAY_KEY` here, `AGENT_GATEWAY_KEY` in LibreChat, used
+as the endpoint's `apiKey`), so nothing else reaching `agents.internal` can call the gateway. Each
+instance you can message is a model; `<id>+private` (instance admins) uses a session of your own on
+that instance. LibreChat sends the signed-in user's email in `X-User-Email`, so agent-host trusts
+LibreChat's account emails: keep LibreChat registration closed to people you would not let claim an
+email address.
 
 ## Configuration
 

@@ -1,5 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
-import { SESSION_NAME, imageKey } from "../shared/naming.js";
+import { MAX_SESSIONS, SESSION_NAME, imageKey } from "../shared/naming.js";
 import { modelEnvironment, systemPrompt } from "./boot-env.ts";
 import type { Env, InstanceConfig } from "./env.ts";
 import { putStream } from "./r2.ts";
@@ -13,7 +13,6 @@ const ONE_OFF_MAX_MS = 2 * 60 * 60_000;
 const START_TIMEOUT_MS = 120_000;
 const INACTIVITY_MS = 5 * 60 * 60_000;
 const RECORDING_LIMIT = 20 * 1024 * 1024;
-const MAX_SESSIONS = 8;
 const QUEUED_EXPIRY_MS = 60 * 60_000;
 const RUNNING_EXPIRY_MS = 90 * 60_000;
 const STORAGE_DELETE_BATCH = 128;
@@ -39,6 +38,7 @@ const clamp = (value: string | null | number, min: number, max: number, fallback
 
 export class Instance extends DurableObject<Env> {
   private booting: Promise<void> | undefined;
+  private tornDown = false;
 
   private get container(): Container {
     const container = this.ctx.container;
@@ -87,6 +87,7 @@ export class Instance extends DurableObject<Env> {
   }
 
   async ensureRunning(): Promise<void> {
+    if (this.tornDown) throw new Error("this one-off instance has been removed");
     if (this.booting) return this.booting;
     if (await this.healthy()) return;
     this.booting ??= this.boot().finally(() => {
@@ -168,6 +169,7 @@ export class Instance extends DurableObject<Env> {
         );
       await this.ctx.storage.delete("bootId");
       await this.startContainer(image, config.size);
+      if (this.tornDown) throw new Error("this one-off instance was removed while it was starting");
       const exports = (this.ctx as unknown as { exports: Record<string, (o: { props: unknown }) => Fetcher> }).exports;
       await this.container.interceptOutboundHttp(
         "host.internal",
@@ -189,6 +191,7 @@ export class Instance extends DurableObject<Env> {
         }),
       );
       if (out.trim().split("\n").at(-1) !== "ok") throw new Error(`agent-boot did not finish: ${out.slice(-300)}`);
+      if (this.tornDown) throw new Error("this one-off instance was removed while it was starting");
       await this.ctx.storage.put({ bootId, bootVersion: config.version });
       const delivered = [...(await this.ctx.storage.list({ prefix: "q:" })).keys()];
       for (let i = 0; i < delivered.length; i += STORAGE_DELETE_BATCH)
@@ -261,11 +264,12 @@ export class Instance extends DurableObject<Env> {
   async addSession(name: string): Promise<string[]> {
     if (!SESSION_NAME.test(name))
       throw new Error("session names start with a letter and use lowercase letters, digits and dashes");
-    const config = await this.config();
-    if (!config.sessions.includes(name) && config.sessions.length >= MAX_SESSIONS)
+    const before = await this.config();
+    if (!before.sessions.includes(name) && before.sessions.length >= MAX_SESSIONS)
       throw new Error(`an instance can have at most ${MAX_SESSIONS} sessions`);
     await this.ensureRunning();
     await this.must(["agent-session", name]);
+    const config = await this.config();
     if (!config.sessions.includes(name)) {
       config.sessions.push(name);
       await this.ctx.storage.put("config", config);
@@ -281,8 +285,9 @@ export class Instance extends DurableObject<Env> {
       throw new Error(`version ${target} of ${config.agent} is not deployed on this host`);
     if (await this.healthy()) await this.snapshot(config.id, true);
     if (this.booting) throw new Error("the instance started booting; try again");
-    config.version = target;
-    await this.ctx.storage.put("config", config);
+    const latest = await this.config();
+    latest.version = target;
+    await this.ctx.storage.put("config", latest);
     await this.ctx.storage.delete("bootId");
   }
 
@@ -330,9 +335,7 @@ export class Instance extends DurableObject<Env> {
     const config = await this.ctx.storage.get<InstanceConfig>("config");
     if (!config) return;
     if (!config.ephemeral) throw new Error("only one-off instances are torn down automatically");
-    if (this.ctx.container?.running) await this.container.destroy().catch(() => undefined);
-    await this.ctx.storage.deleteAlarm();
-    await this.ctx.storage.deleteAll();
+    this.tornDown = true;
     const now = Date.now();
     await this.env.DB.batch([
       this.env.DB.prepare(
@@ -342,6 +345,10 @@ export class Instance extends DurableObject<Env> {
         "UPDATE tasks SET status = 'failed', error = 'the one-off instance was removed', finished_at = ? WHERE instance = ? AND status IN ('queued', 'running')",
       ).bind(now, config.id),
     ]);
+    await this.booting?.catch(() => undefined);
+    if (this.ctx.container?.running) await this.container.destroy().catch(() => undefined);
+    await this.ctx.storage.deleteAlarm();
+    await this.ctx.storage.deleteAll();
     await audit(this.env, {
       actor: `instance:${config.id}`,
       via: "agent",

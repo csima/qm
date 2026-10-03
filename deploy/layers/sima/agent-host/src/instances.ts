@@ -1,7 +1,7 @@
-import { INSTANCE_ID, INSTANCE_TYPES, SESSION_NAME } from "../shared/naming.js";
-import { requireUse } from "./access.ts";
+import { INSTANCE_ID, INSTANCE_TYPES, MAX_SESSIONS, SESSION_NAME } from "../shared/naming.js";
+import { canUse, requireUse, useList } from "./access.ts";
 import { allowedNames, missingRequired, parseChange, personalCredentials } from "./credentials.ts";
-import type { Caller, Env, InstanceConfig, InstanceRow } from "./env.ts";
+import type { Caller, Env, InstanceConfig, InstanceRow, Sharing } from "./env.ts";
 import { HttpError, asHttp, hex } from "./http.ts";
 import { can, parseSharing, type Permission } from "./policy.ts";
 import { sealCredentials } from "./secrets.ts";
@@ -40,15 +40,6 @@ export function publicInstance(row: InstanceRow, caller: Caller) {
   };
 }
 
-async function countOwned(env: Env, owner: string, ephemeral: boolean): Promise<number> {
-  const row = await env.DB.prepare(
-    "SELECT COUNT(*) AS n FROM instances WHERE owner = ? AND ephemeral = ? AND status != 'deleted'",
-  )
-    .bind(owner, ephemeral ? 1 : 0)
-    .first<{ n: number }>();
-  return row?.n ?? 0;
-}
-
 export interface NewInstance {
   id: string;
   agent: string;
@@ -71,30 +62,25 @@ export async function createInstance(env: Env, ctx: ExecutionContext, caller: Ca
   if (!INSTANCE_TYPES.includes(size)) throw new HttpError(400, `size must be one of ${INSTANCE_TYPES.join(", ")}`);
   if (size !== version.manifest.instance && !caller.admin) throw new HttpError(403, "only admins can change the size");
   const sessions = Array.isArray(input.sessions) ? input.sessions.map(String) : ["main"];
+  if (sessions.length > MAX_SESSIONS) throw new HttpError(400, `an instance can have at most ${MAX_SESSIONS} sessions`);
   if (!sessions.length || sessions.some((s) => !SESSION_NAME.test(s)) || new Set(sessions).size !== sessions.length)
     throw new HttpError(400, "sessions must be unique names that start with a letter");
   const provided = parseChange({ set: input.credentials ?? {} }, version.manifest).set;
-  let sharing;
-  try {
-    sharing = parseSharing(input.sharing);
-  } catch (error) {
-    throw new HttpError(400, (error as Error).message);
-  }
+  const sharing = await checkedSharing(env, caller, agent, input.sharing);
   if (caller.via === "admin_token" && typeof input.owner !== "string") throw new HttpError(400, "owner is required");
   const owner = caller.admin && typeof input.owner === "string" ? input.owner.toLowerCase() : caller.email;
-  const credentials =
-    owner === caller.email ? { ...(await personalCredentials(env, owner, agent)), ...provided } : provided;
+  const allowed = allowedNames(version.manifest);
+  const saved = owner === caller.email ? await personalCredentials(env, owner, agent) : {};
+  const credentials = {
+    ...Object.fromEntries(Object.entries(saved).filter(([name]) => allowed.has(name))),
+    ...provided,
+  };
   const missing = missingRequired(version.manifest, credentials);
   if (missing.length)
     throw new HttpError(
       400,
       `missing credentials ${missing.join(", ")}: save them on your credentials page or pass them`,
     );
-  if (!caller.admin) {
-    const limit = ephemeral ? MAX_RUNNING_ONE_OFFS : MAX_OWNED_INSTANCES;
-    if ((await countOwned(env, owner, ephemeral)) >= limit)
-      throw new HttpError(429, `you already have ${limit} ${ephemeral ? "one-off runs in progress" : "instances"}`);
-  }
   if (await instanceIdTaken(env, id)) throw new HttpError(409, `instance ${id} already exists or existed`);
   if (!(await stub(env, id).deployed(agent, version.version)))
     throw new HttpError(
@@ -102,11 +88,31 @@ export async function createInstance(env: Env, ctx: ExecutionContext, caller: Ca
       `version ${version.version} of ${agent} is not deployed on this host; rebuild or redeploy it`,
     );
   const now = Date.now();
-  await env.DB.prepare(
-    "INSERT INTO instances (id, agent, version, owner, sharing, size, status, ephemeral, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'created', ?, ?, ?)",
+  const limit = caller.admin ? Number.MAX_SAFE_INTEGER : ephemeral ? MAX_RUNNING_ONE_OFFS : MAX_OWNED_INSTANCES;
+  const inserted = await env.DB.prepare(
+    "INSERT INTO instances (id, agent, version, owner, sharing, size, status, ephemeral, created_at, updated_at) SELECT ?, ?, ?, ?, ?, ?, 'created', ?, ?, ? WHERE (SELECT COUNT(*) FROM instances WHERE owner = ? AND ephemeral = ? AND status != 'deleted') < ?",
   )
-    .bind(id, agent, version.version, owner, JSON.stringify(sharing), size, ephemeral ? 1 : 0, now, now)
-    .run();
+    .bind(
+      id,
+      agent,
+      version.version,
+      owner,
+      JSON.stringify(sharing),
+      size,
+      ephemeral ? 1 : 0,
+      now,
+      now,
+      owner,
+      ephemeral ? 1 : 0,
+      limit,
+    )
+    .run()
+    .catch((error: Error) => {
+      if (/UNIQUE/i.test(error.message)) throw new HttpError(409, `instance ${id} already exists or existed`);
+      throw error;
+    });
+  if (!inserted.meta?.changes)
+    throw new HttpError(429, `you already have ${limit} ${ephemeral ? "one-off runs in progress" : "instances"}`);
   const config: InstanceConfig = {
     id,
     agent,
@@ -134,13 +140,28 @@ export function oneOffId(agent: string): string {
   return `run-${agent.slice(0, 24)}-${hex(4)}`;
 }
 
-export async function setSharing(env: Env, caller: Caller, row: InstanceRow, input: unknown) {
-  let sharing;
+export function outsideUseList(sharing: Sharing, list: string[]): string[] {
+  return [...new Set([...sharing.message, ...sharing.attach, ...sharing.admin])].filter((entry) =>
+    entry === "*" ? !list.includes("*") : !canUse({ email: entry, via: "access", admin: false }, list),
+  );
+}
+
+async function checkedSharing(env: Env, caller: Caller, agent: string, input: unknown): Promise<Sharing> {
+  let sharing: Sharing;
   try {
     sharing = parseSharing(input);
   } catch (error) {
     throw new HttpError(400, (error as Error).message);
   }
+  if (caller.admin) return sharing;
+  const outside = outsideUseList(sharing, await useList(env, agent));
+  if (outside.length)
+    throw new HttpError(403, `you can only share with people allowed to use ${agent}: ${outside.join(", ")}`);
+  return sharing;
+}
+
+export async function setSharing(env: Env, caller: Caller, row: InstanceRow, input: unknown) {
+  const sharing = await checkedSharing(env, caller, row.agent, input);
   await env.DB.prepare("UPDATE instances SET sharing = ?, updated_at = ? WHERE id = ?")
     .bind(JSON.stringify(sharing), Date.now(), row.id)
     .run();
