@@ -50,10 +50,12 @@ async function agentsRoute(req: Request, env: Env, ctx: ExecutionContext, caller
     const task = await submitTask(env, ctx, caller, row, {
       message: valid.message,
       callbackUrl: valid.callbackUrl ?? undefined,
-    }).catch(async (error) => {
-      await stub(env, row.id)
-        .teardown("the one-off task could not be submitted")
-        .catch(() => undefined);
+    }).catch((error) => {
+      ctx.waitUntil(
+        stub(env, row.id)
+          .teardown("the one-off task could not be submitted")
+          .catch(() => undefined),
+      );
       throw error;
     });
     return json({ instance: publicInstance(row, caller), task }, 202);

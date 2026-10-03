@@ -74,7 +74,8 @@ LibreChat's Worker has a service binding to this Worker's `LibreChatGateway` ent
 authenticates with a shared key (`LIBRECHAT_GATEWAY_KEY` here, `AGENT_GATEWAY_KEY` in LibreChat, used
 as the endpoint's `apiKey`), so nothing else reaching `agents.internal` can call the gateway. Each
 instance you can message is a model; `<id>+private` (instance admins) uses a session of your own on
-that instance. LibreChat sends the signed-in user's email in `X-User-Email`, so agent-host trusts
+that instance (at most seven people per instance, because sessions are capped at eight including
+`main`). LibreChat sends the signed-in user's email in `X-User-Email`, so agent-host trusts
 LibreChat's account emails: keep LibreChat registration closed to people you would not let claim an
 email address.
 

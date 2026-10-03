@@ -52,7 +52,9 @@ npx wrangler deploy --secrets-file secrets.json   # first deploy; later deploys 
 
 `secrets.json` (never committed) holds `MONGO_URI`, `CREDS_KEY` (32-byte hex), `CREDS_IV`
 (16-byte hex), `JWT_SECRET`, `JWT_REFRESH_SECRET`, `ANTHROPIC_API_KEY`,
-`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `MEILI_MASTER_KEY` and `RAGSVC_DB_PASSWORD`. Keep `CREDS_KEY`/`CREDS_IV` stable: they
+`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `MEILI_MASTER_KEY`, `RAGSVC_DB_PASSWORD` and
+`AGENT_GATEWAY_KEY` (the agent host's `LIBRECHAT_GATEWAY_KEY`; the "Agent host" endpoint sends it as
+its API key). Keep `CREDS_KEY`/`CREDS_IV` stable: they
 encrypt stored user credentials.
 
 Building the images needs Docker. The only build step is the RAG pool-size patch, which

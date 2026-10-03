@@ -90,6 +90,7 @@ export class Instance extends DurableObject<Env> {
     if (this.tornDown) throw new Error("this one-off instance has been removed");
     if (this.booting) return this.booting;
     if (await this.healthy()) return;
+    if (this.tornDown) throw new Error("this one-off instance has been removed");
     this.booting ??= this.boot().finally(() => {
       this.booting = undefined;
     });
@@ -147,6 +148,7 @@ export class Instance extends DurableObject<Env> {
     const deadline = Date.now() + START_TIMEOUT_MS;
     while (Date.now() < deadline) {
       if (exited) throw new Error(`container failed to start: ${exited}`);
+      if (this.tornDown) throw new Error("this one-off instance was removed while it was starting");
       const ok = await this.run(["true"]).then(
         (r) => r.code === 0,
         () => false,
@@ -205,6 +207,7 @@ export class Instance extends DurableObject<Env> {
         detail: { version: config.version, bootId },
       });
     } catch (error) {
+      if (this.tornDown) await this.container.destroy().catch(() => undefined);
       await setInstanceStatus(this.env, config.id, "error", errText(error));
       throw error;
     }
@@ -271,6 +274,8 @@ export class Instance extends DurableObject<Env> {
     await this.must(["agent-session", name]);
     const config = await this.config();
     if (!config.sessions.includes(name)) {
+      if (config.sessions.length >= MAX_SESSIONS)
+        throw new Error(`an instance can have at most ${MAX_SESSIONS} sessions`);
       config.sessions.push(name);
       await this.ctx.storage.put("config", config);
     }
@@ -327,7 +332,7 @@ export class Instance extends DurableObject<Env> {
     } catch (error) {
       console.error(`instance ${config.id}: ${errText(error)}`);
     } finally {
-      await this.ctx.storage.setAlarm(Date.now() + ALARM_MS);
+      if (!this.tornDown) await this.ctx.storage.setAlarm(Date.now() + ALARM_MS);
     }
   }
 

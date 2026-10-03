@@ -21,7 +21,7 @@ export function validateTask(input: TaskInput): ValidTask {
   const message = input.message;
   if (typeof message !== "string" || !message.trim() || message.length > MAX_MESSAGE)
     throw new HttpError(400, `message must be 1–${MAX_MESSAGE} characters`);
-  const session = input.session === undefined ? "main" : input.session;
+  const session = input.session ?? "main";
   if (typeof session !== "string") throw new HttpError(400, "session must be a name");
   const callbackUrl = input.callbackUrl;
   if (callbackUrl !== undefined && (typeof callbackUrl !== "string" || !/^https:\/\/[^\s]+$/.test(callbackUrl)))

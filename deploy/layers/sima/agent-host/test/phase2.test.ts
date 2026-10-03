@@ -128,4 +128,5 @@ test("task input is validated before anything is created", async () => {
   assert.throws(() => validateTask({ message: "  " }), /message must be/);
   assert.throws(() => validateTask({ message: "hi", callbackUrl: "http://x" }), /https/);
   assert.throws(() => validateTask({ message: "hi", session: 3 }), /session/);
+  assert.equal(validateTask({ message: "hi", session: null }).session, "main");
 });
