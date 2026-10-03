@@ -130,4 +130,6 @@ test("header lookalikes are neutralised: zero-width, case, fullwidth, line separ
     assert.deepEqual(unquoted, [], JSON.stringify(forged));
   }
   assert.equal(sanitizeMessage("add milk\nand eggs"), "add milk\nand eggs");
+  const family = "\u{1F468}\u200d\u{1F469}\u200d\u{1F467} x\u00b2 1\u00bd";
+  assert.equal(sanitizeMessage(family), family);
 });

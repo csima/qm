@@ -13,6 +13,7 @@ const TICK_MS = 500;
 const READY_TIMEOUT_MS = 120_000;
 const START_TIMEOUT_MS = 60_000;
 const IDLE_GRACE_MS = 60_000;
+const OPEN_TOOL_GRACE_MS = 5 * 60_000;
 const TASK_TIMEOUT_MS = 60 * 60_000;
 const MAX_TEXT = 200_000;
 const MAX_TOOL_INPUT = 2_000;
@@ -33,6 +34,7 @@ function log(...parts) {
 
 const looksLikeHeader = (line) =>
   line
+    .normalize("NFKC")
     .toLowerCase()
     .replace(/[^\p{L}\p{N}]/gu, "")
     .startsWith("agenthosttask");
@@ -40,8 +42,6 @@ const looksLikeHeader = (line) =>
 export function sanitizeMessage(text) {
   return text
     .replace(/[\u2028\u2029\u0085]/g, "\n")
-    .normalize("NFKC")
-    .replace(/\p{Cf}/gu, "")
     .replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, "")
     .split("\n")
     .map((line) => (looksLikeHeader(line) ? `(quoted) ${line}` : line))
@@ -150,6 +150,7 @@ async function finish(state, status, fields) {
   const task = state.current;
   state.current = null;
   state.busy = false;
+  state.openTools = 0;
   await fs.unlink(task.file).catch(() => {});
   await post(`/v1/tasks/${task.id}`, { status, ...fields });
   log("task", task.id, status);
@@ -201,12 +202,15 @@ async function paneIdle(name) {
 
 async function quiet(name, state, since) {
   const now = Date.now();
-  if (state.openTools > 0 || now - Math.max(state.lastEventAt, since) <= IDLE_GRACE_MS) return false;
+  const grace = state.openTools > 0 ? OPEN_TOOL_GRACE_MS : IDLE_GRACE_MS;
+  if (now - Math.max(state.lastEventAt, since) <= grace) return false;
   if (state.transcript) {
     const stat = await fs.stat(state.transcript).catch(() => null);
-    if (stat && now - stat.mtimeMs <= IDLE_GRACE_MS) return false;
+    if (stat && now - stat.mtimeMs <= grace) return false;
   }
-  return paneIdle(name);
+  if (!(await paneIdle(name))) return false;
+  state.openTools = 0;
+  return true;
 }
 
 async function claim(task) {
