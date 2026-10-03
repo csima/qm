@@ -1,0 +1,43 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "qm",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-10-01",
+  "workers_dev": true,
+  "observability": { "enabled": true },
+  "containers": [
+    {
+      "class_name": "QmContainer",
+      "image": "./Dockerfile",
+      "image_build_context": "..",
+      "instance_type": "standard-3",
+      "max_instances": 1,
+      "rollout_active_grace_period": 300,
+      "ssh": { "enabled": false },
+    },
+    {
+      "name": "qm-sandbox",
+      "class_name": "QmSandbox",
+      "scheduling_policy": "durable_object",
+      "images": {
+        "sandbox": { "dockerfile": "../fly/Dockerfile", "build_context": ".." },
+      },
+    },
+  ],
+  "durable_objects": {
+    "bindings": [
+      { "name": "QM", "class_name": "QmContainer" },
+      { "name": "QM_SANDBOX", "class_name": "QmSandbox" },
+    ],
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["QmContainer"] },
+    { "tag": "v2", "new_sqlite_classes": ["QmSandbox"] },
+  ],
+  "triggers": { "crons": ["*/5 * * * *"] },
+  "vars": {
+    "QM_HARNESS": "pi",
+    "QM_MODEL_PROVIDER": "anthropic",
+    "QM_SANDBOX_BACKEND": "cloudflare",
+  },
+}

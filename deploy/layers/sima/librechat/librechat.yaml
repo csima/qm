@@ -1,0 +1,40 @@
+version: 1.3.17
+cache: true
+fileStrategy: "s3"
+interface:
+  agents:
+    use: true
+    create: true
+    share: true
+    public: true
+  remoteAgents:
+    use: true
+    create: true
+    share: true
+  skills: true
+  marketplace:
+    use: true
+  peoplePicker:
+    users: true
+    groups: true
+    roles: true
+  webSearch: false
+  fileSearch: true
+  runCode: false
+registration:
+  socialLogins: []
+endpoints:
+  agents:
+    disableBuilder: false
+  custom:
+    - name: "Agent host"
+      apiKey: "${AGENT_GATEWAY_KEY}"
+      baseURL: "http://agents.internal/v1"
+      models:
+        default: ["notes-main"]
+        fetch: true
+      titleConvo: false
+      modelDisplayLabel: "Agent host"
+      headers:
+        X-User-Email: "{{LIBRECHAT_USER_EMAIL}}"
+      dropParams: ["temperature", "top_p", "frequency_penalty", "presence_penalty", "stop", "user", "max_tokens"]

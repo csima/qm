@@ -227,12 +227,16 @@ jobs:
           cache-dependency-path: |
             package-lock.json
             plugins/web-ui/package-lock.json
+            cloudflare/package-lock.json
+            deploy/layers/sima/librechat/package-lock.json
       - name: Install
         if: needs.reuse.outputs.reusable != 'true'
         run: |
           npm ci
           npm ci --prefix plugins/web-ui
           npm ci --prefix desktop --ignore-scripts
+          npm ci --prefix cloudflare --ignore-scripts
+          npm ci --prefix deploy/layers/sima/librechat --ignore-scripts
       - name: Formatting
         if: needs.reuse.outputs.reusable != 'true'
         run: npm run format:check

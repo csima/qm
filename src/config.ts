@@ -74,9 +74,10 @@ export interface Config {
   sandboxResourcesEnabled: boolean;
   sharingPosture: SharingPosture;
   sandboxScopeDefaults?: SandboxScopeDefaults;
-  sandboxBackend: "aws" | "local" | "sprites" | "smolmachines" | "e2b" | "modal" | "porter" | "agent37" | "superserve";
+  sandboxBackend:
+    "aws" | "local" | "sprites" | "smolmachines" | "e2b" | "modal" | "porter" | "agent37" | "superserve" | "cloudflare";
   sandboxSecondaryBackend?:
-    "aws" | "local" | "sprites" | "smolmachines" | "e2b" | "modal" | "porter" | "agent37" | "superserve";
+    "aws" | "local" | "sprites" | "smolmachines" | "e2b" | "modal" | "porter" | "agent37" | "superserve" | "cloudflare";
   deployProvider: "docker" | "aws" | "fly" | "porter";
   egressServiceHosts?: string[];
   brandingDefault?: OrgBranding;
@@ -205,6 +206,7 @@ export interface Config {
   localSandbox: LocalSandboxEnv;
   spritesSandbox: SpritesSandboxEnv;
   smolmachinesSandbox: SmolmachinesSandboxEnv;
+  cloudflareSandbox: CloudflareSandboxEnv;
   agent37Sandbox: Agent37SandboxEnv;
   superserveSandbox: SuperserveSandboxEnv;
   e2bSandbox: E2bSandboxEnv;
@@ -507,6 +509,32 @@ interface SmolmachinesSandboxEnv {
   snapshotS3Bucket?: string;
   snapshotIntervalSec?: number;
   defaultTimeoutSec?: number;
+}
+
+interface CloudflareSandboxEnv {
+  url?: string;
+  token?: string;
+  namePrefix?: string;
+  snapshotS3Bucket?: string;
+  defaultTimeoutSec?: number;
+}
+
+function cloudflareSandboxEnv(env: NodeJS.ProcessEnv): CloudflareSandboxEnv {
+  const namePrefix = env.CLOUDFLARE_SANDBOX_NAME_PREFIX?.trim();
+  if (namePrefix && !/^[a-z0-9][a-z0-9-]{0,39}$/.test(namePrefix))
+    throw new Error(
+      "CLOUDFLARE_SANDBOX_NAME_PREFIX must be 1-40 lowercase letters, digits or hyphens, starting with a letter or digit",
+    );
+  const defaultTimeoutSec = numEnvStrict("SANDBOX_TIMEOUT_SEC", env.SANDBOX_TIMEOUT_SEC);
+  return {
+    ...(env.CLOUDFLARE_SANDBOX_URL ? { url: env.CLOUDFLARE_SANDBOX_URL } : {}),
+    ...(env.CLOUDFLARE_SANDBOX_TOKEN ? { token: env.CLOUDFLARE_SANDBOX_TOKEN } : {}),
+    ...(namePrefix ? { namePrefix } : {}),
+    ...(env.CLOUDFLARE_SANDBOX_SNAPSHOT_S3_BUCKET
+      ? { snapshotS3Bucket: env.CLOUDFLARE_SANDBOX_SNAPSHOT_S3_BUCKET }
+      : {}),
+    ...(defaultTimeoutSec !== undefined ? { defaultTimeoutSec } : {}),
+  };
 }
 
 function smolmachinesSandboxEnv(env: NodeJS.ProcessEnv): SmolmachinesSandboxEnv {
@@ -999,6 +1027,9 @@ export function enabledSandboxBackends(config: Config): Array<Config["sandboxBac
     local: Boolean(config.localSandbox?.image),
     sprites: Boolean(config.spritesSandbox?.token),
     smolmachines: Boolean(config.smolmachinesSandbox?.token),
+    cloudflare: Boolean(
+      config.cloudflareSandbox?.url && config.cloudflareSandbox?.token && config.cloudflareSandbox?.snapshotS3Bucket,
+    ),
     agent37: Boolean(config.agent37Sandbox?.apiKey),
     superserve: Boolean(config.superserveSandbox?.apiKey && config.superserveSandbox?.template),
     e2b: Boolean(config.e2bSandbox?.apiKey),
@@ -1021,6 +1052,7 @@ function sandboxBackendEnvStrict(value: string | undefined, name = "SANDBOX_BACK
     backend === "local" ||
     backend === "sprites" ||
     backend === "smolmachines" ||
+    backend === "cloudflare" ||
     backend === "e2b" ||
     backend === "modal" ||
     backend === "agent37" ||
@@ -1029,7 +1061,7 @@ function sandboxBackendEnvStrict(value: string | undefined, name = "SANDBOX_BACK
   )
     return backend;
   throw new Error(
-    `${name}=${JSON.stringify(value)} is not recognized — use aws, local, sprites, smolmachines, e2b, modal, porter, agent37, or superserve, or unset it.`,
+    `${name}=${JSON.stringify(value)} is not recognized — use aws, local, sprites, smolmachines, e2b, modal, porter, agent37, superserve, or cloudflare, or unset it.`,
   );
 }
 
@@ -1236,6 +1268,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       "[config] SANDBOX_BACKEND=sprites without SPRITES_SNAPSHOT_S3_BUCKET — retiring a computer deletes its sprite and every checkpoint irreversibly with no exported home; set SPRITES_SNAPSHOT_S3_BUCKET to export the home to S3 before a sprite is destroyed and to rehydrate a replacement.",
     );
   }
+  if (env.SANDBOX_BACKEND === "cloudflare") {
+    console.warn(
+      "[config] SANDBOX_BACKEND=cloudflare runs sandboxes with open outbound networking and NO egress enforcement (fail-open).",
+    );
+  }
   if (env.SANDBOX_BACKEND === "smolmachines" && !env.SMOLMACHINES_EGRESS_PROXY_URL) {
     console.warn(
       "[config] SANDBOX_BACKEND=smolmachines without SMOLMACHINES_EGRESS_PROXY_URL — machines are created with open outbound networking and NO egress enforcement (fail-open); set SMOLMACHINES_EGRESS_PROXY_URL to allow-list only the egress proxy.",
@@ -1265,7 +1302,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   }
   if (env.NODE_ENV === "production" && !env.SANDBOX_BACKEND?.trim()) {
     throw new Error(
-      "SANDBOX_BACKEND must be set explicitly in production — use sprites, smolmachines, e2b, modal, porter, agent37, superserve, aws, or local.",
+      "SANDBOX_BACKEND must be set explicitly in production — use sprites, smolmachines, e2b, modal, porter, agent37, superserve, cloudflare, aws, or local.",
     );
   }
   const sandboxBackend = sandboxBackendEnvStrict(env.SANDBOX_BACKEND);
@@ -1664,6 +1701,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     localSandbox: localSandboxEnv(env),
     spritesSandbox: spritesSandboxEnv(env),
     smolmachinesSandbox: smolmachinesSandboxEnv(env),
+    cloudflareSandbox: cloudflareSandboxEnv(env),
     agent37Sandbox: agent37SandboxEnv(env),
     superserveSandbox: superserveSandboxEnv(env),
     porterSandbox: porterSandboxEnv(env),

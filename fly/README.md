@@ -15,8 +15,10 @@ Where the image is used:
   `qm-sandbox-local:latest` for `SANDBOX_BACKEND=local`.
 - **Deployment layer builds.** A deployment's `sandbox/Dockerfile` may build FROM a
   published base via `qm sandbox build` (a local validation build).
+- **Cloudflare sandboxes.** `cloudflare/wrangler.jsonc` builds it as the `sandbox` image
+  that each `QmSandbox` Durable Object starts for `SANDBOX_BACKEND=cloudflare`.
 
-Runtime sandbox backends (sprites, smolmachines, e2b, modal) do **not** boot this
+The other runtime sandbox backends (sprites, smolmachines, e2b, modal) do **not** boot this
 image. Sprites and smolmachines boot their platform's stock image. E2B boots the
 template named by `E2B_TEMPLATE_ID` (build and publish it from
 `deploy/e2b/e2b.Dockerfile`) or, when unset, E2B's stock `base` template. Modal boots

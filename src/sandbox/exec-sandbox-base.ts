@@ -1,5 +1,6 @@
 import { cleanupFailedProvision } from "./sandbox.ts";
 import { randomUUID } from "node:crypto";
+import { AsyncResource } from "node:async_hooks";
 import type { WorkspaceLayer } from "../types.ts";
 import type { WorkspaceStore } from "../workspace/workspace-store.ts";
 import { createKeyedQueue } from "../util/async.ts";
@@ -226,7 +227,7 @@ export function createExecSandboxBase(deps: ExecSandboxBaseDeps): ExecSandboxBas
         .catch(swallowAs(`${label}-sandbox: kill in-flight exec`, undefined));
     };
     signal.throwIfAborted();
-    const onAbort = () => fireKill();
+    const onAbort = AsyncResource.bind(() => fireKill());
     signal.addEventListener("abort", onAbort, { once: true });
     try {
       return await deps.exec(handle.id, killableScript(script, killUid), timeoutSec);
