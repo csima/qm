@@ -21,5 +21,11 @@ jq --arg v "$version" --arg t "$key_tail" '
 mv "$config.tmp" "$config"
 settings="$HOME/.claude/settings.json"
 [ -f "$settings" ] || echo '{}' >"$settings"
-jq -s '.[0] * .[1]' "$settings" /opt/agent-host/claude-settings.json >"$settings.tmp"
+jq -s '
+  (.[0] * .[1])
+  | if (.hooks | type) == "object" then
+      .hooks |= (map_values(map(select([.hooks[]?.command // ""] | any(startswith("/usr/local/bin/agent-hook")) | not)))
+        | with_entries(select(.value | length > 0)))
+    else . end
+  | if .hooks == {} then del(.hooks) else . end' "$settings" /opt/agent-host/claude-settings.json >"$settings.tmp"
 mv "$settings.tmp" "$settings"

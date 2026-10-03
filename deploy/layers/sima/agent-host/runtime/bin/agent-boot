@@ -4,10 +4,22 @@ cfg=$(cat)
 install -d -o agent -g agent -m 700 /run/agent /run/agent/xdg
 install -d -o agent -g agent -m 755 /var/lib/agent /var/lib/agent/queue /var/lib/agent/events /var/lib/agent/outbox /var/log/agent
 install -d -o agent -g agent -m 755 /home/agent/work /home/agent/.agent-host /home/agent/.agent-host/sessions
+install -d -o agent -g agent -m 755 /var/lib/agent/current
+egress=$(jq -r '.egress // false' <<<"$cfg")
+if [ "$egress" = true ]; then
+  ca=/etc/cloudflare/certs/cloudflare-containers-ca.crt
+  for _ in $(seq 1 50); do [ -s "$ca" ] && break; sleep 0.2; done
+  [ -s "$ca" ] || { echo "the egress CA certificate did not appear at $ca" >&2; exit 1; }
+  install -D -m 644 "$ca" /usr/local/share/ca-certificates/cloudflare-containers-ca.crt
+  update-ca-certificates >/dev/null 2>&1
+fi
 umask 077
 {
   jq -r '.env | to_entries[] | "export \(.key)=\(.value | @sh)"' <<<"$cfg"
   jq -r '"export AGENT_INSTANCE=\(.instance | @sh) AGENT_HARNESS=\(.harness | @sh) AGENT_BOOT_ID=\(.bootId | @sh)"' <<<"$cfg"
+  if [ "$egress" = true ]; then
+    echo "export NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/cloudflare-containers-ca.crt SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt"
+  fi
 } >/run/agent/env
 jq -r '.appendSystemPrompt // ""' <<<"$cfg" >/run/agent/system-prompt.txt
 jq -r '.sessions[]' <<<"$cfg" >/run/agent/sessions

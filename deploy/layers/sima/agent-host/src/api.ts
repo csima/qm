@@ -9,8 +9,11 @@ import {
   instanceCredentials,
   instanceFor,
   oneOffId,
+  pauseInstance,
   prepareRestart,
   publicInstance,
+  removeInstance,
+  resumeInstance,
   setSharing,
   stub,
   updateInstanceCredentials,
@@ -53,7 +56,7 @@ async function agentsRoute(req: Request, env: Env, ctx: ExecutionContext, caller
     }).catch((error) => {
       ctx.waitUntil(
         stub(env, row.id)
-          .teardown("the one-off task could not be submitted")
+          .remove("the one-off task could not be submitted")
           .catch(() => undefined),
       );
       throw error;
@@ -124,6 +127,18 @@ async function instancesRoute(
         .catch((e) => ({ error: (e as Error).message })),
       tasks: (await recentTasks(env, id)).filter((t) => t.caller === caller.email || can(caller, row, "admin")),
     });
+  }
+  if (!sub && method === "DELETE") {
+    await removeInstance(env, caller, await instanceFor(env, caller, id, "admin"));
+    return json({ deleted: true });
+  }
+  if (sub === "pause" && method === "POST") {
+    await pauseInstance(env, caller, await instanceFor(env, caller, id, "admin"));
+    return json({ paused: true });
+  }
+  if (sub === "resume" && method === "POST") {
+    await resumeInstance(env, ctx, caller, await instanceFor(env, caller, id, "admin"));
+    return json({ resuming: true }, 202);
   }
   if (sub === "tasks" && method === "POST") {
     const row = await instanceFor(env, caller, id, "message");

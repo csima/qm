@@ -12,13 +12,26 @@ export const VERSIONS_KEPT = 5;
 const NAME = /^[a-z][a-z0-9-]{1,30}$/;
 const RESERVED_ENV = /^(AGENT_|XDG_)|^(HOME|PATH|USER|SHELL|TERM)$/;
 const DIGEST_PINNED = /^[a-z0-9][a-z0-9._\/:-]*@sha256:[0-9a-f]{64}$/;
+const LABEL = "[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?";
+const EGRESS_HOST = new RegExp(`^(\\*\\.)?${LABEL}(\\.${LABEL})+$`);
+const MAX_RULES = 100;
 
 export function parseManifest(text) {
   const raw = parse(text);
   const problems = [];
   const fail = (msg) => problems.push(msg);
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("agent.yaml must be a mapping");
-  const known = new Set(["name", "description", "base", "setup", "harness", "instance", "credentials"]);
+  const known = new Set([
+    "name",
+    "description",
+    "base",
+    "setup",
+    "harness",
+    "instance",
+    "credentials",
+    "egress",
+    "deny",
+  ]);
   for (const key of Object.keys(raw)) if (!known.has(key)) fail(`unknown field ${key}`);
   if (typeof raw.name !== "string" || !NAME.test(raw.name)) fail("name must match ^[a-z][a-z0-9-]{1,30}$");
   if (typeof raw.description !== "string" || !raw.description.trim() || raw.description.length > 500)
@@ -52,6 +65,36 @@ export function parseManifest(text) {
       fail(`credentials[${i}].required must be true or false`);
     return { name: c.name, description: c.description, required: c.required !== false };
   });
+  let egress = null;
+  if (raw.egress !== undefined) {
+    if (!Array.isArray(raw.egress) || raw.egress.length > MAX_RULES)
+      fail(`egress must be a list of at most ${MAX_RULES} host names`);
+    else {
+      egress = [...new Set(raw.egress.map((h) => (typeof h === "string" ? h.toLowerCase() : h)))];
+      egress.forEach((h, i) => {
+        if (typeof h !== "string" || !EGRESS_HOST.test(h))
+          fail(`egress[${i}] must be a host name like api.example.com or *.example.com`);
+      });
+    }
+  }
+  const deny = raw.deny ?? [];
+  if (!Array.isArray(deny) || deny.length > MAX_RULES) fail(`deny must be a list of at most ${MAX_RULES} rules`);
+  const rules = (Array.isArray(deny) ? deny : []).map((rule, i) => {
+    const pattern = typeof rule === "string" ? rule : rule?.pattern;
+    const reason = typeof rule === "object" && rule !== null ? rule.reason : undefined;
+    if (typeof pattern !== "string" || !pattern || pattern.length > 500) {
+      fail(`deny[${i}] must be a regular expression or {pattern, reason}`);
+      return null;
+    }
+    try {
+      new RegExp(pattern, "i");
+    } catch (error) {
+      fail(`deny[${i}] is not a valid regular expression: ${error.message}`);
+    }
+    if (reason !== undefined && (typeof reason !== "string" || reason.length > 200))
+      fail(`deny[${i}].reason must be text of at most 200 characters`);
+    return reason ? { pattern, reason } : { pattern };
+  });
   if (problems.length) throw new Error(`agent.yaml is invalid:\n- ${problems.join("\n- ")}`);
   return {
     name: raw.name,
@@ -61,6 +104,8 @@ export function parseManifest(text) {
     harness,
     instance,
     credentials: creds,
+    egress,
+    deny: rules,
   };
 }
 
@@ -88,7 +133,8 @@ export function dockerfile(manifest, { version }) {
   if (manifest.setup) lines.push(`RUN ${secret} sh -c '${CA_EXPORTS}; cd /agent && ./${manifest.setup}'`);
   lines.push(
     "RUN chmod -R a-w /agent",
-    "COPY runtime/agentd.mjs runtime/claude-settings.json /opt/agent-host/",
+    "COPY runtime/agentd.mjs runtime/agent-call.mjs runtime/guard.mjs runtime/guard.json runtime/claude-settings.json /opt/agent-host/",
+    "COPY runtime/managed-settings.json /etc/claude-code/managed-settings.json",
     "COPY --chmod=755 runtime/bin/ /usr/local/bin/",
     `LABEL agent-host.agent="${manifest.name}" agent-host.version="${version}"`,
     'CMD ["/usr/local/bin/agent-idle"]',
@@ -101,6 +147,10 @@ export function versionId(commit, now = new Date()) {
   const stamp = now.toISOString().replace(/[-:]/g, "").replace("T", "t").slice(0, 15);
   if (!commit) return `${stamp}-local`;
   return `${stamp}-${commit.slice(0, 8)}${commit.endsWith("-dirty") ? "-dirty" : ""}`;
+}
+
+export function guardConfig(manifest) {
+  return `${JSON.stringify({ deny: manifest.deny }, null, 2)}\n`;
 }
 
 export function sqlString(value) {

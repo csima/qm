@@ -23,6 +23,8 @@ export interface TaskRow {
   created_at: number;
   started_at: number | null;
   finished_at: number | null;
+  parent: string | null;
+  chain: string | null;
 }
 
 export interface VersionRow {

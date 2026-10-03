@@ -11,6 +11,11 @@ export interface TaskInput {
   callbackUrl?: unknown;
 }
 
+export interface Delegation {
+  parent: string | null;
+  chain: string[];
+}
+
 export interface ValidTask {
   message: string;
   session: string;
@@ -35,20 +40,40 @@ export async function submitTask(
   caller: Caller,
   row: InstanceRow,
   input: TaskInput,
+  delegation?: Delegation,
 ): Promise<TaskRow> {
   const { message, session, callbackUrl } = validateTask(input);
   const stub = env.INSTANCE.getByName(row.id);
   if (!(await stub.sessions()).includes(session)) throw new HttpError(404, `no session named ${session}`);
   const id = `t_${hex(10)}`;
+  const via = delegation ? `agent:${delegation.chain.at(-1)}` : caller.via;
   await env.DB.prepare(
-    "INSERT INTO tasks (id, instance, session, caller, via, message, status, callback_url, created_at) VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?)",
+    "INSERT INTO tasks (id, instance, session, caller, via, message, status, callback_url, created_at, parent, chain) VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?)",
   )
-    .bind(id, row.id, session, caller.email, caller.via, message, callbackUrl, Date.now())
+    .bind(
+      id,
+      row.id,
+      session,
+      caller.email,
+      via,
+      message,
+      callbackUrl,
+      Date.now(),
+      delegation?.parent ?? null,
+      delegation ? JSON.stringify(delegation.chain) : null,
+    )
     .run();
-  await audit(env, auditBy(caller, "task.create", { instance: row.id, session, detail: { task: id } }));
+  await audit(
+    env,
+    auditBy(caller, "task.create", {
+      instance: row.id,
+      session,
+      detail: { task: id, ...(delegation ? { parent: delegation.parent, chain: delegation.chain } : {}) },
+    }),
+  );
   ctx.waitUntil(
     stub
-      .enqueue({ id, session, caller: caller.email, via: caller.via, message })
+      .enqueue({ id, session, caller: caller.email, via, message })
       .catch((e) => console.error(`enqueue ${id}: ${(e as Error).message}`)),
   );
   return (await getTask(env, id))!;

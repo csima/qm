@@ -1,7 +1,7 @@
 # Agent host (sima)
 
 Runs agents defined by git repos as always-on Claude Code sessions on Cloudflare Containers, at
-https://agents.calebsima.com. Requirements: the "Agent Host — Requirements" doc. This is phase 1.
+https://agents.calebsima.com. Requirements: the "Agent Host — Requirements" doc.
 
 ```
 people (browser, CLI) ─┐
@@ -15,7 +15,7 @@ scripts, other agents ─┼─► Worker (Access JWT or API key) ─► Instanc
 
 - **Agent**: a repo with `agent.yaml` (see `samples/notes`). Fields: `name`, `description`, `base`
   (digest-pinned, Debian-based), `setup` (runs at build), `harness` (`claude`), `instance` (container
-  size), `credentials` (declared names; values never live in the repo).
+  size), `credentials` (declared names; values never live in the repo), `egress` and `deny` (below).
 - **Version**: one image built from one commit, recorded in D1 and listed in the host's container
   `images`. Cloudflare only starts declared images, so every build redeploys the host; running
   instances survive that redeploy.
@@ -23,6 +23,33 @@ scripts, other agents ─┼─► Worker (Access JWT or API key) ─► Instanc
   sessions. Its home directory is saved to R2 every five minutes when changed and before restarts,
   and restored on boot, so conversations and files survive restarts and upgrades.
 - **Session**: a tmux window running Claude Code. `main` exists from the start; more can be added.
+
+## Guardrails
+
+- **Egress allowlist.** With `egress: [api.example.com, "*.example.org"]` the container starts without
+  internet access and every HTTP and HTTPS request goes through the host's `EgressProxy`, which lets
+  through the listed hosts (`*.` matches subdomains only) plus `api.anthropic.com`, answers 403
+  otherwise and audits `egress.blocked` (once a minute per host). HTTPS is intercepted with a CA that
+  Cloudflare creates per container; `agent-boot` adds it to the system store and sets
+  `NODE_EXTRA_CA_CERTS`. `egress: []` allows only the model API. Leaving `egress` out keeps open
+  internet. Other ports and DNS for unlisted names do not work in restricted mode.
+- **Command guard.** Claude Code's hooks live in `/etc/claude-code/managed-settings.json`, which the
+  agent cannot edit or disable. The `PreToolUse` hook blocks Bash commands matching a small baseline
+  (deleting `/` or `~`, `mkfs`, `dd` to a disk, fork bombs) plus the agent's
+  `deny: ["regex", {pattern, reason}]` rules (case-insensitive, whitespace collapsed), tells the model
+  why and audits `harness.blocked`. It is a speed bump against mistakes, not a sandbox: the agent can
+  still write a script that does the same thing.
+
+## Agents calling agents
+
+Inside a container, `agent-list` shows the instances the current person may message and
+`agent-call <instance> "<message>"` sends one a task and waits for the reply (`--wait <id>` resumes a
+long one). The call runs as the person whose task is in progress in that session (from agentd's
+`/var/lib/agent/current/<session>`), or as the instance owner when nobody's task is running (for
+example, someone typing in an attached terminal: attach access already means acting with the owner's
+credentials). The host checks that person's `message` permission on the target, records the parent task
+and the chain of instances, refuses loops and chains deeper than four, and allows eight open calls per
+instance. The target sees `via agent:<caller instance>` in the header.
 
 ## Build an agent
 
@@ -60,6 +87,8 @@ Worker checks the key). The browser uses the same handlers under `/ui/v1/*` with
 | POST                | `/instances/:id/sessions`                          | admin                                                        | `{name}` adds a session (8 max)                                                                    |
 | GET (WebSocket)     | `/instances/:id/attach?session=main`               | attach                                                       | Joins the live terminal; recorded to R2                                                            |
 | POST                | `/instances/:id/restart`, `/instances/:id/upgrade` | admin                                                        | Save state, reboot (on a newer version)                                                            |
+| POST                | `/instances/:id/pause`, `/instances/:id/resume`    | admin                                                        | Save state and stop the container (open tasks fail; messages and attach refused) / start it again  |
+| DELETE              | `/instances/:id`                                   | admin                                                        | Remove the instance and its saved state (attach recordings and audit stay); the id is not reused   |
 | GET                 | `/instances/:id/audit`                             | admin                                                        | Audit trail                                                                                        |
 | GET / POST / DELETE | `/keys`, `/keys/:id`                               | anyone signed in                                             | List, mint (shown once) and revoke your API keys                                                   |
 
@@ -92,7 +121,8 @@ Access apps: "Agent host" (owner-only) and "Agent host machine paths" (bypass fo
 
 ## Not yet built
 
-Pause, kill and delete for persistent instances, drift checks, agent-to-agent registry and
-delegation, cost reports, Codex. Accepted
-risks: full-auto agents with open egress, secrets typed into messages persist in session logs and
-state, and typing in an attached terminal can collide with queued messages.
+Drift checks, cost reports, Codex. Accepted risks: agents without an `egress` list have open
+internet; secrets typed into messages or returned by another agent persist in task results, session
+logs and state; typing in an attached terminal can collide with queued messages; an agent can forge its
+own hook events, and any session of an instance can act for a person whose task runs in another
+session of the same instance.

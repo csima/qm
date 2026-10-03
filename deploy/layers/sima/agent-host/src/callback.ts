@@ -1,5 +1,7 @@
 import { WorkerEntrypoint } from "cloudflare:workers";
+import { placeCall, registry, waitForCall } from "./delegation.ts";
 import type { Env } from "./env.ts";
+import { HttpError } from "./http.ts";
 import { audit, getInstance, getTask, isTerminal, type AuditEntry } from "./store.ts";
 
 const MAX_RESULT = 200_000;
@@ -16,6 +18,7 @@ interface ToolEvent {
   sessionId?: unknown;
   tool?: unknown;
   input?: unknown;
+  blocked?: unknown;
 }
 
 const str = (value: unknown, max: number) => (typeof value === "string" ? value.slice(0, max) : null);
@@ -41,13 +44,35 @@ export class HostCallback extends WorkerEntrypoint<Env> {
   }
 
   async fetch(req: Request): Promise<Response> {
-    if (req.method !== "POST") return new Response("not found", { status: 404 });
+    try {
+      return await this.route(req);
+    } catch (error) {
+      if (error instanceof HttpError) return Response.json({ error: error.message }, { status: error.status });
+      console.error(error);
+      return Response.json({ error: "internal error" }, { status: 500 });
+    }
+  }
+
+  private async route(req: Request): Promise<Response> {
     const url = new URL(req.url);
+    if (req.method === "GET") {
+      if (url.pathname === "/v1/agents")
+        return Response.json(await registry(this.env, this.instance, url.searchParams.get("parent")));
+      const call = /^\/v1\/calls\/([a-z0-9_]{1,64})$/.exec(url.pathname);
+      if (call)
+        return Response.json(
+          await waitForCall(this.env, this.instance, call[1], Number(url.searchParams.get("wait") ?? 0)),
+        );
+      return new Response("not found", { status: 404 });
+    }
+    if (req.method !== "POST") return new Response("not found", { status: 404 });
     const body = (await req.json().catch(() => null)) as Record<string, unknown> | null;
     if (!body || typeof body !== "object") return new Response("bad request", { status: 400 });
     const task = /^\/v1\/tasks\/([a-z0-9_-]{1,64})$/.exec(url.pathname);
     if (task) return this.updateTask(task[1], body as TaskUpdate);
     if (url.pathname === "/v1/events") return this.events(body.tools);
+    if (url.pathname === "/v1/calls")
+      return Response.json(await placeCall(this.env, this.ctx, this.instance, body), { status: 202 });
     return new Response("not found", { status: 404 });
   }
 
@@ -87,8 +112,8 @@ export class HostCallback extends WorkerEntrypoint<Env> {
     if (instance?.ephemeral)
       this.ctx.waitUntil(
         this.env.INSTANCE.getByName(this.instance)
-          .teardown(`one-off task ${update.status}`)
-          .catch((e) => console.error(`teardown ${this.instance}: ${(e as Error).message}`)),
+          .remove(`one-off task ${update.status}`)
+          .catch((e) => console.error(`remove ${this.instance}: ${(e as Error).message}`)),
       );
     if (task.callback_url) {
       const finished = await getTask(this.env, id);
@@ -102,10 +127,15 @@ export class HostCallback extends WorkerEntrypoint<Env> {
     const entries: AuditEntry[] = (tools as ToolEvent[]).slice(0, MAX_TOOLS).map((t) => ({
       actor: `instance:${this.instance}`,
       via: "agent",
-      action: "harness.tool",
+      action: typeof t.blocked === "string" ? "harness.blocked" : "harness.tool",
       instance: this.instance,
       session: str(t.session, 32),
-      detail: { tool: str(t.tool, 100), input: str(t.input, 2_000), harnessSession: str(t.sessionId, 64) },
+      detail: {
+        tool: str(t.tool, 100),
+        input: str(t.input, 2_000),
+        harnessSession: str(t.sessionId, 64),
+        ...(typeof t.blocked === "string" ? { reason: str(t.blocked, 500) } : {}),
+      },
     }));
     await audit(this.env, ...entries);
     return Response.json({ ok: true });

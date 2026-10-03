@@ -41,3 +41,12 @@ export function parseSharing(input: unknown): Sharing {
     admin: parseEmailList(value.admin, "sharing.admin"),
   };
 }
+
+export const MODEL_HOSTS = ["api.anthropic.com"];
+
+export function hostAllowed(host: string, allow: string[]): boolean {
+  const name = host.toLowerCase().replace(/\.$/, "");
+  return [...MODEL_HOSTS, ...allow].some((pattern) =>
+    pattern.startsWith("*.") ? name.endsWith(pattern.slice(1)) : name === pattern,
+  );
+}

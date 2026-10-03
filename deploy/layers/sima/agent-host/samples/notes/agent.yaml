@@ -8,3 +8,7 @@ credentials:
   - name: NOTES_TOKEN
     description: Token the notes CLI requires before it reads or writes any notebook
     required: true
+egress: []
+deny:
+  - pattern: '\brm\b.*\bnotebooks\b'
+    reason: deletes notebook files directly; use notes remove instead

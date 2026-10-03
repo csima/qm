@@ -18,6 +18,8 @@ export async function instanceFor(env: Env, caller: Caller, id: string, permissi
   const row = INSTANCE_ID.test(id) ? await getInstance(env, id) : null;
   if (!row || !can(caller, row, "view")) throw new HttpError(404, "no such instance");
   if (!can(caller, row, permission)) throw new HttpError(403, `you do not have ${permission} access to ${id}`);
+  if (row.status === "paused" && (permission === "message" || permission === "attach"))
+    throw new HttpError(409, `${id} is paused; its owner can resume it`);
   return row;
 }
 
@@ -205,6 +207,22 @@ export async function updateInstanceCredentials(
 
 export async function prepareRestart(env: Env, id: string, version?: string): Promise<void> {
   await stub(env, id).prepareRestart(version).catch(asHttp(409));
+}
+
+export async function pauseInstance(env: Env, caller: Caller, row: InstanceRow): Promise<void> {
+  await stub(env, row.id).pause().catch(asHttp(409));
+  await audit(env, auditBy(caller, "instance.pause", { instance: row.id }));
+}
+
+export async function resumeInstance(env: Env, ctx: ExecutionContext, caller: Caller, row: InstanceRow) {
+  await stub(env, row.id).resume();
+  await audit(env, auditBy(caller, "instance.resume", { instance: row.id }));
+  ctx.waitUntil(boot(env, row.id));
+}
+
+export async function removeInstance(env: Env, caller: Caller, row: InstanceRow): Promise<void> {
+  await stub(env, row.id).remove(`removed by ${caller.email}`);
+  await audit(env, auditBy(caller, "instance.delete", { instance: row.id }));
 }
 
 export function boot(env: Env, id: string): Promise<void> {

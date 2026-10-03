@@ -5,7 +5,7 @@ import type { Env, InstanceConfig } from "./env.ts";
 import { putStream } from "./r2.ts";
 import { applyChange, type CredentialChange } from "./credentials.ts";
 import { openCredentials, sealCredentials } from "./secrets.ts";
-import { audit, setInstanceStatus, type TaskRow } from "./store.ts";
+import { audit, getVersion, setInstanceStatus, type TaskRow } from "./store.ts";
 
 const ALARM_MS = 60_000;
 const SNAPSHOT_EVERY_MS = 5 * 60_000;
@@ -38,7 +38,12 @@ const clamp = (value: string | null | number, min: number, max: number, fallback
 
 export class Instance extends DurableObject<Env> {
   private booting: Promise<void> | undefined;
-  private tornDown = false;
+  private halted: string | null = null;
+  private removed = false;
+
+  private assertActive(): void {
+    if (this.halted) throw new Error(this.halted);
+  }
 
   private get container(): Container {
     const container = this.ctx.container;
@@ -87,10 +92,11 @@ export class Instance extends DurableObject<Env> {
   }
 
   async ensureRunning(): Promise<void> {
-    if (this.tornDown) throw new Error("this one-off instance has been removed");
+    this.assertActive();
+    if (await this.ctx.storage.get("paused")) throw new Error("the instance is paused");
     if (this.booting) return this.booting;
     if (await this.healthy()) return;
-    if (this.tornDown) throw new Error("this one-off instance has been removed");
+    this.assertActive();
     this.booting ??= this.boot().finally(() => {
       this.booting = undefined;
     });
@@ -133,13 +139,13 @@ export class Instance extends DurableObject<Env> {
     return Boolean(this.container.images[imageKey(agent, version)]);
   }
 
-  private async startContainer(image: string, size: string): Promise<void> {
+  private async startContainer(image: string, size: string, enableInternet: boolean): Promise<void> {
     const container = this.container;
     if (container.running) {
       await container.destroy().catch(() => undefined);
       for (let i = 0; i < 60 && container.running; i++) await new Promise((r) => setTimeout(r, 500));
     }
-    container.start({ image, instance: size as ContainerSize, enableInternet: true });
+    container.start({ image, instance: size as ContainerSize, enableInternet });
     let exited: string | null = null;
     container.monitor().then(
       () => (exited ??= "container exited"),
@@ -148,7 +154,7 @@ export class Instance extends DurableObject<Env> {
     const deadline = Date.now() + START_TIMEOUT_MS;
     while (Date.now() < deadline) {
       if (exited) throw new Error(`container failed to start: ${exited}`);
-      if (this.tornDown) throw new Error("this one-off instance was removed while it was starting");
+      this.assertActive();
       const ok = await this.run(["true"]).then(
         (r) => r.code === 0,
         () => false,
@@ -165,18 +171,24 @@ export class Instance extends DurableObject<Env> {
     try {
       const image = this.container.images[imageKey(config.agent, config.version)];
       if (!image) throw new Error(`version ${config.version} of ${config.agent} is not deployed on this host`);
+      const egress = (await getVersion(this.env, config.agent, config.version))?.manifest.egress ?? null;
       if (!config.ephemeral && this.container.running && (await this.ctx.storage.get("bootId")))
         await this.snapshot(config.id, true).catch((e) =>
           console.error(`pre-reboot save of ${config.id} failed: ${errText(e)}`),
         );
       await this.ctx.storage.delete("bootId");
-      await this.startContainer(image, config.size);
-      if (this.tornDown) throw new Error("this one-off instance was removed while it was starting");
+      await this.startContainer(image, config.size, egress === null);
+      this.assertActive();
       const exports = (this.ctx as unknown as { exports: Record<string, (o: { props: unknown }) => Fetcher> }).exports;
-      await this.container.interceptOutboundHttp(
-        "host.internal",
-        exports.HostCallback({ props: { instance: config.id } }),
-      );
+      if (egress) {
+        const proxy = exports.EgressProxy({ props: { instance: config.id, allow: egress } });
+        await this.container.interceptAllOutboundHttp(proxy);
+        await this.container.interceptOutboundHttps("*", proxy);
+      } else
+        await this.container.interceptOutboundHttp(
+          "host.internal",
+          exports.HostCallback({ props: { instance: config.id } }),
+        );
       await this.container.setInactivityTimeout(INACTIVITY_MS);
       if (!config.ephemeral) await this.restoreState(config.id);
       const credentials = await openCredentials(this.env.CREDENTIALS_KEY, config.credentials, config.id);
@@ -188,12 +200,13 @@ export class Instance extends DurableObject<Env> {
           bootId,
           harness: config.harness,
           sessions: config.sessions,
-          appendSystemPrompt: systemPrompt(config),
+          egress: egress !== null,
+          appendSystemPrompt: systemPrompt(config, egress),
           env: { ...modelEnvironment(this.env, credentials), ...credentials },
         }),
       );
       if (out.trim().split("\n").at(-1) !== "ok") throw new Error(`agent-boot did not finish: ${out.slice(-300)}`);
-      if (this.tornDown) throw new Error("this one-off instance was removed while it was starting");
+      this.assertActive();
       await this.ctx.storage.put({ bootId, bootVersion: config.version });
       const delivered = [...(await this.ctx.storage.list({ prefix: "q:" })).keys()];
       for (let i = 0; i < delivered.length; i += STORAGE_DELETE_BATCH)
@@ -207,7 +220,7 @@ export class Instance extends DurableObject<Env> {
         detail: { version: config.version, bootId },
       });
     } catch (error) {
-      if (this.tornDown) await this.container.destroy().catch(() => undefined);
+      if (this.halted) await this.container.destroy().catch(() => undefined);
       await setInstanceStatus(this.env, config.id, "error", errText(error));
       throw error;
     }
@@ -283,6 +296,7 @@ export class Instance extends DurableObject<Env> {
   }
 
   async prepareRestart(version?: string): Promise<void> {
+    if (await this.ctx.storage.get("paused")) throw new Error("the instance is paused; resume it first");
     if (this.booting) throw new Error("the instance is already starting");
     const config = await this.config();
     const target = version ?? config.version;
@@ -304,8 +318,9 @@ export class Instance extends DurableObject<Env> {
     const proc = await this.container.exec(["agent-state", "save"], { stderr: "ignore" });
     const bytes = await putStream(this.env.STATE, key, proc.stdout!);
     const code = await proc.exitCode;
-    if (code !== 0) {
+    if (code !== 0 || this.removed) {
       await this.env.STATE.delete(key);
+      if (this.removed) return false;
       throw new Error(`state save exited ${code}`);
     }
     const previous = await this.env.STATE.get(`state/${id}/current`).then((o) => o?.text());
@@ -318,9 +333,9 @@ export class Instance extends DurableObject<Env> {
 
   async alarm(): Promise<void> {
     const config = await this.ctx.storage.get<InstanceConfig>("config");
-    if (!config) return;
+    if (!config || (await this.ctx.storage.get("paused"))) return;
     if (config.ephemeral && Date.now() - (config.createdAt ?? 0) > ONE_OFF_MAX_MS) {
-      await this.teardown("one-off instance reached its two-hour limit");
+      await this.remove("one-off instance reached its two-hour limit");
       return;
     }
     try {
@@ -332,35 +347,83 @@ export class Instance extends DurableObject<Env> {
     } catch (error) {
       console.error(`instance ${config.id}: ${errText(error)}`);
     } finally {
-      if (!this.tornDown) await this.ctx.storage.setAlarm(Date.now() + ALARM_MS);
+      if (!this.halted) await this.ctx.storage.setAlarm(Date.now() + ALARM_MS);
     }
   }
 
-  async teardown(reason: string): Promise<void> {
+  private failOpenTasks(id: string, reason: string, now = Date.now()): D1PreparedStatement {
+    return this.env.DB.prepare(
+      "UPDATE tasks SET status = 'failed', error = ?, finished_at = ? WHERE instance = ? AND status IN ('queued', 'running')",
+    ).bind(reason, now, id);
+  }
+
+  async pause(): Promise<void> {
+    const config = await this.config();
+    if (config.ephemeral) throw new Error("one-off runs cannot be paused");
+    if (await this.ctx.storage.get("paused")) return;
+    await this.ctx.storage.put("paused", true);
+    this.halted = "the instance was paused";
+    await this.booting?.catch(() => undefined);
+    try {
+      if (this.ctx.container?.running && (await this.ctx.storage.get("bootId"))) await this.snapshot(config.id, true);
+    } catch (error) {
+      await this.ctx.storage.delete("paused");
+      this.halted = null;
+      throw new Error(`could not save the instance's state, so it was not paused: ${errText(error)}`);
+    }
+    await this.env.DB.batch([
+      this.env.DB.prepare(
+        "UPDATE instances SET status = 'paused', last_error = NULL, updated_at = ? WHERE id = ? AND status != 'deleted'",
+      ).bind(Date.now(), config.id),
+      this.failOpenTasks(config.id, "the instance was paused"),
+    ]);
+    if (this.ctx.container?.running) await this.container.destroy().catch(() => undefined);
+    await this.ctx.storage.delete("bootId");
+    await this.ctx.storage.deleteAlarm();
+  }
+
+  async resume(): Promise<void> {
+    const config = await this.config();
+    if (!(await this.ctx.storage.get("paused"))) return;
+    await this.ctx.storage.delete("paused");
+    this.halted = null;
+    await setInstanceStatus(this.env, config.id, "created");
+    await this.ctx.storage.setAlarm(Date.now() + 1_000);
+  }
+
+  async remove(reason: string): Promise<void> {
     const config = await this.ctx.storage.get<InstanceConfig>("config");
     if (!config) return;
-    if (!config.ephemeral) throw new Error("only one-off instances are torn down automatically");
-    this.tornDown = true;
+    this.halted = "the instance was removed";
+    this.removed = true;
     const now = Date.now();
     await this.env.DB.batch([
       this.env.DB.prepare(
         "UPDATE instances SET status = 'deleted', last_error = NULL, updated_at = ? WHERE id = ?",
       ).bind(now, config.id),
-      this.env.DB.prepare(
-        "UPDATE tasks SET status = 'failed', error = 'the one-off instance was removed', finished_at = ? WHERE instance = ? AND status IN ('queued', 'running')",
-      ).bind(now, config.id),
+      this.failOpenTasks(config.id, "the instance was removed", now),
     ]);
     await this.booting?.catch(() => undefined);
     if (this.ctx.container?.running) await this.container.destroy().catch(() => undefined);
     await this.ctx.storage.deleteAlarm();
     await this.ctx.storage.deleteAll();
+    await this.deleteState(config.id);
     await audit(this.env, {
       actor: `instance:${config.id}`,
       via: "agent",
-      action: "instance.teardown",
+      action: "instance.removed",
       instance: config.id,
       detail: { reason },
     });
+  }
+
+  private async deleteState(id: string): Promise<void> {
+    let cursor: string | undefined;
+    do {
+      const page = await this.env.STATE.list({ prefix: `state/${id}/`, cursor });
+      if (page.objects.length) await this.env.STATE.delete(page.objects.map((o) => o.key));
+      cursor = page.truncated ? page.cursor : undefined;
+    } while (cursor);
   }
 
   async credentialNames(): Promise<string[]> {

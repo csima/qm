@@ -7,6 +7,7 @@ import { personalNames } from "./credentials.ts";
 import { credentialsPage, homePage, instancePage, keysPage, newInstancePage, unauthorizedPage } from "./ui.ts";
 
 export { HostCallback } from "./callback.ts";
+export { EgressProxy } from "./egress.ts";
 export { Instance } from "./instance.ts";
 export { LibreChatGateway } from "./librechat.ts";
 
@@ -86,7 +87,7 @@ export default {
     }
   },
   async scheduled(_event, env, ctx) {
-    for (const row of await listInstances(env)) {
+    for (const row of (await listInstances(env)).filter((r) => r.status !== "paused")) {
       ctx.waitUntil(
         env.INSTANCE.getByName(row.id)
           .ensureRunning()

@@ -4,6 +4,7 @@ set -a
 . /run/agent/env
 set +a
 export AGENT_WINDOW="$window" HOME=/home/agent XDG_RUNTIME_DIR=/run/agent/xdg CLAUDE_CODE_TMPDIR=/run/agent/xdg
+export DISABLE_AUTOUPDATER=1 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
 prompt=$(cat /run/agent/system-prompt.txt)
 session_file="$HOME/.agent-host/sessions/$window"
 cd /agent

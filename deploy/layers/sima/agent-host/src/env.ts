@@ -51,6 +51,8 @@ export interface Manifest {
   harness: string;
   instance: string;
   credentials: { name: string; description: string; required: boolean }[];
+  egress?: string[] | null;
+  deny?: { pattern: string; reason?: string }[];
 }
 
 export interface InstanceConfig {

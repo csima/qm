@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { dockerfile, parseManifest, safeRelativePath, sqlString, versionId } from "./lib.mjs";
+import { dockerfile, guardConfig, parseManifest, safeRelativePath, sqlString, versionId } from "./lib.mjs";
 
 const HERE = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const { values: args } = parseArgs({
@@ -82,6 +82,7 @@ fs.cpSync(agentDir, path.join(context, "agent"), {
   filter: (src) => path.basename(src) !== ".git",
 });
 fs.cpSync(path.join(HERE, "runtime"), path.join(context, "runtime"), { recursive: true });
+fs.writeFileSync(path.join(context, "runtime", "guard.json"), guardConfig(manifest));
 fs.writeFileSync(path.join(context, "Dockerfile"), dockerfile(manifest, { version }));
 console.log(`Building ${manifest.name} ${version}${commit ? ` from ${commit.slice(0, 12)}` : ""}…`);
 if (args["dry-run"]) {

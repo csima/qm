@@ -1,10 +1,21 @@
 #!/bin/sh
 window="${AGENT_WINDOW:-main}"
 log="/var/lib/agent/events/$window.jsonl"
-line=$(jq -c --arg e "$1" --arg w "$window" '. + {agent_event: $e, window: $w, at: now}' 2>/dev/null) || exit 0
-printf '%s\n' "$line" >>"$log"
-if [ "$1" = start ]; then
+event="$1"
+input=$(cat)
+reason=""
+if [ "$event" = tool ]; then
+  reason=$(printf '%s' "$input" | node /opt/agent-host/guard.mjs) || reason="the command guard could not check this command"
+  [ -n "$reason" ] && event=blocked
+fi
+line=$(printf '%s' "$input" | jq -c --arg e "$event" --arg w "$window" --arg r "$reason" '. + {agent_event: $e, window: $w, at: now} + (if $r == "" then {} else {blocked_reason: $r} end)' 2>/dev/null)
+[ -n "$line" ] && printf '%s\n' "$line" >>"$log"
+if [ "$event" = start ]; then
   session=$(printf '%s' "$line" | jq -r '.session_id // empty')
   [ -n "$session" ] && printf '%s\n' "$session" >"$HOME/.agent-host/sessions/$window"
+fi
+if [ "$event" = blocked ]; then
+  printf 'Blocked by agent-host: %s. Do not try to work around this; tell the person you are acting for.\n' "$reason" >&2
+  exit 2
 fi
 exit 0

@@ -34,7 +34,8 @@ table{width:100%;border-collapse:collapse;background:var(--panel);border:1px sol
 th,td{text-align:left;padding:8px 12px;border-bottom:1px solid var(--line);font-size:14px;vertical-align:top}th{color:var(--quiet);font-weight:500}
 a{color:var(--accent)}code{font:13px ui-monospace,monospace}
 .pill{display:inline-block;padding:1px 8px;border-radius:99px;border:1px solid var(--line);font-size:12px}
-.running{color:var(--ok);border-color:currentColor}.error{color:var(--bad);border-color:currentColor}
+.running{color:var(--ok);border-color:currentColor}.error{color:var(--bad);border-color:currentColor}.paused{color:var(--quiet);border-style:dashed}
+button.danger{color:var(--bad);border-color:currentColor}
 .bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:8px 0}
 select,input,textarea,button{font:inherit;color:var(--ink);background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:6px 10px}
 button{cursor:pointer}button:disabled{opacity:.5;cursor:default}button.primary{background:var(--accent);color:#fff;border-color:var(--accent)}
@@ -229,8 +230,9 @@ document.querySelectorAll("[data-save]").forEach((b) => b.addEventListener("clic
 }
 
 export function instancePage(caller: Caller, row: InstanceRow, sessions: string[]): Response {
-  const canMessage = can(caller, row, "message");
-  const canAttach = can(caller, row, "attach");
+  const paused = row.status === "paused";
+  const canMessage = !paused && can(caller, row, "message");
+  const canAttach = !paused && can(caller, row, "attach");
   const canAdmin = can(caller, row, "admin");
   const options = sessions.map((s) => `<option>${esc(s)}</option>`).join("");
   const body = `
@@ -256,7 +258,13 @@ ${
 <div class="bar"><button id="save-sharing" class="primary">Save sharing</button><span id="sharing-status" class="muted"></span></div></fieldset>
 <fieldset><legend>Credentials</legend><p class="muted">The values this instance runs with. Changes apply after a restart.</p>
 <div id="instance-creds"></div>
-<div class="bar"><button id="save-creds" class="primary">Save credentials</button><button id="restart">Restart now</button><span id="creds-status" class="muted"></span></div></fieldset>`
+<div class="bar"><button id="save-creds" class="primary">Save credentials</button>${paused ? "" : `<button id="restart">Restart now</button>`}<span id="creds-status" class="muted"></span></div></fieldset>
+<fieldset><legend>Lifecycle</legend><p class="muted">${
+        paused
+          ? "Paused: the container is stopped and its files are saved. Resuming starts it again where it left off."
+          : "Pausing saves the instance's files, stops its container and fails tasks in progress. Deleting removes the instance and its saved files for good."
+      }</p>
+<div class="bar">${paused ? `<button id="resume" class="primary">Resume</button>` : `<button id="pause">Pause</button>`}<button id="delete" class="danger">Delete</button><span id="life-status" class="muted"></span></div></fieldset>`
     : ""
 }
 <h2>Recent tasks</h2><table class="tasks"><thead><tr><th>When</th><th>From</th><th>Status</th><th>Message / result</th></tr></thead><tbody id="tasks"></tbody></table>
@@ -318,6 +326,22 @@ $("#restart")?.addEventListener("click", async () => {
   if (!confirm("Restart this instance? Its state is saved first; running tasks are interrupted.")) return;
   try { await call("/instances/" + id + "/restart", { method: "POST", body: "{}" }); $("#creds-status").textContent = "Restarting…"; }
   catch (e) { $("#creds-status").textContent = e.message; }
+});
+async function lifecycle(path, init, status) {
+  $("#life-status").textContent = status;
+  try { await call("/instances/" + id + path, init); return true; }
+  catch (e) { $("#life-status").textContent = e.message; return false; }
+}
+$("#pause")?.addEventListener("click", async () => {
+  if (!confirm("Pause " + id + "? Tasks in progress fail; files are saved.")) return;
+  if (await lifecycle("/pause", { method: "POST", body: "{}" }, "Saving and stopping…")) location.reload();
+});
+$("#resume")?.addEventListener("click", async () => {
+  if (await lifecycle("/resume", { method: "POST", body: "{}" }, "Starting…")) location.reload();
+});
+$("#delete")?.addEventListener("click", async () => {
+  if (prompt("This deletes " + id + " and its saved files. Type the instance name to confirm.") !== id) return;
+  if (await lifecycle("", { method: "DELETE" }, "Deleting…")) location.href = "/";
 });
 $("#new-session")?.addEventListener("click", async () => {
   const name = prompt("Session name (starts with a letter; lowercase, digits, dashes)");
