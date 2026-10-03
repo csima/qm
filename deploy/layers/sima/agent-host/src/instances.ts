@@ -18,6 +18,7 @@ export async function instanceFor(env: Env, caller: Caller, id: string, permissi
   const row = INSTANCE_ID.test(id) ? await getInstance(env, id) : null;
   if (!row || !can(caller, row, "view")) throw new HttpError(404, "no such instance");
   if (!can(caller, row, permission)) throw new HttpError(403, `you do not have ${permission} access to ${id}`);
+  if (row.status === "deleting" && permission !== "view") throw new HttpError(409, `${id} is being deleted`);
   if (INACTIVE.includes(row.status) && (permission === "message" || permission === "attach"))
     throw new HttpError(
       409,

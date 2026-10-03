@@ -2,7 +2,8 @@ import type { Caller, Env } from "./env.ts";
 import { HttpError, hex } from "./http.ts";
 import { audit, auditBy } from "./store.ts";
 
-const REPO = /^https:\/\/github\.com\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)$/;
+const REPO = /^https:\/\/github\.com\/([A-Za-z0-9_-][A-Za-z0-9_.-]*)\/([A-Za-z0-9_-][A-Za-z0-9_.-]*)$/;
+const RETRY_MS = 30 * 60_000;
 const REF = /^[A-Za-z0-9._][A-Za-z0-9._/-]{0,199}$/;
 const SOURCE_ID = /^s_[0-9a-f]{8}$/;
 
@@ -105,9 +106,27 @@ async function startBuild(env: Env, row: SourceRow, sha: string | null): Promise
   await env.DB.prepare(
     "UPDATE sources SET last_sha = COALESCE(?, last_sha), last_build_at = ?, last_error = ? WHERE id = ?",
   )
-    .bind(error ? null : sha, Date.now(), error, row.id)
+    .bind(sha, Date.now(), error, row.id)
     .run();
   return error;
+}
+
+async function built(env: Env, sha: string): Promise<boolean> {
+  return (
+    (await env.DB.prepare("SELECT 1 FROM versions WHERE commit_sha IN (?, ?) LIMIT 1")
+      .bind(sha, `${sha}-dirty`)
+      .first()) !== null
+  );
+}
+
+export function needsBuild(
+  row: Pick<SourceRow, "last_sha" | "last_build_at">,
+  sha: string,
+  isBuilt: boolean,
+  now: number,
+) {
+  if (isBuilt) return false;
+  return sha !== row.last_sha || now - (row.last_build_at ?? 0) > RETRY_MS;
 }
 
 export function runsUrl(env: Env): string {
@@ -165,18 +184,29 @@ export async function pollSources(env: Env): Promise<void> {
   if (!env.GITHUB_BUILD_TOKEN) return;
   const { results } = await env.DB.prepare("SELECT * FROM sources WHERE auto = 1").all<SourceRow>();
   for (const row of results) {
+    let sha: string;
     try {
-      const sha = await headSha(env, row);
-      if (sha === row.last_sha) continue;
-      const error = await startBuild(env, row, sha);
-      await audit(env, {
-        actor: "host",
-        via: "agent",
-        action: "build.dispatch",
-        detail: { id: row.id, repo: row.repo, ref: row.ref, sha, error, trigger: "new commit" },
-      });
+      sha = await headSha(env, row);
     } catch (error) {
-      console.error(`poll ${row.repo}: ${(error as Error).message}`);
+      await env.DB.prepare("UPDATE sources SET last_error = ? WHERE id = ?")
+        .bind((error as Error).message, row.id)
+        .run();
+      continue;
     }
+    if (!needsBuild(row, sha, await built(env, sha), Date.now())) continue;
+    const error = await startBuild(env, row, sha);
+    await audit(env, {
+      actor: "host",
+      via: "agent",
+      action: "build.dispatch",
+      detail: {
+        id: row.id,
+        repo: row.repo,
+        ref: row.ref,
+        sha,
+        error,
+        trigger: sha === row.last_sha ? "retry" : "new commit",
+      },
+    });
   }
 }

@@ -30,7 +30,8 @@ scripts, other agents ─┼─► Worker (Access JWT or API key) ─► Instanc
   internet access and every HTTP and HTTPS request goes through the host's `EgressProxy`, which lets
   through the listed hosts (`*.` matches subdomains only; wildcards on shared hosting suffixes such as
   `*.workers.dev` are refused), plus `api.anthropic.com` only for requests carrying the instance's own
-  model key or token, answers 403 otherwise and audits `egress.blocked` (once a minute per host, at
+  model key or token and not asking Anthropic to fetch other hosts (`mcp_servers`, `web_fetch` tools),
+  answers 403 otherwise and audits `egress.blocked` (once a minute per host, at
   most 30 a minute per instance). HTTPS is intercepted with a CA that
   Cloudflare creates per container; `agent-boot` adds it to the system store and sets
   `NODE_EXTRA_CA_CERTS`. `egress: []` allows only the model API. Leaving `egress` out keeps open
@@ -45,26 +46,32 @@ scripts, other agents ─┼─► Worker (Access JWT or API key) ─► Instanc
 
 ## Agents calling agents
 
-Inside a container, `agent-list` shows the instances the current person may message and
-`agent-call <instance> "<message>"` sends one a task and waits for the reply (`--wait <id>` resumes a
-long one). The call runs as the person whose task is in progress in that session (from agentd's
-`/var/lib/agent/current/<session>`, written when the message is delivered), or as the instance owner
-when no task at all is queued or running on the instance (for example, someone typing in an attached
-terminal: attach access already means acting with the owner's credentials). A call without a current
-task while any task is open is refused, so a message cannot borrow the owner's identity. Delegated
-callers never get host-admin rights: the person needs ownership or a `message` share on the target.
-The host records the parent task and the chain of instances, refuses loops and chains deeper than four,
-and allows eight open calls per instance (checked in the same statement that queues the call). The
-target sees `via agent:<caller instance>` in the header. Sessions named `p-…` (LibreChat private
-sessions) only take messages from their person, the instance owner and host admins.
+Inside a container, `agent-list` shows the instances this agent may call and `agent-call <instance>
+"<message>"` sends one a task and waits for the reply (`--wait <id>` resumes a long one). The call is
+made for the person whose task is in progress in that session (from agentd's
+`/var/lib/agent/current/<session>`, written when the message is delivered), or for the instance owner
+when there is none; that person shows in the target's header and in the audit.
+
+Every session of a container runs as the same Unix user, so the host cannot prove which person a call
+really comes from. Authorization therefore does not rest on that identity alone: a call is allowed only
+if the named person **and everyone who can message, attach to or administer the calling instance**
+(its owner and sharing lists; `*` means anyone) may message the target. Whoever can steer the caller
+could have messaged the target themselves, so a call never widens anyone's reach. Host-admin rights
+never apply to calls. The host records the parent task and the chain of instances, refuses loops and
+chains deeper than four, and allows eight open calls per instance, checked in the statement that
+queues the call. The target sees `via agent:<caller instance>` in the header. Sessions named `p-…`
+(LibreChat private sessions) only take messages from their person, the instance owner and host admins.
 
 ## Builds from GitHub
 
 On the Builds page (admins) or `POST /sources {repo, ref?, subdir?, auto?}`, register an agent repo.
 The host builds it at once and, with `auto`, checks the branch head every five minutes and builds new
 commits. A build is a run of `.github/workflows/agent-build.yml` in `BUILD_REPO`, dispatched on
-`BUILD_WORKFLOW_REF` (GitHub only dispatches workflows present on that ref), which runs
-`build-agent` from the `builder_ref` input. Needed: host secret `GITHUB_BUILD_TOKEN` (fine-grained
+`BUILD_WORKFLOW_REF` (GitHub only dispatches workflows present on that ref). The run checks out the
+builder from the repository variable `AGENT_BUILDER_REF` when set, otherwise from the workflow's own
+commit; callers cannot choose it. A commit counts as built once a version records it; a dispatched
+build that produced no version (failed, or dropped by the one-at-a-time build queue) is retried after
+30 minutes. Needed: host secret `GITHUB_BUILD_TOKEN` (fine-grained
 token: Actions read/write on `BUILD_REPO`, Contents read on agent repos), and repository secrets
 `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `AGENT_REPOS_TOKEN` (Contents read on agent repos)
 in `BUILD_REPO`.
@@ -142,5 +149,7 @@ Access apps: "Agent host" (owner-only) and "Agent host machine paths" (bypass fo
 Drift checks, cost reports, Codex. Accepted risks: agents without an `egress` list have open
 internet; secrets typed into messages or returned by another agent persist in task results, session
 logs and state; typing in an attached terminal can collide with queued messages; an agent can forge its
-own hook events, and any session of an instance can act for a person whose task runs in another
-session of the same instance.
+own hook events and name another session's person in a call's audit trail (authorization does not
+depend on it); restricted agents can still reach the internet indirectly through Anthropic's
+server-side web search; the shared-hosting wildcard list is a short fixed list, not the Public Suffix
+List.

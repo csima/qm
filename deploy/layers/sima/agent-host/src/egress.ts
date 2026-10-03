@@ -1,7 +1,7 @@
 import { WorkerEntrypoint } from "cloudflare:workers";
 import type { Env } from "./env.ts";
 import { sha256Hex } from "./auth.ts";
-import { MODEL_HOSTS, hostAllowed, modelKey } from "./policy.ts";
+import { MODEL_HOSTS, hostAllowed, modelKey, reachesOut } from "./policy.ts";
 import { audit } from "./store.ts";
 
 const HOST_INTERNAL = "host.internal";
@@ -35,22 +35,25 @@ export class EgressProxy extends WorkerEntrypoint<Env> {
     return (this.ctx as unknown as { props: EgressProps }).props;
   }
 
-  private async permitted(req: Request, host: string): Promise<boolean> {
-    const { allow, modelKeys } = this.props;
-    if (hostAllowed(host, allow)) return true;
-    if (!hostAllowed(host, MODEL_HOSTS)) return false;
+  private async modelRequest(req: Request): Promise<Request | null> {
     const key = modelKey(req.headers);
-    return key !== null && modelKeys.includes(await sha256Hex(key));
+    if (key === null || !this.props.modelKeys.includes(await sha256Hex(key))) return null;
+    if (req.method !== "POST") return new Request(req, { redirect: "manual" });
+    const body = await req.text();
+    if (reachesOut(body)) return null;
+    return new Request(req.url, { method: req.method, headers: req.headers, body, redirect: "manual" });
   }
 
   async fetch(req: Request): Promise<Response> {
-    const { instance } = this.props;
+    const { instance, allow } = this.props;
     const host = new URL(req.url).hostname;
     if (host === HOST_INTERNAL) {
       const exports = (this.ctx as unknown as { exports: Record<string, (o: { props: unknown }) => Fetcher> }).exports;
       return exports.HostCallback({ props: { instance } }).fetch(req);
     }
-    if (await this.permitted(req, host)) return fetch(new Request(req, { redirect: "manual" }));
+    if (hostAllowed(host, allow)) return fetch(new Request(req, { redirect: "manual" }));
+    const forward = hostAllowed(host, MODEL_HOSTS) ? await this.modelRequest(req) : null;
+    if (forward) return fetch(forward);
     if (shouldAudit(instance, host, Date.now()))
       this.ctx.waitUntil(
         audit(this.env, {
@@ -58,10 +61,10 @@ export class EgressProxy extends WorkerEntrypoint<Env> {
           via: "agent",
           action: "egress.blocked",
           instance,
-          detail: { host, method: req.method },
+          detail: { host, method: req.method, path: new URL(req.url).pathname.slice(0, 200) },
         }).catch(() => undefined),
       );
-    return new Response(`agent-host: ${host} is not on this agent's egress allowlist\n`, {
+    return new Response(`agent-host: this request to ${host} is not allowed by this agent's egress rules\n`, {
       status: 403,
       headers: { "content-type": "text/plain" },
     });

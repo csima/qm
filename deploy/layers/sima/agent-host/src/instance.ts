@@ -100,8 +100,13 @@ export class Instance extends DurableObject<Env> {
     };
   }
 
-  async ensureRunning(): Promise<void> {
+  private async assertLive(): Promise<void> {
     this.assertActive();
+    if (await this.ctx.storage.get("removing")) throw new Error("the instance is being deleted");
+  }
+
+  async ensureRunning(): Promise<void> {
+    await this.assertLive();
     if (await this.ctx.storage.get("paused")) throw new Error("the instance is paused");
     if (this.booting) return this.booting;
     if (await this.healthy()) return;
@@ -321,6 +326,7 @@ export class Instance extends DurableObject<Env> {
   }
 
   private async restartPrepared(version?: string): Promise<void> {
+    await this.assertLive();
     if (await this.ctx.storage.get("paused")) throw new Error("the instance is paused; resume it first");
     if (this.booting) throw new Error("the instance is already starting");
     const config = await this.config();
@@ -367,7 +373,13 @@ export class Instance extends DurableObject<Env> {
 
   async alarm(): Promise<void> {
     const config = await this.ctx.storage.get<InstanceConfig>("config");
-    if (!config || (await this.ctx.storage.get("paused"))) return;
+    if (!config) return;
+    const removing = await this.ctx.storage.get<string>("removing");
+    if (removing) {
+      await this.remove(removing);
+      return;
+    }
+    if (await this.ctx.storage.get("paused")) return;
     if (config.ephemeral && Date.now() - (config.createdAt ?? 0) > ONE_OFF_MAX_MS) {
       await this.remove("one-off instance reached its two-hour limit");
       return;
@@ -399,6 +411,7 @@ export class Instance extends DurableObject<Env> {
   private async pauseNow(): Promise<void> {
     const config = await this.config();
     if (config.ephemeral) throw new Error("one-off runs cannot be paused");
+    if (await this.ctx.storage.get("removing")) throw new Error("the instance is being deleted");
     this.halted = "the instance was paused";
     if (!(await this.ctx.storage.get("paused"))) {
       await this.ctx.storage.put("paused", true);
@@ -425,7 +438,7 @@ export class Instance extends DurableObject<Env> {
 
   resume(): Promise<void> {
     return this.serial(async () => {
-      if (this.removed) throw new Error("the instance was removed");
+      if (this.removed || (await this.ctx.storage.get("removing"))) throw new Error("the instance is being deleted");
       const config = await this.config();
       if (!(await this.ctx.storage.get("paused"))) return;
       await this.ctx.storage.delete("paused");
@@ -444,12 +457,15 @@ export class Instance extends DurableObject<Env> {
     if (!config) return;
     this.halted = "the instance was removed";
     this.removed = true;
+    await this.ctx.storage.put("removing", reason);
+    await this.ctx.storage.setAlarm(Date.now() + ALARM_MS);
     await this.env.DB.batch([
       this.env.DB.prepare(
         "UPDATE instances SET status = 'deleting', updated_at = ? WHERE id = ? AND status != 'deleted'",
       ).bind(Date.now(), config.id),
       this.failOpenTasks(config.id, "the instance was removed"),
     ]);
+    if (this.ctx.container?.running) await this.container.destroy().catch(() => undefined);
     await this.booting?.catch(() => undefined);
     await this.saving;
     if (this.ctx.container?.running) await this.container.destroy().catch(() => undefined);

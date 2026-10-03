@@ -10,5 +10,5 @@ credentials:
     required: true
 egress: []
 deny:
-  - pattern: '(^|[;&|(]|\bsudo)\s*rm\s[^;&|]*notebooks'
+  - pattern: '(^|[\s;&|(){}!"`])(\S*/)?rm\s[^;&|\n]*notebooks'
     reason: deletes notebook files directly; use notes remove instead

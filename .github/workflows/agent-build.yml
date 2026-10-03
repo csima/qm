@@ -12,10 +12,6 @@ on:
       subdir:
         description: Directory holding agent.yaml (repository root when empty)
         required: false
-      builder_ref:
-        description: Ref of this repository whose agent-host builder runs the build
-        required: false
-        default: claude/cloudflare-env-setup-jie3o9
 permissions:
   contents: read
 concurrency:
@@ -36,12 +32,12 @@ jobs:
           REF: ${{ inputs.ref }}
           SUBDIR: ${{ inputs.subdir }}
         run: |
-          [[ "$SOURCE" =~ ^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { echo "source must be https://github.com/<owner>/<repo>"; exit 1; }
+          [[ "$SOURCE" =~ ^https://github\.com/[A-Za-z0-9_-][A-Za-z0-9_.-]*/[A-Za-z0-9_-][A-Za-z0-9_.-]*$ ]] || { echo "source must be https://github.com/<owner>/<repo>"; exit 1; }
           [[ -z "$REF" || "$REF" =~ ^[A-Za-z0-9._/-]{1,200}$ ]] || { echo "ref has unexpected characters"; exit 1; }
           [[ -z "$SUBDIR" || "$SUBDIR" =~ ^[A-Za-z0-9._/-]{1,200}$ ]] || { echo "subdir has unexpected characters"; exit 1; }
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
         with:
-          ref: ${{ inputs.builder_ref }}
+          ref: ${{ vars.AGENT_BUILDER_REF || github.sha }}
           persist-credentials: false
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
         with:

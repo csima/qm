@@ -15,6 +15,20 @@ export function can(caller: Caller, row: Pick<InstanceRow, "owner" | "sharing">,
   return false;
 }
 
+export function influencers(row: Pick<InstanceRow, "owner" | "sharing">): string[] {
+  const { message, attach, admin } = row.sharing;
+  return [...new Set([row.owner, ...message, ...attach, ...admin])];
+}
+
+export function callAllowed(
+  person: string,
+  source: Pick<InstanceRow, "owner" | "sharing">,
+  target: Pick<InstanceRow, "owner" | "sharing">,
+): boolean {
+  const asPerson = (email: string): Caller => ({ email, via: "agent", admin: false });
+  return [person, ...influencers(source)].every((email) => can(asPerson(email), target, "message"));
+}
+
 export function isEmail(value: string): boolean {
   return EMAIL.test(value);
 }
@@ -51,4 +65,22 @@ export function hostAllowed(host: string, allow: string[]): boolean {
 
 export function modelKey(headers: Headers): string | null {
   return headers.get("x-api-key") ?? /^Bearer (\S+)$/i.exec(headers.get("authorization") ?? "")?.[1] ?? null;
+}
+
+export function reachesOut(body: string): boolean {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return false;
+  }
+  if (!parsed || typeof parsed !== "object") return false;
+  const request = parsed as { mcp_servers?: unknown; tools?: unknown };
+  if (request.mcp_servers !== undefined) return true;
+  return (
+    Array.isArray(request.tools) &&
+    request.tools.some(
+      (t) => typeof (t as { type?: unknown })?.type === "string" && /^web_fetch/.test((t as { type: string }).type),
+    )
+  );
 }

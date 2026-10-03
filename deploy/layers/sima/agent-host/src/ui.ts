@@ -230,7 +230,7 @@ document.querySelectorAll("[data-save]").forEach((b) => b.addEventListener("clic
 }
 
 export function instancePage(caller: Caller, row: InstanceRow, sessions: string[]): Response {
-  const paused = row.status === "paused";
+  const paused = row.status === "paused" || row.status === "deleting";
   const canMessage = !paused && can(caller, row, "message");
   const canAttach = !paused && can(caller, row, "attach");
   const canAdmin = can(caller, row, "admin");
@@ -260,11 +260,13 @@ ${
 <div id="instance-creds"></div>
 <div class="bar"><button id="save-creds" class="primary">Save credentials</button>${paused ? "" : `<button id="restart">Restart now</button>`}<span id="creds-status" class="muted"></span></div></fieldset>
 <fieldset><legend>Lifecycle</legend><p class="muted">${
-        paused
-          ? "Paused: the container is stopped and its files are saved. Resuming starts it again where it left off."
-          : "Pausing saves the instance's files, stops its container and fails tasks in progress. Deleting removes the instance and its saved files for good."
+        row.status === "deleting"
+          ? "Deleting did not finish; it is retried automatically, or press Delete again."
+          : paused
+            ? "Paused: the container is stopped and its files are saved. Resuming starts it again where it left off."
+            : "Pausing saves the instance's files, stops its container and fails tasks in progress. Deleting removes the instance and its saved files for good."
       }</p>
-<div class="bar">${paused ? `<button id="resume" class="primary">Resume</button>` : row.ephemeral ? "" : `<button id="pause">Pause</button>`}${caller.admin || caller.email === row.owner ? `<button id="delete" class="danger">Delete</button>` : ""}<span id="life-status" class="muted"></span></div></fieldset>`
+<div class="bar">${row.status === "deleting" ? "" : paused ? `<button id="resume" class="primary">Resume</button>` : row.ephemeral ? "" : `<button id="pause">Pause</button>`}${caller.admin || caller.email === row.owner ? `<button id="delete" class="danger">Delete</button>` : ""}<span id="life-status" class="muted"></span></div></fieldset>`
     : ""
 }
 <h2>Recent tasks</h2><table class="tasks"><thead><tr><th>When</th><th>From</th><th>Status</th><th>Message / result</th></tr></thead><tbody id="tasks"></tbody></table>

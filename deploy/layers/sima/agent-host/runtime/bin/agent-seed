@@ -4,11 +4,17 @@ set -a
 . /run/agent/env
 set +a
 mkdir -p "$HOME/.claude"
+ensure_object() {
+  if ! jq -e 'type == "object"' "$1" >/dev/null 2>&1; then
+    if [ -e "$1" ]; then mv "$1" "$1.invalid-$(date +%s)"; fi
+    echo '{}' >"$1"
+  fi
+}
 version=$(claude --version | awk '{print $1}')
 key_tail=""
 if [ -n "${ANTHROPIC_API_KEY:-}" ]; then key_tail=${ANTHROPIC_API_KEY: -20}; fi
 config="$HOME/.claude.json"
-[ -f "$config" ] || echo '{}' >"$config"
+ensure_object "$config"
 jq --arg v "$version" --arg t "$key_tail" '
   .hasCompletedOnboarding = true
   | .lastOnboardingVersion = $v
@@ -20,7 +26,7 @@ jq --arg v "$version" --arg t "$key_tail" '
     end' "$config" >"$config.tmp"
 mv "$config.tmp" "$config"
 settings="$HOME/.claude/settings.json"
-[ -f "$settings" ] || echo '{}' >"$settings"
+ensure_object "$settings"
 jq -s '
   (.[0] * .[1])
   | if (.hooks | type) == "object" then

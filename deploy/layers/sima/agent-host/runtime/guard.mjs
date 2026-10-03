@@ -1,14 +1,14 @@
 import fs from "node:fs";
 import path from "node:path";
 
-const COMMAND_START = String.raw`(^|[;&|("'\u0060]|\bsudo)\s*`;
+const WORD_START = String.raw`(^|[\s;&|()\{}!"'\u0060])(\S*/)?`;
 
 export const BASELINE = [
   {
-    pattern: String.raw`${COMMAND_START}rm\s+(-\S+\s+)*(/|/\*|~|~/|\$HOME/?)(\s|$)`,
+    pattern: String.raw`${WORD_START}rm\s+(-\S+\s+)*(/|/\*|~|~/|\$HOME/?|\$\{HOME\}/?)(\s|$|;|&|\|)`,
     reason: "deletes the root or home directory",
   },
-  { pattern: String.raw`${COMMAND_START}mkfs(\.\w+)?\s`, reason: "formats a filesystem" },
+  { pattern: String.raw`${WORD_START}mkfs(\.\w+)?\s`, reason: "formats a filesystem" },
   {
     pattern: String.raw`\bdd\b[^|;&]*\bof=/dev/(sd|hd|vd|xvd|nvme|mmcblk|disk|mapper/)`,
     reason: "writes to a raw disk",
@@ -22,7 +22,7 @@ export function compile(rules) {
 
 export function blockedReason(input, rules) {
   if (input?.tool_name !== "Bash") return null;
-  const command = String(input.tool_input?.command ?? "").replace(/\s+/g, " ");
+  const command = String(input.tool_input?.command ?? "").replace(/[ \t]+/g, " ");
   const hit = rules.find((rule) => rule.regex.test(command));
   return hit ? `this command ${hit.reason ?? `matches the deny rule ${hit.pattern}`}` : null;
 }

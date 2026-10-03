@@ -130,7 +130,7 @@ async function instancesRoute(
     });
   }
   if (!sub && method === "DELETE") {
-    await removeInstance(env, caller, await instanceFor(env, caller, id, "admin"));
+    await removeInstance(env, caller, await instanceFor(env, caller, id, "view"));
     return json({ deleted: true });
   }
   if (sub === "pause" && method === "POST") {

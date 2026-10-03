@@ -1,8 +1,8 @@
-import type { Caller, Env } from "./env.ts";
+import type { Caller, Env, InstanceRow } from "./env.ts";
 import { HttpError } from "./http.ts";
 import { instanceFor } from "./instances.ts";
-import { can } from "./policy.ts";
-import { getInstance, getTask, listInstances, listVersions, type TaskRow } from "./store.ts";
+import { callAllowed } from "./policy.ts";
+import { INACTIVE, getInstance, getTask, listInstances, listVersions, type TaskRow } from "./store.ts";
 import { TASK_ID, pollTask, submitTask } from "./tasks.ts";
 
 export const MAX_DEPTH = 4;
@@ -10,7 +10,8 @@ export const MAX_OPEN_CALLS = 8;
 const MAX_WAIT_S = 50;
 
 export interface Principal {
-  caller: Caller;
+  source: InstanceRow;
+  person: string;
   parent: string | null;
   chain: string[];
 }
@@ -26,31 +27,23 @@ export function nextChain(chain: string[], self: string, target: string): string
 export const callVia = (instance: string) => `agent:${instance}`;
 
 export async function principal(env: Env, instance: string, parent: unknown): Promise<Principal> {
-  const person = (email: string): Caller => ({ email, via: "agent", admin: false });
-  if (parent !== undefined && parent !== null && parent !== "") {
-    const task = typeof parent === "string" && TASK_ID.test(parent) ? await getTask(env, parent) : null;
-    if (!task || task.instance !== instance || (task.status !== "running" && task.status !== "queued"))
-      throw new HttpError(403, "the task you are working on is not active on this instance");
-    return {
-      caller: person(task.caller),
-      parent: task.id,
-      chain: task.chain ? (JSON.parse(task.chain) as string[]) : [],
-    };
-  }
-  const busy = await env.DB.prepare(
-    "SELECT 1 FROM tasks WHERE instance = ? AND status IN ('queued', 'running') LIMIT 1",
-  )
-    .bind(instance)
-    .first();
-  if (busy)
-    throw new HttpError(
-      409,
-      "a task is in progress on this instance, so a call from outside it cannot act for anyone; make the call while handling that task",
-    );
   const row = await getInstance(env, instance);
-  if (!row) throw new HttpError(404, "this instance no longer exists");
-  return { caller: person(row.owner), parent: null, chain: [] };
+  if (!row || INACTIVE.includes(row.status)) throw new HttpError(404, "this instance is not active");
+  if (parent === undefined || parent === null || parent === "")
+    return { source: row, person: row.owner, parent: null, chain: [] };
+  const task = typeof parent === "string" && TASK_ID.test(parent) ? await getTask(env, parent) : null;
+  if (!task || task.instance !== instance || (task.status !== "running" && task.status !== "queued"))
+    throw new HttpError(403, "the task you are working on is not active on this instance");
+  return {
+    source: row,
+    person: task.caller,
+    parent: task.id,
+    chain: task.chain ? (JSON.parse(task.chain) as string[]) : [],
+  };
 }
+
+const NOT_CALLABLE =
+  "everyone who can message, attach to or administer this instance must be allowed to message the target, because any of them can steer this agent";
 
 export async function registry(env: Env, instance: string, parent: unknown) {
   const who = await principal(env, instance, parent);
@@ -58,9 +51,9 @@ export async function registry(env: Env, instance: string, parent: unknown) {
     (await listVersions(env)).map((v) => [`${v.agent} ${v.version}`, v.manifest.description]),
   );
   return {
-    actingFor: who.caller.email,
+    actingFor: who.person,
     agents: (await listInstances(env))
-      .filter((r) => r.id !== instance && !r.ephemeral && can(who.caller, r, "message"))
+      .filter((r) => r.id !== instance && !r.ephemeral && callAllowed(who.person, who.source, r))
       .map((r) => ({
         instance: r.id,
         agent: r.agent,
@@ -72,19 +65,21 @@ export async function registry(env: Env, instance: string, parent: unknown) {
 
 export async function placeCall(env: Env, ctx: ExecutionContext, instance: string, body: Record<string, unknown>) {
   const who = await principal(env, instance, body.parent);
+  const caller: Caller = { email: who.person, via: "agent", admin: false };
   const target = typeof body.target === "string" ? body.target : "";
-  const row = await instanceFor(env, who.caller, target, "message");
+  const row = await instanceFor(env, caller, target, "message");
   if (row.ephemeral) throw new HttpError(404, "one-off runs cannot be called");
+  if (!callAllowed(who.person, who.source, row)) throw new HttpError(403, `cannot call ${target}: ${NOT_CALLABLE}`);
   const chain = nextChain(who.chain, instance, target);
   const task = await submitTask(
     env,
     ctx,
-    who.caller,
+    caller,
     row,
     { message: body.message, session: body.session },
     { parent: who.parent, chain, maxOpen: MAX_OPEN_CALLS },
   );
-  return { call: callView(task), actingFor: who.caller.email };
+  return { call: callView(task), actingFor: who.person };
 }
 
 export function callView(task: TaskRow) {

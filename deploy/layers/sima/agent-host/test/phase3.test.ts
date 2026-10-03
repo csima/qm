@@ -5,7 +5,7 @@ import { guardConfig, parseManifest } from "../scripts/lib.mjs";
 import { systemPrompt } from "../src/boot-env.ts";
 import { parseSource } from "../src/builds.ts";
 import { MAX_DEPTH, nextChain } from "../src/delegation.ts";
-import { MODEL_HOSTS, hostAllowed, modelKey } from "../src/policy.ts";
+import { MODEL_HOSTS, callAllowed, hostAllowed, modelKey, reachesOut } from "../src/policy.ts";
 
 const BASE = `mirror.gcr.io/library/debian@sha256:${"a".repeat(64)}`;
 const bash = (command: string) => ({ tool_name: "Bash", tool_input: { command } });
@@ -63,7 +63,7 @@ test("the command guard blocks baseline and agent rules for Bash only", () => {
     "man mkfs",
   ])
     assert.equal(blockedReason(bash(command), rules), null, command);
-  assert.equal(blockedReason(bash("OP   vault\n delete Shared"), rules), "this command deletes a vault");
+  assert.equal(blockedReason(bash("OP   vault  delete Shared"), rules), "this command deletes a vault");
   assert.match(blockedReason(bash("npx wrangler delete my-worker"), rules)!, /deny rule wrangler delete/);
   assert.equal(blockedReason({ tool_name: "Write", tool_input: { command: "rm -rf /" } }, rules), null);
 });
@@ -137,4 +137,28 @@ test("egress wildcards on shared hosting suffixes are refused", () => {
     parseManifest(`name: ops\ndescription: d\nbase: ${BASE}\negress: [a.workers.dev, A.workers.dev]\n`).egress,
     ["a.workers.dev"],
   );
+});
+
+test("model API requests that make Anthropic fetch other hosts are refused", () => {
+  assert.equal(reachesOut(JSON.stringify({ model: "m", messages: [] })), false);
+  assert.equal(
+    reachesOut(JSON.stringify({ tools: [{ name: "Bash", input_schema: {} }, { type: "web_search_20250305" }] })),
+    false,
+  );
+  assert.equal(reachesOut(JSON.stringify({ tools: [{ type: "web_fetch_20250910", name: "web_fetch" }] })), true);
+  assert.equal(reachesOut(JSON.stringify({ mcp_servers: [{ url: "https://evil.example" }] })), true);
+  assert.equal(reachesOut("not json"), false);
+});
+
+test("an agent call needs the target to be messageable by everyone who can steer the caller", () => {
+  const none = { message: [], attach: [], admin: [] };
+  const source = { owner: "o@x.io", sharing: { ...none, message: ["m@x.io"] } };
+  const openTarget = { owner: "o@x.io", sharing: { ...none, message: ["m@x.io"] } };
+  const ownerOnly = { owner: "o@x.io", sharing: none };
+  assert.equal(callAllowed("m@x.io", source, openTarget), true);
+  assert.equal(callAllowed("o@x.io", source, ownerOnly), false);
+  assert.equal(callAllowed("o@x.io", { owner: "o@x.io", sharing: none }, ownerOnly), true);
+  const everyone = { owner: "o@x.io", sharing: { ...none, attach: ["*"] } };
+  assert.equal(callAllowed("o@x.io", everyone, openTarget), false);
+  assert.equal(callAllowed("o@x.io", everyone, { owner: "p@x.io", sharing: { ...none, message: ["*"] } }), true);
 });
