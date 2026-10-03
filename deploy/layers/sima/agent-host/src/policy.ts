@@ -26,7 +26,10 @@ export function callAllowed(
   target: Pick<InstanceRow, "owner" | "sharing">,
 ): boolean {
   const asPerson = (email: string): Caller => ({ email, via: "agent", admin: false });
-  return [person, ...influencers(source)].every((email) => can(asPerson(email), target, "message"));
+  return (
+    [person, ...influencers(source)].every((email) => can(asPerson(email), target, "message")) &&
+    influencers(target).every((email) => can(asPerson(email), source, "message"))
+  );
 }
 
 export function isEmail(value: string): boolean {
@@ -67,20 +70,30 @@ export function modelKey(headers: Headers): string | null {
   return headers.get("x-api-key") ?? /^Bearer (\S+)$/i.exec(headers.get("authorization") ?? "")?.[1] ?? null;
 }
 
-export function reachesOut(body: string): boolean {
+const MODEL_POST_PATHS = new Set(["/v1/messages", "/v1/messages/count_tokens"]);
+
+function fetchesElsewhere(value: unknown, depth = 0): boolean {
+  if (depth > 64) return true;
+  if (Array.isArray(value)) return value.some((v) => fetchesElsewhere(v, depth + 1));
+  if (!value || typeof value !== "object") return false;
+  const node = value as Record<string, unknown>;
+  if ("mcp_servers" in node) return true;
+  if (typeof node.type === "string" && /^web_fetch/.test(node.type)) return true;
+  const source = node.source as { type?: unknown } | undefined;
+  if (source && typeof source === "object" && source.type === "url") return true;
+  return Object.values(node).some((v) => fetchesElsewhere(v, depth + 1));
+}
+
+export function modelRequestAllowed(method: string, path: string, headers: Headers, body: string | null): boolean {
+  const encoding = headers.get("content-encoding");
+  if (encoding && encoding !== "identity") return false;
+  if (method === "GET" || method === "HEAD") return true;
+  if (method !== "POST" || !MODEL_POST_PATHS.has(path) || body === null) return false;
   let parsed: unknown;
   try {
     parsed = JSON.parse(body);
   } catch {
     return false;
   }
-  if (!parsed || typeof parsed !== "object") return false;
-  const request = parsed as { mcp_servers?: unknown; tools?: unknown };
-  if (request.mcp_servers !== undefined) return true;
-  return (
-    Array.isArray(request.tools) &&
-    request.tools.some(
-      (t) => typeof (t as { type?: unknown })?.type === "string" && /^web_fetch/.test((t as { type: string }).type),
-    )
-  );
+  return Boolean(parsed) && typeof parsed === "object" && !Array.isArray(parsed) && !fetchesElsewhere(parsed);
 }

@@ -448,17 +448,19 @@ export class Instance extends DurableObject<Env> {
     });
   }
 
-  remove(reason: string): Promise<void> {
+  async remove(reason: string): Promise<void> {
+    if (!(await this.ctx.storage.get("config"))) return;
+    this.halted = "the instance was removed";
+    this.removed = true;
+    await this.ctx.storage.put("removing", reason);
+    await this.ctx.storage.setAlarm(Date.now() + ALARM_MS);
+    if (this.ctx.container?.running) await this.container.destroy().catch(() => undefined);
     return this.serial(() => this.removeNow(reason));
   }
 
   private async removeNow(reason: string): Promise<void> {
     const config = await this.ctx.storage.get<InstanceConfig>("config");
     if (!config) return;
-    this.halted = "the instance was removed";
-    this.removed = true;
-    await this.ctx.storage.put("removing", reason);
-    await this.ctx.storage.setAlarm(Date.now() + ALARM_MS);
     await this.env.DB.batch([
       this.env.DB.prepare(
         "UPDATE instances SET status = 'deleting', updated_at = ? WHERE id = ? AND status != 'deleted'",

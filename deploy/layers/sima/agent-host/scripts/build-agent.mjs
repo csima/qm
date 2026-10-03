@@ -122,12 +122,13 @@ const image = `registry.cloudflare.com/${account}/${repository}@${digest}`;
 const sql = path.join(work, "version.sql");
 fs.writeFileSync(
   sql,
-  `INSERT INTO versions (agent, version, image, commit_sha, source, manifest, created_at) VALUES (${[
+  `INSERT INTO versions (agent, version, image, commit_sha, source, subdir, manifest, created_at) VALUES (${[
     manifest.name,
     version,
     image,
     commit,
     source.replace(/\/\/[^@/]+@/, "//"),
+    args.subdir ?? "",
     JSON.stringify(manifest),
   ]
     .map(sqlString)

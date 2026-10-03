@@ -3,9 +3,9 @@ import { test } from "node:test";
 import { BASELINE, blockedReason, compile } from "../runtime/guard.mjs";
 import { guardConfig, parseManifest } from "../scripts/lib.mjs";
 import { systemPrompt } from "../src/boot-env.ts";
-import { parseSource } from "../src/builds.ts";
+import { needsBuild, parseSource } from "../src/builds.ts";
 import { MAX_DEPTH, nextChain } from "../src/delegation.ts";
-import { MODEL_HOSTS, callAllowed, hostAllowed, modelKey, reachesOut } from "../src/policy.ts";
+import { MODEL_HOSTS, callAllowed, hostAllowed, modelKey, modelRequestAllowed } from "../src/policy.ts";
 
 const BASE = `mirror.gcr.io/library/debian@sha256:${"a".repeat(64)}`;
 const bash = (command: string) => ({ tool_name: "Bash", tool_input: { command } });
@@ -47,6 +47,19 @@ test("the command guard blocks baseline and agent rules for Bash only", () => {
     "mkfs.ext4 /dev/sda",
     "dd if=/dev/zero of=/dev/sda",
     ":(){ :|:& };:",
+    "cd /tmp && rm -rf /",
+    "bash -c 'rm -rf ~'",
+    "cd /tmp\nrm -rf ~",
+    "/bin/rm -rf /",
+    "nohup rm -rf ~",
+    "sudo -u root rm -rf /",
+    "env rm -rf /",
+    "if true; then rm -rf /; fi",
+    "rm -rf \\\n/",
+    "\\rm -rf /",
+    "rm -rf ~/*",
+    "rm -rf $HOME/*",
+    "sudo mkfs /dev/vdb",
   ])
     assert.ok(blockedReason(bash(command), rules), command);
   for (const command of [
@@ -61,6 +74,9 @@ test("the command guard blocks baseline and agent rules for Bash only", () => {
     "docker run --rm -it --workdir / img sh",
     "which mkfs",
     "man mkfs",
+    "git rm -r src/old",
+    "npm run rm-cache",
+    "rm -rf ./dist",
   ])
     assert.equal(blockedReason(bash(command), rules), null, command);
   assert.equal(blockedReason(bash("OP   vault  delete Shared"), rules), "this command deletes a vault");
@@ -140,14 +156,23 @@ test("egress wildcards on shared hosting suffixes are refused", () => {
 });
 
 test("model API requests that make Anthropic fetch other hosts are refused", () => {
-  assert.equal(reachesOut(JSON.stringify({ model: "m", messages: [] })), false);
+  const ok = (body: unknown, path = "/v1/messages", headers = new Headers()) =>
+    modelRequestAllowed("POST", path, headers, typeof body === "string" ? body : JSON.stringify(body));
+  assert.equal(ok({ model: "m", messages: [{ role: "user", content: "hi" }] }), true);
+  assert.equal(ok({ tools: [{ name: "Bash", input_schema: {} }, { type: "web_search_20250305" }] }), true);
+  assert.equal(ok({ tools: [{ type: "web_fetch_20250910", name: "web_fetch" }] }), false);
+  assert.equal(ok({ mcp_servers: [{ url: "https://evil.example" }] }), false);
   assert.equal(
-    reachesOut(JSON.stringify({ tools: [{ name: "Bash", input_schema: {} }, { type: "web_search_20250305" }] })),
+    ok({ messages: [{ role: "user", content: [{ type: "image", source: { type: "url", url: "https://e/?d=x" } }] }] }),
     false,
   );
-  assert.equal(reachesOut(JSON.stringify({ tools: [{ type: "web_fetch_20250910", name: "web_fetch" }] })), true);
-  assert.equal(reachesOut(JSON.stringify({ mcp_servers: [{ url: "https://evil.example" }] })), true);
-  assert.equal(reachesOut("not json"), false);
+  assert.equal(ok({ requests: [{ params: { mcp_servers: [] } }] }, "/v1/messages/batches"), false);
+  assert.equal(ok({ model: "m" }, "/v1/files"), false);
+  assert.equal(ok("not json"), false);
+  assert.equal(ok("[1]"), false);
+  assert.equal(ok({ model: "m" }, "/v1/messages", new Headers({ "content-encoding": "gzip" })), false);
+  assert.equal(modelRequestAllowed("GET", "/v1/models", new Headers(), null), true);
+  assert.equal(modelRequestAllowed("DELETE", "/v1/files/x", new Headers(), null), false);
 });
 
 test("an agent call needs the target to be messageable by everyone who can steer the caller", () => {
@@ -160,5 +185,17 @@ test("an agent call needs the target to be messageable by everyone who can steer
   assert.equal(callAllowed("o@x.io", { owner: "o@x.io", sharing: none }, ownerOnly), true);
   const everyone = { owner: "o@x.io", sharing: { ...none, attach: ["*"] } };
   assert.equal(callAllowed("o@x.io", everyone, openTarget), false);
-  assert.equal(callAllowed("o@x.io", everyone, { owner: "p@x.io", sharing: { ...none, message: ["*"] } }), true);
+  assert.equal(callAllowed("o@x.io", everyone, { owner: "p@x.io", sharing: { ...none, message: ["*"] } }), false);
+  const mallory = { owner: "mal@x.io", sharing: { ...none, message: ["o@x.io"] } };
+  assert.equal(callAllowed("o@x.io", ownerOnly, mallory), false);
+});
+
+test("a source is rebuilt for a new commit, retried after 30 minutes, and given up after three tries", () => {
+  const now = 10 * 60 * 60_000;
+  const row = { last_sha: "a", last_build_at: now - 60_000, attempts: 1 };
+  assert.equal(needsBuild(row, "b", false, now), true);
+  assert.equal(needsBuild(row, "b", true, now), false);
+  assert.equal(needsBuild(row, "a", false, now), false);
+  assert.equal(needsBuild({ ...row, last_build_at: now - 31 * 60_000 }, "a", false, now), true);
+  assert.equal(needsBuild({ ...row, last_build_at: now - 31 * 60_000, attempts: 3 }, "a", false, now), false);
 });

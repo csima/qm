@@ -4,6 +4,7 @@ import { audit, auditBy } from "./store.ts";
 
 const REPO = /^https:\/\/github\.com\/([A-Za-z0-9_-][A-Za-z0-9_.-]*)\/([A-Za-z0-9_-][A-Za-z0-9_.-]*)$/;
 const RETRY_MS = 30 * 60_000;
+const MAX_ATTEMPTS = 3;
 const REF = /^[A-Za-z0-9._][A-Za-z0-9._/-]{0,199}$/;
 const SOURCE_ID = /^s_[0-9a-f]{8}$/;
 
@@ -16,6 +17,7 @@ export interface SourceRow {
   last_sha: string | null;
   last_build_at: number | null;
   last_error: string | null;
+  attempts: number;
   created_by: string;
   created_at: number;
 }
@@ -104,29 +106,32 @@ async function startBuild(env: Env, row: SourceRow, sha: string | null): Promise
     (e: Error) => e.message,
   );
   await env.DB.prepare(
-    "UPDATE sources SET last_sha = COALESCE(?, last_sha), last_build_at = ?, last_error = ? WHERE id = ?",
+    "UPDATE sources SET attempts = CASE WHEN last_sha IS ? THEN attempts + 1 ELSE 1 END, last_sha = COALESCE(?, last_sha), last_build_at = ?, last_error = ? WHERE id = ?",
   )
-    .bind(sha, Date.now(), error, row.id)
+    .bind(sha ?? row.last_sha, sha, Date.now(), error, row.id)
     .run();
   return error;
 }
 
-async function built(env: Env, sha: string): Promise<boolean> {
+async function built(env: Env, row: SourceRow, sha: string): Promise<boolean> {
   return (
-    (await env.DB.prepare("SELECT 1 FROM versions WHERE commit_sha IN (?, ?) LIMIT 1")
-      .bind(sha, `${sha}-dirty`)
+    (await env.DB.prepare(
+      "SELECT 1 FROM versions WHERE source = ? AND COALESCE(subdir, '') = ? AND commit_sha IN (?, ?) LIMIT 1",
+    )
+      .bind(row.repo, row.subdir, sha, `${sha}-dirty`)
       .first()) !== null
   );
 }
 
 export function needsBuild(
-  row: Pick<SourceRow, "last_sha" | "last_build_at">,
+  row: Pick<SourceRow, "last_sha" | "last_build_at" | "attempts">,
   sha: string,
   isBuilt: boolean,
   now: number,
-) {
+): boolean {
   if (isBuilt) return false;
-  return sha !== row.last_sha || now - (row.last_build_at ?? 0) > RETRY_MS;
+  if (sha !== row.last_sha) return true;
+  return row.attempts < MAX_ATTEMPTS && now - (row.last_build_at ?? 0) > RETRY_MS;
 }
 
 export function runsUrl(env: Env): string {
@@ -193,7 +198,7 @@ export async function pollSources(env: Env): Promise<void> {
         .run();
       continue;
     }
-    if (!needsBuild(row, sha, await built(env, sha), Date.now())) continue;
+    if (!needsBuild(row, sha, await built(env, row, sha), Date.now())) continue;
     const error = await startBuild(env, row, sha);
     await audit(env, {
       actor: "host",

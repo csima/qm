@@ -1,11 +1,11 @@
 import fs from "node:fs";
 import path from "node:path";
 
-const WORD_START = String.raw`(^|[\s;&|()\{}!"'\u0060])(\S*/)?`;
+const WORD_START = String.raw`(^|[\s;&|()\{}!"'\u0060\\])(\S*/)?`;
 
 export const BASELINE = [
   {
-    pattern: String.raw`${WORD_START}rm\s+(-\S+\s+)*(/|/\*|~|~/|\$HOME/?|\$\{HOME\}/?)(\s|$|;|&|\|)`,
+    pattern: String.raw`${WORD_START}rm\s+(-\S+\s+)*(/|/\*|~|~/|~/\*|\$HOME/?|\$HOME/\*|\$\{HOME\}/?|\$\{HOME\}/\*)(\s|$|[;&|)"'\u0060])`,
     reason: "deletes the root or home directory",
   },
   { pattern: String.raw`${WORD_START}mkfs(\.\w+)?\s`, reason: "formats a filesystem" },
@@ -22,7 +22,9 @@ export function compile(rules) {
 
 export function blockedReason(input, rules) {
   if (input?.tool_name !== "Bash") return null;
-  const command = String(input.tool_input?.command ?? "").replace(/[ \t]+/g, " ");
+  const command = String(input.tool_input?.command ?? "")
+    .replace(/\\\r?\n/g, " ")
+    .replace(/[ \t]+/g, " ");
   const hit = rules.find((rule) => rule.regex.test(command));
   return hit ? `this command ${hit.reason ?? `matches the deny rule ${hit.pattern}`}` : null;
 }

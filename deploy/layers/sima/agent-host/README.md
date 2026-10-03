@@ -30,7 +30,8 @@ scripts, other agents ─┼─► Worker (Access JWT or API key) ─► Instanc
   internet access and every HTTP and HTTPS request goes through the host's `EgressProxy`, which lets
   through the listed hosts (`*.` matches subdomains only; wildcards on shared hosting suffixes such as
   `*.workers.dev` are refused), plus `api.anthropic.com` only for requests carrying the instance's own
-  model key or token and not asking Anthropic to fetch other hosts (`mcp_servers`, `web_fetch` tools),
+  model key or token and limited to reads and `POST /v1/messages` (and `count_tokens`) whose JSON never asks Anthropic to
+  fetch other hosts (`mcp_servers`, `web_fetch` tools or `url` sources anywhere in the body),
   answers 403 otherwise and audits `egress.blocked` (once a minute per host, at
   most 30 a minute per instance). HTTPS is intercepted with a CA that
   Cloudflare creates per container; `agent-boot` adds it to the system store and sets
@@ -39,8 +40,8 @@ scripts, other agents ─┼─► Worker (Access JWT or API key) ─► Instanc
 - **Command guard.** Claude Code's hooks live in `/etc/claude-code/managed-settings.json`, which the
   agent cannot edit or disable. The `PreToolUse` hook blocks Bash commands matching a small baseline
   (deleting `/` or `~`, `mkfs`, `dd` to a disk, fork bombs) plus the agent's
-  `deny: ["regex", {pattern, reason}]` rules (case-insensitive, whitespace collapsed), tells the model
-  why and audits `harness.blocked`. Baseline rules only match at a command start; the check gets five
+  `deny: ["regex", {pattern, reason}]` rules (case-insensitive; line continuations joined and runs of spaces collapsed, lines kept apart), tells the model
+  why and audits `harness.blocked`. Baseline rules match `rm` and `mkfs` as words anywhere, so a quoted mention such as `echo "rm -rf /"` is blocked too; the check gets five
   seconds and blocks when it cannot finish. It is a speed bump against mistakes, not a sandbox: the agent can
   still write a script that does the same thing.
 
@@ -53,11 +54,14 @@ made for the person whose task is in progress in that session (from agentd's
 when there is none; that person shows in the target's header and in the audit.
 
 Every session of a container runs as the same Unix user, so the host cannot prove which person a call
-really comes from. Authorization therefore does not rest on that identity alone: a call is allowed only
-if the named person **and everyone who can message, attach to or administer the calling instance**
-(its owner and sharing lists; `*` means anyone) may message the target. Whoever can steer the caller
-could have messaged the target themselves, so a call never widens anyone's reach. Host-admin rights
-never apply to calls. The host records the parent task and the chain of instances, refuses loops and
+really comes from, and the target's reply can steer the caller. Authorization therefore rests on the
+people who can steer either side: a call is allowed only if the named person **and everyone who can
+message, attach to or administer the calling instance** (owner and sharing lists; `*` means anyone) may
+message the target, **and everyone who can steer the target may message the calling instance**. Calls
+can then only connect instances whose steerers could already reach each other directly. A call made
+without a current task acts for the owner and is refused while any task is open on the instance, so
+loop and depth limits cannot be dodged by leaving the parent out. Agents cannot message private
+sessions. Host-admin rights never apply to calls. The host records the parent task and the chain of instances, refuses loops and
 chains deeper than four, and allows eight open calls per instance, checked in the statement that
 queues the call. The target sees `via agent:<caller instance>` in the header. Sessions named `p-…`
 (LibreChat private sessions) only take messages from their person, the instance owner and host admins.

@@ -29,8 +29,16 @@ export const callVia = (instance: string) => `agent:${instance}`;
 export async function principal(env: Env, instance: string, parent: unknown): Promise<Principal> {
   const row = await getInstance(env, instance);
   if (!row || INACTIVE.includes(row.status)) throw new HttpError(404, "this instance is not active");
-  if (parent === undefined || parent === null || parent === "")
+  if (parent === undefined || parent === null || parent === "") {
+    const busy = await env.DB.prepare(
+      "SELECT 1 FROM tasks WHERE instance = ? AND status IN ('queued', 'running') LIMIT 1",
+    )
+      .bind(instance)
+      .first();
+    if (busy)
+      throw new HttpError(409, "a task is in progress on this instance; make the call from the session handling it");
     return { source: row, person: row.owner, parent: null, chain: [] };
+  }
   const task = typeof parent === "string" && TASK_ID.test(parent) ? await getTask(env, parent) : null;
   if (!task || task.instance !== instance || (task.status !== "running" && task.status !== "queued"))
     throw new HttpError(403, "the task you are working on is not active on this instance");
@@ -69,6 +77,8 @@ export async function placeCall(env: Env, ctx: ExecutionContext, instance: strin
   const target = typeof body.target === "string" ? body.target : "";
   const row = await instanceFor(env, caller, target, "message");
   if (row.ephemeral) throw new HttpError(404, "one-off runs cannot be called");
+  if (typeof body.session === "string" && body.session.startsWith("p-"))
+    throw new HttpError(403, "agents cannot message private sessions");
   if (!callAllowed(who.person, who.source, row)) throw new HttpError(403, `cannot call ${target}: ${NOT_CALLABLE}`);
   const chain = nextChain(who.chain, instance, target);
   const task = await submitTask(
