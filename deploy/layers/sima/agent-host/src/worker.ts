@@ -1,10 +1,19 @@
 import { HttpError, api, attachRequest, instanceFor, json } from "./api.ts";
 import { callerFromAccess, callerFromBearer } from "./auth.ts";
 import type { Env } from "./env.ts";
-import { listInstances } from "./store.ts";
+import { pollSources, runsUrl } from "./builds.ts";
+import { INACTIVE, listInstances } from "./store.ts";
 import { usableAgents } from "./access.ts";
 import { personalNames } from "./credentials.ts";
-import { credentialsPage, homePage, instancePage, keysPage, newInstancePage, unauthorizedPage } from "./ui.ts";
+import {
+  buildsPage,
+  credentialsPage,
+  homePage,
+  instancePage,
+  keysPage,
+  newInstancePage,
+  unauthorizedPage,
+} from "./ui.ts";
 
 export { HostCallback } from "./callback.ts";
 export { EgressProxy } from "./egress.ts";
@@ -40,6 +49,10 @@ async function route(req: Request, env: Env, ctx: ExecutionContext): Promise<Res
   if (req.method !== "GET") throw new HttpError(405, "method not allowed");
   if (path === "/") return homePage(caller, await listInstances(env), await usableAgents(env, caller));
   if (path === "/keys") return keysPage(caller);
+  if (path === "/builds") {
+    if (!caller.admin) throw new HttpError(403, "only admins can manage agent builds");
+    return buildsPage(caller, runsUrl(env));
+  }
   if (path === "/credentials") {
     const saved = await personalNames(env, caller.email);
     const agents = await usableAgents(env, caller);
@@ -87,7 +100,8 @@ export default {
     }
   },
   async scheduled(_event, env, ctx) {
-    for (const row of (await listInstances(env)).filter((r) => r.status !== "paused")) {
+    ctx.waitUntil(pollSources(env).catch((e) => console.error(`poll sources: ${(e as Error).message}`)));
+    for (const row of (await listInstances(env)).filter((r) => !INACTIVE.includes(r.status))) {
       ctx.waitUntil(
         env.INSTANCE.getByName(row.id)
           .ensureRunning()

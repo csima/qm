@@ -3,8 +3,9 @@ import { test } from "node:test";
 import { BASELINE, blockedReason, compile } from "../runtime/guard.mjs";
 import { guardConfig, parseManifest } from "../scripts/lib.mjs";
 import { systemPrompt } from "../src/boot-env.ts";
+import { parseSource } from "../src/builds.ts";
 import { MAX_DEPTH, nextChain } from "../src/delegation.ts";
-import { hostAllowed } from "../src/policy.ts";
+import { MODEL_HOSTS, hostAllowed, modelKey } from "../src/policy.ts";
 
 const BASE = `mirror.gcr.io/library/debian@sha256:${"a".repeat(64)}`;
 const bash = (command: string) => ({ tool_name: "Bash", tool_input: { command } });
@@ -17,7 +18,8 @@ test("the egress allowlist matches exact hosts, subdomain wildcards and the mode
   assert.equal(hostAllowed("api.cloudflare.com", allow), true);
   assert.equal(hostAllowed("cloudflare.com", allow), false);
   assert.equal(hostAllowed("notcloudflare.com", allow), false);
-  assert.equal(hostAllowed("api.anthropic.com", []), true);
+  assert.equal(hostAllowed("api.anthropic.com", []), false);
+  assert.equal(hostAllowed("api.anthropic.com", MODEL_HOSTS), true);
   assert.equal(hostAllowed("example.com", []), false);
 });
 
@@ -55,6 +57,10 @@ test("the command guard blocks baseline and agent rules for Bash only", () => {
     "op item get x",
     "dd if=a of=/dev/null",
     "echo mkfs-check",
+    "docker run --rm -w / alpine ls",
+    "docker run --rm -it --workdir / img sh",
+    "which mkfs",
+    "man mkfs",
   ])
     assert.equal(blockedReason(bash(command), rules), null, command);
   assert.equal(blockedReason(bash("OP   vault\n delete Shared"), rules), "this command deletes a vault");
@@ -85,5 +91,50 @@ test("the system prompt explains agent calls and any egress limit", () => {
   assert.match(
     systemPrompt({ id: "ops-main", agent: "ops" }, ["api.example.com"]),
     /limited to these hosts: api\.example\.com/,
+  );
+});
+
+test("build sources accept GitHub repos with plain refs and directories", () => {
+  assert.deepEqual(parseSource({ repo: "https://github.com/csima/agent-x.git/" }), {
+    repo: "https://github.com/csima/agent-x",
+    ref: "",
+    subdir: "",
+    auto: true,
+  });
+  assert.deepEqual(
+    parseSource({ repo: "https://github.com/a/b", ref: "release/v1", subdir: "agents/x", auto: false }),
+    {
+      repo: "https://github.com/a/b",
+      ref: "release/v1",
+      subdir: "agents/x",
+      auto: false,
+    },
+  );
+  for (const bad of [
+    { repo: "https://gitlab.com/a/b" },
+    { repo: "https://github.com/a/b/c" },
+    { repo: "https://github.com/a/b", ref: "x y" },
+    { repo: "https://github.com/a/b", subdir: "../up" },
+    { repo: "https://github.com/a/b", ref: "--upload-pack=x" },
+    { repo: "https://github.com/a/b", auto: "yes" },
+  ])
+    assert.throws(() => parseSource(bad), JSON.stringify(bad));
+});
+
+test("model API keys are read from either header", () => {
+  assert.equal(modelKey(new Headers({ "x-api-key": "k1" })), "k1");
+  assert.equal(modelKey(new Headers({ authorization: "Bearer t1" })), "t1");
+  assert.equal(modelKey(new Headers({ authorization: "Basic x" })), null);
+  assert.equal(modelKey(new Headers()), null);
+});
+
+test("egress wildcards on shared hosting suffixes are refused", () => {
+  assert.throws(
+    () => parseManifest(`name: ops\ndescription: d\nbase: ${BASE}\negress: ["*.workers.dev", "*.co.uk"]\n`),
+    (e: Error) => /egress\[0\] \*\.workers\.dev would allow/.test(e.message) && /egress\[1\]/.test(e.message),
+  );
+  assert.deepEqual(
+    parseManifest(`name: ops\ndescription: d\nbase: ${BASE}\negress: [a.workers.dev, A.workers.dev]\n`).egress,
+    ["a.workers.dev"],
   );
 });

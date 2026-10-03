@@ -46,7 +46,9 @@ export const MODEL_HOSTS = ["api.anthropic.com"];
 
 export function hostAllowed(host: string, allow: string[]): boolean {
   const name = host.toLowerCase().replace(/\.$/, "");
-  return [...MODEL_HOSTS, ...allow].some((pattern) =>
-    pattern.startsWith("*.") ? name.endsWith(pattern.slice(1)) : name === pattern,
-  );
+  return allow.some((pattern) => (pattern.startsWith("*.") ? name.endsWith(pattern.slice(1)) : name === pattern));
+}
+
+export function modelKey(headers: Headers): string | null {
+  return headers.get("x-api-key") ?? /^Bearer (\S+)$/i.exec(headers.get("authorization") ?? "")?.[1] ?? null;
 }

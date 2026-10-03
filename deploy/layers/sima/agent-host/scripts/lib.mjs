@@ -15,6 +15,44 @@ const DIGEST_PINNED = /^[a-z0-9][a-z0-9._\/:-]*@sha256:[0-9a-f]{64}$/;
 const LABEL = "[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?";
 const EGRESS_HOST = new RegExp(`^(\\*\\.)?${LABEL}(\\.${LABEL})+$`);
 const MAX_RULES = 100;
+const SHARED_SUFFIXES = new Set([
+  "co.uk",
+  "org.uk",
+  "com.au",
+  "co.jp",
+  "co.nz",
+  "com.br",
+  "workers.dev",
+  "pages.dev",
+  "r2.dev",
+  "trycloudflare.com",
+  "cloudflareaccess.com",
+  "github.io",
+  "githubusercontent.com",
+  "gitlab.io",
+  "vercel.app",
+  "netlify.app",
+  "herokuapp.com",
+  "fly.dev",
+  "onrender.com",
+  "replit.app",
+  "glitch.me",
+  "ngrok.io",
+  "ngrok-free.app",
+  "ngrok.app",
+  "loca.lt",
+  "deno.dev",
+  "appspot.com",
+  "web.app",
+  "firebaseapp.com",
+  "cloudfront.net",
+  "amazonaws.com",
+  "azurewebsites.net",
+  "blob.core.windows.net",
+  "googleusercontent.com",
+  "storage.googleapis.com",
+  "s3.amazonaws.com",
+]);
 
 export function parseManifest(text) {
   const raw = parse(text);
@@ -70,11 +108,13 @@ export function parseManifest(text) {
     if (!Array.isArray(raw.egress) || raw.egress.length > MAX_RULES)
       fail(`egress must be a list of at most ${MAX_RULES} host names`);
     else {
-      egress = [...new Set(raw.egress.map((h) => (typeof h === "string" ? h.toLowerCase() : h)))];
-      egress.forEach((h, i) => {
-        if (typeof h !== "string" || !EGRESS_HOST.test(h))
+      raw.egress.forEach((h, i) => {
+        if (typeof h !== "string" || !EGRESS_HOST.test(h.toLowerCase()))
           fail(`egress[${i}] must be a host name like api.example.com or *.example.com`);
+        else if (h.startsWith("*.") && SHARED_SUFFIXES.has(h.slice(2).toLowerCase()))
+          fail(`egress[${i}] ${h} would allow anyone's site; list the exact hosts instead`);
       });
+      egress = [...new Set(raw.egress.filter((h) => typeof h === "string").map((h) => h.toLowerCase()))];
     }
   }
   const deny = raw.deny ?? [];

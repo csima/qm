@@ -1,4 +1,5 @@
 import { requireUse, setUseList, usableAgents } from "./access.ts";
+import { addSource, buildNow, listSources, removeSource } from "./builds.ts";
 import { parseChange, personalNames, updatePersonal } from "./credentials.ts";
 import type { Caller, Env } from "./env.ts";
 import { HttpError, json, readBody } from "./http.ts";
@@ -233,6 +234,12 @@ export async function api(
     case "tasks":
       if (id && !sub && req.method === "GET")
         return waitForTask(env, caller, id, Number(new URL(req.url).searchParams.get("wait") ?? 0));
+      break;
+    case "sources":
+      if (!id && req.method === "GET") return json(await listSources(env, caller));
+      if (!id && req.method === "POST") return json(await addSource(env, caller, await readBody(req)), 201);
+      if (id && !sub && req.method === "DELETE") return json(await removeSource(env, caller, id));
+      if (id && sub === "build" && req.method === "POST") return json(await buildNow(env, caller, id), 202);
       break;
     case "keys":
       if (!id && req.method === "POST") return mintKey(env, caller, await readBody(req));

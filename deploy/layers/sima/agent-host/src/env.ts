@@ -13,6 +13,10 @@ export interface Env {
   DEFAULT_ANTHROPIC_API_KEY?: string;
   DEFAULT_CLAUDE_CODE_OAUTH_TOKEN?: string;
   LIBRECHAT_GATEWAY_KEY?: string;
+  GITHUB_BUILD_TOKEN?: string;
+  BUILD_REPO: string;
+  BUILD_WORKFLOW: string;
+  BUILD_WORKFLOW_REF: string;
 }
 
 export type Via = "access" | "api_key" | "admin_token" | "agent" | "librechat";

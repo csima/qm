@@ -279,6 +279,7 @@ async function advance(name, queued) {
   if (task) {
     if (!task.deliveredAt) {
       if (await paneIdle(name)) {
+        await setCurrent(name, task.id);
         await deliver(name, task);
         task.deliveredAt = now;
       } else if (now - task.takenAt > READY_TIMEOUT_MS) {
@@ -296,7 +297,6 @@ async function advance(name, queued) {
   if (state.busy && (await quiet(name, state, 0))) state.busy = false;
   if (!queued || state.busy) return;
   if (!(await claim(queued))) return;
-  await setCurrent(name, queued.id);
   state.current = {
     ...queued,
     marker: `${HEADER_PREFIX} ${queued.id}`,

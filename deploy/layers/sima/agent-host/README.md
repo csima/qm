@@ -28,8 +28,10 @@ scripts, other agents ─┼─► Worker (Access JWT or API key) ─► Instanc
 
 - **Egress allowlist.** With `egress: [api.example.com, "*.example.org"]` the container starts without
   internet access and every HTTP and HTTPS request goes through the host's `EgressProxy`, which lets
-  through the listed hosts (`*.` matches subdomains only) plus `api.anthropic.com`, answers 403
-  otherwise and audits `egress.blocked` (once a minute per host). HTTPS is intercepted with a CA that
+  through the listed hosts (`*.` matches subdomains only; wildcards on shared hosting suffixes such as
+  `*.workers.dev` are refused), plus `api.anthropic.com` only for requests carrying the instance's own
+  model key or token, answers 403 otherwise and audits `egress.blocked` (once a minute per host, at
+  most 30 a minute per instance). HTTPS is intercepted with a CA that
   Cloudflare creates per container; `agent-boot` adds it to the system store and sets
   `NODE_EXTRA_CA_CERTS`. `egress: []` allows only the model API. Leaving `egress` out keeps open
   internet. Other ports and DNS for unlisted names do not work in restricted mode.
@@ -37,7 +39,8 @@ scripts, other agents ─┼─► Worker (Access JWT or API key) ─► Instanc
   agent cannot edit or disable. The `PreToolUse` hook blocks Bash commands matching a small baseline
   (deleting `/` or `~`, `mkfs`, `dd` to a disk, fork bombs) plus the agent's
   `deny: ["regex", {pattern, reason}]` rules (case-insensitive, whitespace collapsed), tells the model
-  why and audits `harness.blocked`. It is a speed bump against mistakes, not a sandbox: the agent can
+  why and audits `harness.blocked`. Baseline rules only match at a command start; the check gets five
+  seconds and blocks when it cannot finish. It is a speed bump against mistakes, not a sandbox: the agent can
   still write a script that does the same thing.
 
 ## Agents calling agents
@@ -45,11 +48,26 @@ scripts, other agents ─┼─► Worker (Access JWT or API key) ─► Instanc
 Inside a container, `agent-list` shows the instances the current person may message and
 `agent-call <instance> "<message>"` sends one a task and waits for the reply (`--wait <id>` resumes a
 long one). The call runs as the person whose task is in progress in that session (from agentd's
-`/var/lib/agent/current/<session>`), or as the instance owner when nobody's task is running (for
-example, someone typing in an attached terminal: attach access already means acting with the owner's
-credentials). The host checks that person's `message` permission on the target, records the parent task
-and the chain of instances, refuses loops and chains deeper than four, and allows eight open calls per
-instance. The target sees `via agent:<caller instance>` in the header.
+`/var/lib/agent/current/<session>`, written when the message is delivered), or as the instance owner
+when no task at all is queued or running on the instance (for example, someone typing in an attached
+terminal: attach access already means acting with the owner's credentials). A call without a current
+task while any task is open is refused, so a message cannot borrow the owner's identity. Delegated
+callers never get host-admin rights: the person needs ownership or a `message` share on the target.
+The host records the parent task and the chain of instances, refuses loops and chains deeper than four,
+and allows eight open calls per instance (checked in the same statement that queues the call). The
+target sees `via agent:<caller instance>` in the header. Sessions named `p-…` (LibreChat private
+sessions) only take messages from their person, the instance owner and host admins.
+
+## Builds from GitHub
+
+On the Builds page (admins) or `POST /sources {repo, ref?, subdir?, auto?}`, register an agent repo.
+The host builds it at once and, with `auto`, checks the branch head every five minutes and builds new
+commits. A build is a run of `.github/workflows/agent-build.yml` in `BUILD_REPO`, dispatched on
+`BUILD_WORKFLOW_REF` (GitHub only dispatches workflows present on that ref), which runs
+`build-agent` from the `builder_ref` input. Needed: host secret `GITHUB_BUILD_TOKEN` (fine-grained
+token: Actions read/write on `BUILD_REPO`, Contents read on agent repos), and repository secrets
+`CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `AGENT_REPOS_TOKEN` (Contents read on agent repos)
+in `BUILD_REPO`.
 
 ## Build an agent
 
@@ -88,7 +106,7 @@ Worker checks the key). The browser uses the same handlers under `/ui/v1/*` with
 | GET (WebSocket)     | `/instances/:id/attach?session=main`               | attach                                                       | Joins the live terminal; recorded to R2                                                            |
 | POST                | `/instances/:id/restart`, `/instances/:id/upgrade` | admin                                                        | Save state, reboot (on a newer version)                                                            |
 | POST                | `/instances/:id/pause`, `/instances/:id/resume`    | admin                                                        | Save state and stop the container (open tasks fail; messages and attach refused) / start it again  |
-| DELETE              | `/instances/:id`                                   | admin                                                        | Remove the instance and its saved state (attach recordings and audit stay); the id is not reused   |
+| DELETE              | `/instances/:id`                                   | owner or host admin                                          | Remove the instance and its saved state (attach recordings and audit stay); the id is not reused   |
 | GET                 | `/instances/:id/audit`                             | admin                                                        | Audit trail                                                                                        |
 | GET / POST / DELETE | `/keys`, `/keys/:id`                               | anyone signed in                                             | List, mint (shown once) and revoke your API keys                                                   |
 

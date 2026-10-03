@@ -52,7 +52,7 @@ fieldset{border:1px solid var(--line);border-radius:8px;padding:12px;margin:12px
 export function page(title: string, caller: Caller, body: string, head = ""): Response {
   const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${esc(title)}</title><style>${STYLE}</style>${head}</head><body>
-<header><a href="/">Agent host</a><nav><a href="/credentials">Credentials</a><a href="/keys">API keys</a><span>${esc(caller.email)}</span></nav></header>
+<header><a href="/">Agent host</a><nav>${caller.admin ? `<a href="/builds">Builds</a>` : ""}<a href="/credentials">Credentials</a><a href="/keys">API keys</a><span>${esc(caller.email)}</span></nav></header>
 <main>${body}</main></body></html>`;
   return new Response(html, { headers: PAGE_HEADERS });
 }
@@ -239,7 +239,7 @@ export function instancePage(caller: Caller, row: InstanceRow, sessions: string[
 <h1>${esc(row.id)} ${pill(row.status)}</h1>
 <p class="muted">${esc(row.agent)} · <code>${esc(row.version)}</code> · owner ${esc(row.owner)}${row.last_error ? ` · <span class="error">${esc(row.last_error)}</span>` : ""}</p>
 <div class="bar"><label>Session <select id="session">${options}</select></label>
-${canAdmin ? `<button id="new-session">New session</button>` : ""}
+${canAdmin && !paused ? `<button id="new-session">New session</button>` : ""}
 ${canAttach ? `<button id="attach" class="primary">Attach terminal</button>` : ""}</div>
 ${canAttach ? `<div id="term" hidden></div>` : ""}
 ${
@@ -264,7 +264,7 @@ ${
           ? "Paused: the container is stopped and its files are saved. Resuming starts it again where it left off."
           : "Pausing saves the instance's files, stops its container and fails tasks in progress. Deleting removes the instance and its saved files for good."
       }</p>
-<div class="bar">${paused ? `<button id="resume" class="primary">Resume</button>` : `<button id="pause">Pause</button>`}<button id="delete" class="danger">Delete</button><span id="life-status" class="muted"></span></div></fieldset>`
+<div class="bar">${paused ? `<button id="resume" class="primary">Resume</button>` : row.ephemeral ? "" : `<button id="pause">Pause</button>`}${caller.admin || caller.email === row.owner ? `<button id="delete" class="danger">Delete</button>` : ""}<span id="life-status" class="muted"></span></div></fieldset>`
     : ""
 }
 <h2>Recent tasks</h2><table class="tasks"><thead><tr><th>When</th><th>From</th><th>Status</th><th>Message / result</th></tr></thead><tbody id="tasks"></tbody></table>
@@ -367,6 +367,41 @@ $("#attach")?.addEventListener("click", async () => {
 });
 </script>`;
   return page(`${row.id} · Agent host`, caller, body, `<link rel="stylesheet" href="${XTERM}/css/xterm.css">`);
+}
+
+export function buildsPage(caller: Caller, runs: string): Response {
+  const body = `<h1>Agent builds</h1>
+<p class="muted">Each source is a GitHub repo (and optionally a branch and the directory holding <code>agent.yaml</code>). Adding one builds it now; with auto on, the host checks for new commits every five minutes and builds them. Builds run as <a href="${esc(runs)}">GitHub Actions</a> and deploy a new version; instances keep their version until upgraded.</p>
+<table><thead><tr><th>Repo</th><th>Ref</th><th>Dir</th><th>Auto</th><th>Last commit</th><th>Last build</th><th></th></tr></thead><tbody id="sources"></tbody></table>
+<fieldset><legend>Add a source</legend>
+<div class="bar"><input id="repo" placeholder="https://github.com/owner/agent-repo" size="40"><input id="ref" placeholder="branch (default)"><input id="subdir" placeholder="directory (root)"><label><input type="checkbox" id="auto" checked> auto</label><button id="add" class="primary">Add and build</button></div>
+<div id="status" class="muted"></div></fieldset>
+<script type="module">${CLIENT}
+async function load() {
+  const { sources } = await call("/sources");
+  $("#sources").innerHTML = sources.map((s) => "<tr><td><a href='" + esc(s.repo) + "'>" + esc(s.repo.replace("https://github.com/", "")) + "</a></td><td>" + esc(s.ref || "default") + "</td><td>" + esc(s.subdir || "/") + "</td><td>" + (s.auto ? "yes" : "no") + "</td><td><code>" + esc((s.last_sha || "").slice(0, 8)) + "</code></td><td>" + (s.last_build_at ? new Date(s.last_build_at).toLocaleString() : "") + (s.last_error ? "<div class='error'>" + esc(s.last_error) + "</div>" : "") + "</td><td><div class='bar'><button data-build='" + esc(s.id) + "'>Build now</button><button class='danger' data-remove='" + esc(s.id) + "'>Remove</button></div></td></tr>").join("") || "<tr><td colspan='7' class='muted'>No sources yet.</td></tr>";
+}
+document.addEventListener("click", async (e) => {
+  const b = e.target.closest("button");
+  if (!b) return;
+  try {
+    if (b.id === "add") {
+      $("#status").textContent = "Adding…";
+      await call("/sources", { method: "POST", body: JSON.stringify({ repo: $("#repo").value.trim(), ref: $("#ref").value.trim(), subdir: $("#subdir").value.trim(), auto: $("#auto").checked }) });
+      $("#status").textContent = "Added; the build is running on GitHub Actions.";
+    } else if (b.dataset.build) {
+      await call("/sources/" + b.dataset.build + "/build", { method: "POST", body: "{}" });
+      $("#status").textContent = "Build started on GitHub Actions.";
+    } else if (b.dataset.remove) {
+      if (!confirm("Stop building this source? Built versions stay.")) return;
+      await call("/sources/" + b.dataset.remove, { method: "DELETE" });
+    } else return;
+  } catch (err) { $("#status").textContent = err.message; }
+  load();
+});
+load().catch((e) => ($("#status").textContent = e.message));
+</script>`;
+  return page("Builds · Agent host", caller, body);
 }
 
 export function keysPage(caller: Caller): Response {

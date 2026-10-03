@@ -1,9 +1,14 @@
 import fs from "node:fs";
 import path from "node:path";
 
+const COMMAND_START = String.raw`(^|[;&|("'\u0060]|\bsudo)\s*`;
+
 export const BASELINE = [
-  { pattern: String.raw`\brm\s+(-\S+\s+)*(/|/\*|~|~/|\$HOME/?)(\s|$)`, reason: "deletes the root or home directory" },
-  { pattern: String.raw`(^|[\s;&|(])mkfs(\.\w+)?(\s|$)`, reason: "formats a filesystem" },
+  {
+    pattern: String.raw`${COMMAND_START}rm\s+(-\S+\s+)*(/|/\*|~|~/|\$HOME/?)(\s|$)`,
+    reason: "deletes the root or home directory",
+  },
+  { pattern: String.raw`${COMMAND_START}mkfs(\.\w+)?\s`, reason: "formats a filesystem" },
   {
     pattern: String.raw`\bdd\b[^|;&]*\bof=/dev/(sd|hd|vd|xvd|nvme|mmcblk|disk|mapper/)`,
     reason: "writes to a raw disk",

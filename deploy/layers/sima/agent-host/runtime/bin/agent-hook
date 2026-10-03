@@ -5,7 +5,7 @@ event="$1"
 input=$(cat)
 reason=""
 if [ "$event" = tool ]; then
-  reason=$(printf '%s' "$input" | node /opt/agent-host/guard.mjs) || reason="the command guard could not check this command"
+  reason=$(printf '%s' "$input" | timeout 5 node /opt/agent-host/guard.mjs) || reason="the command guard could not check this command in time"
   [ -n "$reason" ] && event=blocked
 fi
 line=$(printf '%s' "$input" | jq -c --arg e "$event" --arg w "$window" --arg r "$reason" '. + {agent_event: $e, window: $w, at: now} + (if $r == "" then {} else {blocked_reason: $r} end)' 2>/dev/null)

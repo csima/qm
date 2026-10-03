@@ -80,7 +80,7 @@ export async function listInstances(env: Pick<Env, "DB">): Promise<InstanceRow[]
 
 export async function setInstanceStatus(env: Pick<Env, "DB">, id: string, status: string, error: string | null = null) {
   await env.DB.prepare(
-    "UPDATE instances SET status = ?, last_error = ?, updated_at = ? WHERE id = ? AND status != 'deleted'",
+    "UPDATE instances SET status = ?, last_error = ?, updated_at = ? WHERE id = ? AND status NOT IN ('deleting', 'deleted')",
   )
     .bind(status, error, Date.now(), id)
     .run();
@@ -115,6 +115,8 @@ export async function recentTasks(env: Pick<Env, "DB">, instance: string, limit 
     .all<TaskRow>();
   return results;
 }
+
+export const INACTIVE = ["paused", "deleting", "deleted"];
 
 export function isTerminal(status: string): boolean {
   return status === "done" || status === "failed";

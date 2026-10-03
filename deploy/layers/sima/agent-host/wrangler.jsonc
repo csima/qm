@@ -30,5 +30,8 @@
     "ACCESS_AUD": "2223f687550cb6c4fd3a12d401b22511fd3a3f8ded450d52c83ff2f24f6b5da9",
     "ADMIN_EMAILS": "caleb@sima.cx",
     "PUBLIC_URL": "https://agents.calebsima.com",
+    "BUILD_REPO": "csima/qm",
+    "BUILD_WORKFLOW": "agent-build.yml",
+    "BUILD_WORKFLOW_REF": "main",
   },
 }

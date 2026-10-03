@@ -5,7 +5,7 @@ import type { Caller, Env, InstanceConfig, InstanceRow, Sharing } from "./env.ts
 import { HttpError, asHttp, hex } from "./http.ts";
 import { can, parseSharing, type Permission } from "./policy.ts";
 import { sealCredentials } from "./secrets.ts";
-import { audit, auditBy, getInstance, getVersion, instanceIdTaken } from "./store.ts";
+import { INACTIVE, audit, auditBy, getInstance, getVersion, instanceIdTaken } from "./store.ts";
 
 export const MAX_OWNED_INSTANCES = 3;
 export const MAX_RUNNING_ONE_OFFS = 2;
@@ -18,8 +18,11 @@ export async function instanceFor(env: Env, caller: Caller, id: string, permissi
   const row = INSTANCE_ID.test(id) ? await getInstance(env, id) : null;
   if (!row || !can(caller, row, "view")) throw new HttpError(404, "no such instance");
   if (!can(caller, row, permission)) throw new HttpError(403, `you do not have ${permission} access to ${id}`);
-  if (row.status === "paused" && (permission === "message" || permission === "attach"))
-    throw new HttpError(409, `${id} is paused; its owner can resume it`);
+  if (INACTIVE.includes(row.status) && (permission === "message" || permission === "attach"))
+    throw new HttpError(
+      409,
+      row.status === "paused" ? `${id} is paused; its owner can resume it` : `${id} is being deleted`,
+    );
   return row;
 }
 
@@ -215,12 +218,13 @@ export async function pauseInstance(env: Env, caller: Caller, row: InstanceRow):
 }
 
 export async function resumeInstance(env: Env, ctx: ExecutionContext, caller: Caller, row: InstanceRow) {
-  await stub(env, row.id).resume();
+  await stub(env, row.id).resume().catch(asHttp(409));
   await audit(env, auditBy(caller, "instance.resume", { instance: row.id }));
   ctx.waitUntil(boot(env, row.id));
 }
 
 export async function removeInstance(env: Env, caller: Caller, row: InstanceRow): Promise<void> {
+  if (!caller.admin && caller.email !== row.owner) throw new HttpError(403, "only the owner can delete an instance");
   await stub(env, row.id).remove(`removed by ${caller.email}`);
   await audit(env, auditBy(caller, "instance.delete", { instance: row.id }));
 }

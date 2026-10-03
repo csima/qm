@@ -24,8 +24,14 @@ settings="$HOME/.claude/settings.json"
 jq -s '
   (.[0] * .[1])
   | if (.hooks | type) == "object" then
-      .hooks |= (map_values(map(select([.hooks[]?.command // ""] | any(startswith("/usr/local/bin/agent-hook")) | not)))
-        | with_entries(select(.value | length > 0)))
+      .hooks |= (map_values(
+          if type == "array" then
+            map(select(
+              [(if type == "object" then .hooks else null end) | if type == "array" then .[] else empty end
+                | (if type == "object" then .command else null end) // "" | tostring]
+              | any(startswith("/usr/local/bin/agent-hook")) | not))
+          else . end)
+        | with_entries(select((.value | type) != "array" or (.value | length > 0))))
     else . end
   | if .hooks == {} then del(.hooks) else . end' "$settings" /opt/agent-host/claude-settings.json >"$settings.tmp"
 mv "$settings.tmp" "$settings"

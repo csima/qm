@@ -1,12 +1,12 @@
 import { WorkerEntrypoint } from "cloudflare:workers";
-import { adminEmails, constantTimeEqual, sha256Hex } from "./auth.ts";
+import { adminEmails, constantTimeEqual } from "./auth.ts";
 import type { Caller, Env, InstanceRow } from "./env.ts";
 import { HttpError } from "./http.ts";
 import { instanceFor, stub } from "./instances.ts";
 import { PRIVATE_SUFFIX, lastUserText, modelsFor, replyText } from "./chat-format.ts";
 import { can, isEmail } from "./policy.ts";
 import { listInstances } from "./store.ts";
-import { pollTask, submitTask } from "./tasks.ts";
+import { pollTask, privateSession, submitTask } from "./tasks.ts";
 
 const WAIT_MS = 10 * 60_000;
 const KEEPALIVE_MS = 15_000;
@@ -73,7 +73,7 @@ export class LibreChatGateway extends WorkerEntrypoint<Env> {
   private async session(caller: Caller, row: InstanceRow, isPrivate: boolean): Promise<string> {
     if (!isPrivate) return "main";
     if (!can(caller, row, "admin")) throw new HttpError(403, "private sessions need admin access to the instance");
-    const name = `p-${(await sha256Hex(caller.email)).slice(0, 12)}`;
+    const name = await privateSession(caller.email);
     await stub(this.env, row.id)
       .addSession(name)
       .catch((e) => {
