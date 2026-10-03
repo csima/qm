@@ -48,6 +48,7 @@
     "ALLOW_SOCIAL_LOGIN": "false",
     "ALLOW_SOCIAL_REGISTRATION": "false",
     "ENDPOINTS": "agents,anthropic",
+    "SCHEDULES_SINGLE_PROCESS": "true",
     "AWS_ENDPOINT_URL": "https://2e95467d53149ad81f57ebb41234e38d.r2.cloudflarestorage.com",
     "AWS_REGION": "auto",
     "AWS_BUCKET_NAME": "librechat-files",

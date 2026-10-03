@@ -1,3 +1,7 @@
 FROM registry.librechat.ai/librechat-ai/librechat-rag-api-dev-lite@sha256:a62ce2221b43a9bb57fa6cb733e7047c80132960272c33d5704028f3071a1251
+RUN sed -i 's/pool_args = {"dsn": DSN}/pool_args = {"dsn": DSN, "min_size": 0, "max_size": 3}/' app/services/database.py \
+ && sed -i 's/engine_args: dict = {"pool_pre_ping": pool_pre_ping}/engine_args: dict = {"pool_pre_ping": pool_pre_ping, "pool_size": 2, "max_overflow": 1}/' app/services/vector_store/factory.py \
+ && grep -q '"max_size": 3' app/services/database.py \
+ && grep -q '"max_overflow": 1' app/services/vector_store/factory.py
 COPY rag-prestart.py /app/rag-prestart.py
 CMD ["sh", "-c", "python /app/rag-prestart.py && exec python main.py"]

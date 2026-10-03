@@ -30,6 +30,13 @@ database password (`RAGSVC_*`) never reaches LibreChat.
   on start. Embeddings come from Workers AI (`@cf/baai/bge-m3`): the RAG API calls
   `http://embeddings.internal/v1/embeddings`, which the Worker serves through its `AI`
   binding in OpenAI's response format, so no API key enters a container.
+- **Connection budget:** the PlanetScale database allows 25 connections (22 for clients)
+  and qm shares it. `Dockerfile.rag` caps the RAG API at 6 (asyncpg pool 0–3, SQLAlchemy
+  2 + 1 overflow) and fails the build if the upstream lines it patches move. qm's core is
+  capped through `QM_CORE_ENV_JSON` (`DATABASE_POOL_MAX=6`, `DATABASE_DIRECT_POOL_MAX=6`).
+- **Agents:** a fresh install has none. Create them in the Agent Builder and share them
+  from there; the marketplace lists agents shared with you. Scheduled agent runs need
+  `SCHEDULES_SINGLE_PROCESS=true`, which holds because LibreChat runs as one instance.
 - **Off for now:** code interpreter and web search (web search needs search, scraper and
   reranker API keys). LibreChat sleeps after 2 hours without traffic, so scheduled chats
   only fire while it is awake.
@@ -48,5 +55,5 @@ npx wrangler deploy --secrets-file secrets.json   # first deploy; later deploys 
 `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `MEILI_MASTER_KEY` and `RAGSVC_DB_PASSWORD`. Keep `CREDS_KEY`/`CREDS_IV` stable: they
 encrypt stored user credentials.
 
-Building the images only pulls and copies files, so it needs Docker but runs no commands
-inside the build.
+Building the images needs Docker. The only build step is the RAG pool-size patch, which
+runs `sed` with no network access.
