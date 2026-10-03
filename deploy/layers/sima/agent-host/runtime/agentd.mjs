@@ -31,18 +31,27 @@ function log(...parts) {
   console.log(new Date().toISOString(), ...parts);
 }
 
+const looksLikeHeader = (line) =>
+  line
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]/gu, "")
+    .startsWith("agenthosttask");
+
 export function sanitizeMessage(text) {
   return text
+    .replace(/[\u2028\u2029\u0085]/g, "\n")
+    .normalize("NFKC")
+    .replace(/\p{Cf}/gu, "")
     .replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, "")
     .split("\n")
-    .map((line) => (line.trimStart().startsWith(HEADER_PREFIX) ? `(quoted) ${line}` : line))
+    .map((line) => (looksLikeHeader(line) ? `(quoted) ${line}` : line))
     .join("\n");
 }
 
 function windowState(name) {
   let state = windows.get(name);
   if (!state) {
-    state = { offset: 0, partial: "", busy: false, lastEventAt: 0, current: null };
+    state = { offset: 0, partial: "", busy: false, lastEventAt: 0, openTools: 0, transcript: null, current: null };
     windows.set(name, state);
   }
   return state;
@@ -75,6 +84,7 @@ async function send(route, body) {
   });
   if (res.status >= 500) throw new Error(`host returned ${res.status}`);
   if (!res.ok) log("host rejected", route, res.status, await res.text());
+  return res.status;
 }
 
 async function post(route, body) {
@@ -148,8 +158,11 @@ async function finish(state, status, fields) {
 async function handleEvent(name, event) {
   const state = windowState(name);
   state.lastEventAt = Date.now();
+  if (typeof event.transcript_path === "string") state.transcript = event.transcript_path;
+  if (event.agent_event === "tooldone") state.openTools = Math.max(0, state.openTools - 1);
   if (event.agent_event === "start") {
     state.busy = true;
+    state.openTools = 0;
     const task = state.current;
     if (task && !task.promptId && typeof event.prompt === "string" && event.prompt.includes(task.marker)) {
       task.promptId = event.prompt_id;
@@ -157,12 +170,14 @@ async function handleEvent(name, event) {
     }
   } else if (event.agent_event === "stop") {
     state.busy = false;
+    state.openTools = 0;
     const task = state.current;
     if (task?.promptId && event.prompt_id === task.promptId) {
       const result = typeof event.last_assistant_message === "string" ? event.last_assistant_message : "";
       await finish(state, "done", { result: clip(result, MAX_TEXT), sessionId: task.sessionId });
     }
   } else if (event.agent_event === "tool") {
+    state.openTools += 1;
     const input = event.tool_input ?? {};
     const summary = typeof input.command === "string" ? input.command : JSON.stringify(input);
     pendingTools.push({
@@ -182,6 +197,29 @@ async function pane(name) {
 async function paneIdle(name) {
   const text = await pane(name);
   return READY_PATTERN.test(text) && !WORKING_PATTERN.test(text);
+}
+
+async function quiet(name, state, since) {
+  const now = Date.now();
+  if (state.openTools > 0 || now - Math.max(state.lastEventAt, since) <= IDLE_GRACE_MS) return false;
+  if (state.transcript) {
+    const stat = await fs.stat(state.transcript).catch(() => null);
+    if (stat && now - stat.mtimeMs <= IDLE_GRACE_MS) return false;
+  }
+  return paneIdle(name);
+}
+
+async function claim(task) {
+  try {
+    const status = await send(`/v1/tasks/${task.id}`, { status: "running" });
+    if (status !== 409) return true;
+    log("task", task.id, "was already finished by the host; dropping it");
+    await fs.unlink(task.file).catch(() => {});
+    return false;
+  } catch (error) {
+    await post(`/v1/tasks/${task.id}`, { status: "running" });
+    return true;
+  }
 }
 
 async function deliver(name, task) {
@@ -228,17 +266,14 @@ async function advance(name, queued) {
       await finish(state, "failed", { error: "the harness did not accept the message" });
     } else if (now - task.deliveredAt > TASK_TIMEOUT_MS) {
       await finish(state, "failed", { error: "timed out" });
-    } else if (
-      task.promptId &&
-      now - Math.max(state.lastEventAt, task.deliveredAt) > IDLE_GRACE_MS &&
-      (await paneIdle(name))
-    ) {
+    } else if (task.promptId && (await quiet(name, state, task.deliveredAt))) {
       await finish(state, "failed", { error: "the turn ended without a reply (interrupted or an API error)" });
     }
     return;
   }
-  if (state.busy && now - state.lastEventAt > IDLE_GRACE_MS && (await paneIdle(name))) state.busy = false;
+  if (state.busy && (await quiet(name, state, 0))) state.busy = false;
   if (!queued || state.busy) return;
+  if (!(await claim(queued))) return;
   state.current = {
     ...queued,
     marker: `${HEADER_PREFIX} ${queued.id}`,
@@ -246,7 +281,6 @@ async function advance(name, queued) {
     deliveredAt: 0,
     promptId: null,
   };
-  await post(`/v1/tasks/${queued.id}`, { status: "running" });
 }
 
 async function knownWindows() {

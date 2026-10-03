@@ -119,6 +119,8 @@ export class Instance extends DurableObject<Env> {
     if (!this.container.running) return false;
     const bootId = await this.ctx.storage.get<string>("bootId");
     if (!bootId) return false;
+    const bootVersion = await this.ctx.storage.get<string>("bootVersion");
+    if (bootVersion && bootVersion !== (await this.config()).version) return false;
     const health = await this.probe();
     return health !== null && health.ready && health.boot === bootId;
   }
@@ -185,7 +187,7 @@ export class Instance extends DurableObject<Env> {
         }),
       );
       if (out.trim().split("\n").at(-1) !== "ok") throw new Error(`agent-boot did not finish: ${out.slice(-300)}`);
-      await this.ctx.storage.put("bootId", bootId);
+      await this.ctx.storage.put({ bootId, bootVersion: config.version });
       const delivered = [...(await this.ctx.storage.list({ prefix: "q:" })).keys()];
       for (let i = 0; i < delivered.length; i += STORAGE_DELETE_BATCH)
         await this.ctx.storage.delete(delivered.slice(i, i + STORAGE_DELETE_BATCH));
@@ -276,6 +278,7 @@ export class Instance extends DurableObject<Env> {
     if (!(await this.deployed(config.agent, target)))
       throw new Error(`version ${target} of ${config.agent} is not deployed on this host`);
     if (await this.healthy()) await this.snapshot(config.id, true);
+    if (this.booting) throw new Error("the instance started booting; try again");
     config.version = target;
     await this.ctx.storage.put("config", config);
     await this.ctx.storage.delete("bootId");

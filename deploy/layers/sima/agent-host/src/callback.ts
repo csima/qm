@@ -54,7 +54,10 @@ export class HostCallback extends WorkerEntrypoint<Env> {
   private async updateTask(id: string, update: TaskUpdate): Promise<Response> {
     const task = await getTask(this.env, id);
     if (!task || task.instance !== this.instance) return new Response("not found", { status: 404 });
-    if (isTerminal(task.status)) return Response.json({ ignored: true });
+    if (isTerminal(task.status))
+      return update.status === "running"
+        ? Response.json({ error: "task is already finished" }, { status: 409 })
+        : Response.json({ ignored: true });
     const now = Date.now();
     if (update.status === "running") {
       await this.env.DB.prepare(

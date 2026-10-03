@@ -1,6 +1,8 @@
 #!/bin/bash
 set -uo pipefail
 boot=$(cat /run/agent/boot-id 2>/dev/null || true)
+exec 9>/run/agent-health.lock
+flock -w 10 9
 agentd=up
 if ! pgrep -u agent -f /opt/agent-host/agentd.mjs >/dev/null; then
   agentd=down

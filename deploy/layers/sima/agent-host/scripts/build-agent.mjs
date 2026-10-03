@@ -126,7 +126,7 @@ fs.writeFileSync(
     version,
     image,
     commit,
-    source,
+    source.replace(/\/\/[^@/]+@/, "//"),
     JSON.stringify(manifest),
   ]
     .map(sqlString)

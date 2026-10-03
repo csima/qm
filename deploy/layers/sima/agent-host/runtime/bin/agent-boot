@@ -22,6 +22,7 @@ if ! as_agent tmux has-session -t =agent 2>/dev/null; then
   as_agent tmux new-session -d -s agent -n "$first" -x 200 -y 50 "/usr/local/bin/agent-harness $first"
   as_agent tmux set-option -g history-limit 50000
   as_agent tmux set-option -g focus-events on
+  as_agent tmux set-option -g window-size largest
   tail -n +2 /run/agent/sessions | while read -r s; do
     as_agent tmux new-window -d -t =agent: -n "$s" "/usr/local/bin/agent-harness $s"
   done
