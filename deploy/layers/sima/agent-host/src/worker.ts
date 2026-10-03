@@ -2,6 +2,7 @@ import { HttpError, api, attachRequest, instanceFor, json } from "./api.ts";
 import { callerFromAccess, callerFromBearer } from "./auth.ts";
 import type { Env } from "./env.ts";
 import { pollSources, runsUrl } from "./builds.ts";
+import { sweepDrops } from "./drops.ts";
 import { INACTIVE, listInstances } from "./store.ts";
 import { usableAgents } from "./access.ts";
 import { personalNames } from "./credentials.ts";
@@ -101,6 +102,7 @@ export default {
   },
   async scheduled(_event, env, ctx) {
     ctx.waitUntil(pollSources(env).catch((e) => console.error(`poll sources: ${(e as Error).message}`)));
+    ctx.waitUntil(sweepDrops(env).catch((e) => console.error(`sweep secret drops: ${(e as Error).message}`)));
     for (const row of (await listInstances(env)).filter((r) => !INACTIVE.includes(r.status))) {
       ctx.waitUntil(
         env.INSTANCE.getByName(row.id)

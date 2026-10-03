@@ -4,6 +4,7 @@ import { BASELINE, blockedReason, compile } from "../runtime/guard.mjs";
 import { guardConfig, parseManifest } from "../scripts/lib.mjs";
 import { systemPrompt } from "../src/boot-env.ts";
 import { needsBuild, parseSource } from "../src/builds.ts";
+import { recipientOf } from "../src/drops.ts";
 import { MAX_DEPTH, nextChain } from "../src/delegation.ts";
 import { MODEL_HOSTS, callAllowed, hostAllowed, modelKey, modelRequestBody } from "../src/policy.ts";
 
@@ -215,4 +216,12 @@ test("a source is rebuilt for a new commit, retried after 30 minutes, and given 
   assert.equal(needsBuild(row, "a", false, now), false);
   assert.equal(needsBuild({ ...row, last_build_at: now - 31 * 60_000 }, "a", false, now), true);
   assert.equal(needsBuild({ ...row, last_build_at: now - 31 * 60_000, attempts: 3 }, "a", false, now), false);
+});
+
+test("a secret handle can only go to the agent whose open call is being handled", () => {
+  assert.equal(recipientOf({ via: "agent:cf-ops", status: "running" }), "cf-ops");
+  assert.equal(recipientOf({ via: "agent:cf-ops", status: "queued" }), "cf-ops");
+  assert.equal(recipientOf({ via: "agent:cf-ops", status: "done" }), null);
+  assert.equal(recipientOf({ via: "access", status: "running" }), null);
+  assert.equal(recipientOf({ via: "librechat", status: "running" }), null);
 });

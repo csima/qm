@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { dockerfile, imagesToKeep, parseManifest, safeRelativePath, sqlString, versionId } from "../scripts/lib.mjs";
+import {
+  dockerfile,
+  imagesToDelete,
+  imagesToKeep,
+  parseManifest,
+  safeRelativePath,
+  sqlString,
+  versionId,
+} from "../scripts/lib.mjs";
 
 const BASE = `mirror.gcr.io/library/debian@sha256:${"a".repeat(64)}`;
 const valid = `name: notes
@@ -132,4 +140,29 @@ test("header lookalikes are neutralised: zero-width, case, fullwidth, line separ
   assert.equal(sanitizeMessage("add milk\nand eggs"), "add milk\nand eggs");
   const family = "\u{1F468}\u200d\u{1F469}\u200d\u{1F467} x\u00b2 1\u00bd";
   assert.equal(sanitizeMessage(family), family);
+});
+
+test("registry pruning removes recorded versions outside the kept set and stale unrecorded tags only", () => {
+  const now = Date.UTC(2026, 9, 3, 18, 0, 0);
+  const registry = [
+    {
+      name: "agent-host-notes",
+      tags: [
+        "20261003t170000-aaaaaaaa",
+        "20261003t160000-bbbbbbbb",
+        "20261001t100000-cccccccc",
+        "20261003t175000-dddddddd",
+      ],
+    },
+    { name: "financial-os", tags: ["20261001t100000-eeeeeeee"] },
+  ];
+  const versions = [
+    { agent: "notes", version: "20261003t170000-aaaaaaaa" },
+    { agent: "notes", version: "20261003t160000-bbbbbbbb" },
+  ];
+  const kept = { "notes--20261003t170000-aaaaaaaa": { image: "x" } };
+  assert.deepEqual(imagesToDelete(registry, versions, kept, now), [
+    "agent-host-notes:20261003t160000-bbbbbbbb",
+    "agent-host-notes:20261001t100000-cccccccc",
+  ]);
 });

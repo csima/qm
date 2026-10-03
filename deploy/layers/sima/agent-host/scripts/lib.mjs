@@ -173,7 +173,7 @@ export function dockerfile(manifest, { version }) {
   if (manifest.setup) lines.push(`RUN ${secret} sh -c '${CA_EXPORTS}; cd /agent && ./${manifest.setup}'`);
   lines.push(
     "RUN chmod -R a-w /agent",
-    "COPY runtime/agentd.mjs runtime/agent-call.mjs runtime/guard.mjs runtime/guard.json runtime/claude-settings.json /opt/agent-host/",
+    "COPY runtime/agentd.mjs runtime/agent-call.mjs runtime/agent-secret.mjs runtime/guard.mjs runtime/guard.json runtime/claude-settings.json /opt/agent-host/",
     "COPY runtime/managed-settings.json /etc/claude-code/managed-settings.json",
     "COPY --chmod=755 runtime/bin/ /usr/local/bin/",
     `LABEL agent-host.agent="${manifest.name}" agent-host.version="${version}"`,
@@ -195,6 +195,29 @@ export function guardConfig(manifest) {
 
 export function sqlString(value) {
   return value === null || value === undefined ? "NULL" : `'${String(value).replaceAll("'", "''")}'`;
+}
+
+const UNRECORDED_GRACE_MS = 24 * 60 * 60_000;
+
+export function versionTime(tag) {
+  const m = /^(\d{4})(\d{2})(\d{2})t(\d{2})(\d{2})(\d{2})-/.exec(tag);
+  return m ? Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]) : null;
+}
+
+export function imagesToDelete(registry, versions, kept, now = Date.now()) {
+  const recorded = new Set(versions.map((v) => imageKey(v.agent, v.version)));
+  const doomed = [];
+  for (const { name, tags } of registry) {
+    if (!name.startsWith("agent-host-")) continue;
+    const agent = name.slice("agent-host-".length);
+    for (const tag of tags) {
+      const key = imageKey(agent, tag);
+      if (kept[key]) continue;
+      const time = versionTime(tag);
+      if (recorded.has(key) || (time !== null && now - time > UNRECORDED_GRACE_MS)) doomed.push(`${name}:${tag}`);
+    }
+  }
+  return doomed;
 }
 
 export function imagesToKeep(versions, instances, kept = VERSIONS_KEPT) {

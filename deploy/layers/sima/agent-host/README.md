@@ -68,6 +68,15 @@ chains deeper than four, and allows eight open calls per instance, checked in th
 queues the call. The target sees `via agent:<caller instance>` in the header. Sessions named `p-…`
 (LibreChat private sessions) only take messages from their person, the instance owner and host admins.
 
+### Handing secrets between agents
+
+An agent never puts a secret in a reply to another agent. The giver pipes it to `agent-secret put`
+while handling the caller's task; the host seals it (AES-GCM, in D1) for the instance that made that
+call and returns a handle `sh_…`, which the giver sends back as its reply. The caller runs
+`agent-secret get <handle>`: the host releases it once, to that instance only, within ten minutes,
+and deletes it (expired handles are swept by the cron). The value never enters either conversation,
+the task log or the audit log; `secret.put` and `secret.redeem` are audited without it.
+
 ## Builds from GitHub
 
 On the Builds page (admins) or `POST /sources {repo, ref?, subdir?, auto?}`, register an agent repo.
@@ -97,7 +106,9 @@ builds single-platform without provenance attestations (Cloudflare rejects attes
 pushes, records the version in D1 and redeploys. Set `GITHUB_TOKEN` for private repos and
 `BUILD_CA_FILE` when the build machine sits behind a TLS-intercepting proxy; the CA is mounted as a
 build secret and never lands in an image layer. The newest five versions per agent, plus any
-version an instance runs, stay deployed.
+version a live instance runs, stay deployed; after each successful deploy the others are deleted from
+the registry (and tags never recorded in D1 once they are a day old), because the account's 50 GB
+registry limit is shared with every other project.
 
 ## API
 
@@ -154,8 +165,7 @@ Access apps: "Agent host" (owner-only) and "Agent host machine paths" (bypass fo
 ## Not yet built
 
 Drift checks, cost reports, Codex. Accepted risks: agents without an `egress` list have open
-internet; secrets typed into messages or returned by another agent persist in task results, session
-logs and state; typing in an attached terminal can collide with queued messages; an agent can forge its
+internet; secrets typed into messages, or shown to a person in a reply, persist in task results, session logs and state; typing in an attached terminal can collide with queued messages; an agent can forge its
 own hook events and name another session's person in a call's audit trail (authorization does not
 depend on it); restricted agents can still reach the internet indirectly through Anthropic's
 server-side web search; the shared-hosting wildcard list is a short fixed list, not the Public Suffix

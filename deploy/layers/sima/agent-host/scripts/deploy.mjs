@@ -4,7 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { experimental_readRawConfig } from "wrangler";
-import { imagesToKeep } from "./lib.mjs";
+import { imagesToDelete, imagesToKeep } from "./lib.mjs";
 
 const HERE = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const fail = (msg) => {
@@ -24,7 +24,7 @@ const query = (sql) => {
 };
 
 const versions = query("SELECT agent, version, image, created_at FROM versions");
-const instances = query("SELECT agent, version FROM instances");
+const instances = query("SELECT agent, version FROM instances WHERE status != 'deleted'");
 const images = imagesToKeep(versions, instances);
 
 const { rawConfig } = experimental_readRawConfig({ config: path.join(HERE, "wrangler.jsonc") });
@@ -39,4 +39,22 @@ const res = spawnSync("npx", ["--no-install", "wrangler", "deploy", "--config", 
   cwd: HERE,
   stdio: "inherit",
 });
-process.exit(res.status ?? 1);
+if (res.status !== 0 || process.argv.includes("--dry-run")) process.exit(res.status ?? 1);
+
+const listed = spawnSync(
+  "npx",
+  ["--no-install", "wrangler", "containers", "images", "list", "--json", "--filter", "agent-host"],
+  { cwd: HERE, encoding: "utf8" },
+);
+if (listed.status !== 0) {
+  console.warn(`Could not list registry images, nothing pruned:\n${listed.stderr}`);
+  process.exit(0);
+}
+const doomed = imagesToDelete(JSON.parse(listed.stdout), versions, images);
+for (const image of doomed) {
+  const deleted = spawnSync("npx", ["--no-install", "wrangler", "containers", "images", "delete", image], {
+    cwd: HERE,
+    encoding: "utf8",
+  });
+  console.log(deleted.status === 0 ? `Pruned ${image}` : `Could not prune ${image}: ${deleted.stderr.trim()}`);
+}

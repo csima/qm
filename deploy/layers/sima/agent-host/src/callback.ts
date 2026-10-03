@@ -1,5 +1,6 @@
 import { WorkerEntrypoint } from "cloudflare:workers";
 import { placeCall, registry, waitForCall } from "./delegation.ts";
+import { putSecret, redeemSecret } from "./drops.ts";
 import type { Env } from "./env.ts";
 import { HttpError } from "./http.ts";
 import { audit, getInstance, getTask, isTerminal, type AuditEntry } from "./store.ts";
@@ -71,6 +72,9 @@ export class HostCallback extends WorkerEntrypoint<Env> {
     const task = /^\/v1\/tasks\/([a-z0-9_-]{1,64})$/.exec(url.pathname);
     if (task) return this.updateTask(task[1], body as TaskUpdate);
     if (url.pathname === "/v1/events") return this.events(body.tools);
+    if (url.pathname === "/v1/secrets")
+      return Response.json(await putSecret(this.env, this.instance, body), { status: 201 });
+    if (url.pathname === "/v1/secrets/redeem") return Response.json(await redeemSecret(this.env, this.instance, body));
     if (url.pathname === "/v1/calls")
       return Response.json(await placeCall(this.env, this.ctx, this.instance, body), { status: 202 });
     return new Response("not found", { status: 404 });
