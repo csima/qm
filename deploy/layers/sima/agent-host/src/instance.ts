@@ -255,7 +255,8 @@ export class Instance extends DurableObject<Env> {
   }
 
   async addSession(name: string): Promise<string[]> {
-    if (!SESSION_NAME.test(name)) throw new Error("session names are lowercase letters, digits and dashes");
+    if (!SESSION_NAME.test(name))
+      throw new Error("session names start with a letter and use lowercase letters, digits and dashes");
     const config = await this.config();
     if (!config.sessions.includes(name) && config.sessions.length >= MAX_SESSIONS)
       throw new Error(`an instance can have at most ${MAX_SESSIONS} sessions`);
