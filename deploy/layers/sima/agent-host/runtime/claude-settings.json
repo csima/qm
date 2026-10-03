@@ -1,0 +1,9 @@
+{
+  "theme": "dark",
+  "skipDangerousModePermissionPrompt": true,
+  "hooks": {
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "/usr/local/bin/agent-hook start" }] }],
+    "Stop": [{ "hooks": [{ "type": "command", "command": "/usr/local/bin/agent-hook stop" }] }],
+    "PreToolUse": [{ "hooks": [{ "type": "command", "command": "/usr/local/bin/agent-hook tool" }] }]
+  }
+}

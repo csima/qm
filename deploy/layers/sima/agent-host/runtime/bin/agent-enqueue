@@ -1,0 +1,9 @@
+#!/bin/bash
+set -euo pipefail
+task=$(cat)
+id=$(jq -er '.id | select(test("^[a-z0-9_-]{1,64}$"))' <<<"$task")
+file="/var/lib/agent/queue/$(date +%s%N)-$id.json"
+printf '%s\n' "$task" >"$file.tmp"
+chown agent:agent "$file.tmp"
+mv "$file.tmp" "$file"
+echo queued

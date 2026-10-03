@@ -1,0 +1,10 @@
+#!/bin/sh
+window="${AGENT_WINDOW:-main}"
+log="/var/lib/agent/events/$window.jsonl"
+line=$(jq -c --arg e "$1" --arg w "$window" '. + {agent_event: $e, window: $w, at: now}' 2>/dev/null) || exit 0
+printf '%s\n' "$line" >>"$log"
+if [ "$1" = start ]; then
+  session=$(printf '%s' "$line" | jq -r '.session_id // empty')
+  [ -n "$session" ] && printf '%s\n' "$session" >"$HOME/.agent-host/sessions/$window"
+fi
+exit 0

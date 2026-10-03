@@ -1,0 +1,66 @@
+#!/bin/bash
+set -euo pipefail
+usage() {
+  cat <<'EOF'
+notes: keep notebooks of one-line notes
+
+  notes list                       list notebooks
+  notes create <notebook>          create an empty notebook
+  notes add <notebook> <text...>   append a note
+  notes show <notebook>            print notes with line numbers
+  notes remove <notebook> <n>      delete note number n
+
+Requires NOTES_TOKEN. Notebooks live in ~/notebooks.
+EOF
+}
+cmd="${1:-}"
+case "$cmd" in -h | --help | help | "")
+  usage
+  exit 0
+  ;;
+esac
+if [ -z "${NOTES_TOKEN:-}" ]; then
+  echo "notes: NOTES_TOKEN is not set; ask the instance owner to configure it" >&2
+  exit 3
+fi
+dir="$HOME/notebooks"
+mkdir -p "$dir"
+book() {
+  [[ "${1:-}" =~ ^[a-z0-9][a-z0-9-]{0,40}$ ]] || {
+    echo "notes: notebook names are lowercase letters, digits and dashes" >&2
+    exit 2
+  }
+  printf '%s/%s.txt' "$dir" "$1"
+}
+case "$cmd" in
+  list) find "$dir" -maxdepth 1 -name '*.txt' -printf '%f\n' | sed 's/\.txt$//' | sort ;;
+  create)
+    f=$(book "${2:-}")
+    [ -e "$f" ] && { echo "notes: $2 already exists" >&2; exit 1; }
+    : >"$f"
+    echo "created $2"
+    ;;
+  add)
+    f=$(book "${2:-}")
+    [ -e "$f" ] || { echo "notes: no notebook named $2" >&2; exit 1; }
+    shift 2
+    [ $# -gt 0 ] || { echo "notes: nothing to add" >&2; exit 2; }
+    printf '%s\n' "$*" >>"$f"
+    echo "added to ${f##*/}"
+    ;;
+  show)
+    f=$(book "${2:-}")
+    [ -e "$f" ] || { echo "notes: no notebook named $2" >&2; exit 1; }
+    nl -ba "$f"
+    ;;
+  remove)
+    f=$(book "${2:-}")
+    [[ "${3:-}" =~ ^[0-9]+$ ]] || { echo "notes: give a note number" >&2; exit 2; }
+    sed -i "${3}d" "$f"
+    echo "removed note $3"
+    ;;
+  *)
+    usage >&2
+    exit 2
+    ;;
+esac

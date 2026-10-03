@@ -1,0 +1,80 @@
+# Agent host (sima)
+
+Runs agents defined by git repos as always-on Claude Code sessions on Cloudflare Containers, at
+https://agents.calebsima.com. Requirements: the "Agent Host — Requirements" doc. This is phase 1.
+
+```
+people (browser, CLI) ─┐
+scripts, other agents ─┼─► Worker (Access JWT or API key) ─► Instance Durable Object ─► container
+                       │        D1: versions, instances,          always on, tmux sessions running
+                       │        tasks, audit, API keys            Claude Code, agentd, hooks
+                       └──────────────────────────────────────────► R2: home-directory state, attach recordings
+```
+
+## Concepts
+
+- **Agent**: a repo with `agent.yaml` (see `samples/notes`). Fields: `name`, `description`, `base`
+  (digest-pinned, Debian-based), `setup` (runs at build), `harness` (`claude`), `instance` (container
+  size), `credentials` (declared names; values never live in the repo).
+- **Version**: one image built from one commit, recorded in D1 and listed in the host's container
+  `images`. Cloudflare only starts declared images, so every build redeploys the host; running
+  instances survive that redeploy.
+- **Instance**: an always-on container of one version with its own credentials, sharing lists and
+  sessions. Its home directory is saved to R2 every five minutes when changed and before restarts,
+  and restored on boot, so conversations and files survive restarts and upgrades.
+- **Session**: a tmux window running Claude Code. `main` exists from the start; more can be added.
+
+## Build an agent
+
+```bash
+npm ci
+export CLOUDFLARE_API_TOKEN=… CLOUDFLARE_ACCOUNT_ID=…
+npm run build-agent -- --source samples/notes                      # local path
+npm run build-agent -- --source https://github.com/org/repo --subdir agents/x --ref main
+```
+
+The builder validates `agent.yaml`, generates the Dockerfile (agent base + Claude Code + runtime),
+builds single-platform without provenance attestations (Cloudflare rejects attestation indexes),
+pushes, records the version in D1 and redeploys. Set `GITHUB_TOKEN` for private repos and
+`BUILD_CA_FILE` when the build machine sits behind a TLS-intercepting proxy; the CA is mounted as a
+build secret and never lands in an image layer. The newest five versions per agent, plus any
+version an instance runs, stay deployed.
+
+## API
+
+`/api/v1/*` takes `Authorization: Bearer <API key>` (Cloudflare Access bypasses this path; the
+Worker checks the key). The browser uses the same handlers under `/ui/v1/*` with its Access session.
+
+| Method          | Path                                               | Who                             | Does                                                                    |
+| --------------- | -------------------------------------------------- | ------------------------------- | ----------------------------------------------------------------------- |
+| GET             | `/agents`                                          | anyone signed in                | Agents and their versions                                               |
+| GET/POST        | `/instances`                                       | list: anyone; create: admins    | Create `{id, agent, version?, owner?, credentials, sharing, sessions?}` |
+| GET             | `/instances/:id`                                   | view                            | Status, runtime, recent tasks                                           |
+| POST            | `/instances/:id/tasks`                             | message                         | `{message, session?, callback_url?}` → task id, runs async              |
+| GET             | `/tasks/:id?wait=50`                               | task's caller or instance admin | Long-polls until done or failed                                         |
+| POST            | `/instances/:id/sessions`                          | message                         | `{name}` adds a session                                                 |
+| GET (WebSocket) | `/instances/:id/attach?session=main`               | attach                          | Joins the live terminal; recorded to R2                                 |
+| POST            | `/instances/:id/restart`, `/instances/:id/upgrade` | admin                           | Save state, reboot (on a newer version)                                 |
+| GET             | `/instances/:id/audit`                             | admin                           | Audit trail                                                             |
+| POST            | `/keys`                                            | anyone signed in                | Mint an API key for yourself (shown once)                               |
+
+Sharing lists on an instance: `message`, `attach`, `admin` (emails, or `*`). Owners and
+`ADMIN_EMAILS` have everything. Every message reaches the harness with a header naming the caller.
+
+## Configuration
+
+Vars in `wrangler.jsonc`: `ACCESS_TEAM_DOMAIN`, `ACCESS_AUD` (the "Agent host" Access app),
+`ADMIN_EMAILS`. Secrets: `CREDENTIALS_KEY` (32 bytes, base64url; encrypts instance credentials),
+`DEFAULT_ANTHROPIC_API_KEY` and/or `DEFAULT_CLAUDE_CODE_OAUTH_TOKEN` (default model credentials; an
+instance can supply its own), `HOST_ADMIN_TOKEN` (bootstrap admin bearer token; rotate after
+minting personal keys). Deploy with `npm run deploy`, which regenerates the image list from D1.
+
+Access apps: "Agent host" (owner-only) and "Agent host machine paths" (bypass for `/api/` and
+`/healthz`).
+
+## Not in phase 1
+
+LibreChat integration, per-person credentials and instance creation by non-admins, fresh-container
+instances, pause/kill/delete, agent-to-agent registry and delegation, cost reports, Codex. Accepted
+risks: full-auto agents with open egress, secrets typed into messages persist in session logs and
+state, and typing in an attached terminal can collide with queued messages.
