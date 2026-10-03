@@ -12,25 +12,37 @@ const OUTBOX = path.join(ROOT, "outbox");
 const TICK_MS = 500;
 const READY_TIMEOUT_MS = 120_000;
 const START_TIMEOUT_MS = 60_000;
+const IDLE_GRACE_MS = 60_000;
 const TASK_TIMEOUT_MS = 60 * 60_000;
 const MAX_TEXT = 200_000;
 const MAX_TOOL_INPUT = 2_000;
 const READY_PATTERN = /bypass permissions/i;
+const WORKING_PATTERN = /esc to interrupt/i;
+const HEADER_PREFIX = "[agent-host task";
 
 const windows = new Map();
 const pendingTools = [];
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const clip = (text, max) => (text.length > max ? `${text.slice(0, max)}…` : text);
+const target = (name) => `agent:=${name}`;
 
 function log(...parts) {
   console.log(new Date().toISOString(), ...parts);
 }
 
+export function sanitizeMessage(text) {
+  return text
+    .replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, "")
+    .split("\n")
+    .map((line) => (line.trimStart().startsWith(HEADER_PREFIX) ? `(quoted) ${line}` : line))
+    .join("\n");
+}
+
 function windowState(name) {
   let state = windows.get(name);
   if (!state) {
-    state = { offset: 0, partial: "", busy: false, current: null };
+    state = { offset: 0, partial: "", busy: false, lastEventAt: 0, current: null };
     windows.set(name, state);
   }
   return state;
@@ -46,6 +58,7 @@ function tmuxWithInput(args, input) {
     const child = spawn("tmux", args, { stdio: ["pipe", "ignore", "pipe"] });
     let stderr = "";
     child.stderr.on("data", (chunk) => (stderr += chunk));
+    child.stdin.on("error", (error) => (stderr += String(error)));
     child.on("error", reject);
     child.on("close", (code) =>
       code === 0 ? resolve() : reject(new Error(`tmux ${args[0]} exited ${code}: ${stderr}`)),
@@ -54,38 +67,41 @@ function tmuxWithInput(args, input) {
   });
 }
 
+async function send(route, body) {
+  const res = await fetch(`${HOST}${route}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (res.status >= 500) throw new Error(`host returned ${res.status}`);
+  if (!res.ok) log("host rejected", route, res.status, await res.text());
+}
+
 async function post(route, body) {
   try {
-    const res = await fetch(`${HOST}${route}`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    if (res.ok) return;
-    if (res.status >= 400 && res.status < 500) {
-      log("host rejected", route, res.status, await res.text());
-      return;
-    }
-    throw new Error(`host returned ${res.status}`);
+    await send(route, body);
   } catch (error) {
     log("deferring", route, String(error));
     const file = path.join(OUTBOX, `${Date.now()}-${Math.random().toString(36).slice(2)}.json`);
-    await fs.writeFile(file, JSON.stringify({ route, body }));
+    await fs.writeFile(`${file}.tmp`, JSON.stringify({ route, body }));
+    await fs.rename(`${file}.tmp`, file);
   }
 }
 
 async function flushOutbox() {
-  const files = (await fs.readdir(OUTBOX).catch(() => [])).sort();
+  const files = (await fs.readdir(OUTBOX).catch(() => [])).filter((f) => f.endsWith(".json")).sort();
   for (const name of files) {
     const file = path.join(OUTBOX, name);
-    const { route, body } = JSON.parse(await fs.readFile(file, "utf8"));
+    let entry;
     try {
-      const res = await fetch(`${HOST}${route}`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      if (!res.ok && res.status >= 500) return;
+      entry = JSON.parse(await fs.readFile(file, "utf8"));
+    } catch (error) {
+      log("quarantining unreadable outbox entry", name, String(error));
+      await fs.rename(file, `${file}.bad`).catch(() => {});
+      continue;
+    }
+    try {
+      await send(entry.route, entry.body);
       await fs.unlink(file);
     } catch {
       return;
@@ -123,6 +139,7 @@ async function readEvents(name) {
 async function finish(state, status, fields) {
   const task = state.current;
   state.current = null;
+  state.busy = false;
   await fs.unlink(task.file).catch(() => {});
   await post(`/v1/tasks/${task.id}`, { status, ...fields });
   log("task", task.id, status);
@@ -130,6 +147,7 @@ async function finish(state, status, fields) {
 
 async function handleEvent(name, event) {
   const state = windowState(name);
+  state.lastEventAt = Date.now();
   if (event.agent_event === "start") {
     state.busy = true;
     const task = state.current;
@@ -157,18 +175,22 @@ async function handleEvent(name, event) {
   }
 }
 
-async function windowReady(name) {
-  const pane = await tmux("capture-pane", "-p", "-t", `agent:${name}`).catch(() => "");
-  return READY_PATTERN.test(pane);
+async function pane(name) {
+  return tmux("capture-pane", "-p", "-t", target(name)).catch(() => "");
+}
+
+async function paneIdle(name) {
+  const text = await pane(name);
+  return READY_PATTERN.test(text) && !WORKING_PATTERN.test(text);
 }
 
 async function deliver(name, task) {
-  const text = `${task.marker} from ${task.caller} via ${task.via}]\n${task.message}`;
+  const text = `${task.marker} from ${task.caller} via ${task.via}]\n${sanitizeMessage(task.message)}`;
   const buffer = `task-${task.id}`;
   await tmuxWithInput(["load-buffer", "-b", buffer, "-"], text);
-  await tmux("paste-buffer", "-p", "-d", "-b", buffer, "-t", `agent:${name}`);
+  await tmux("paste-buffer", "-p", "-d", "-b", buffer, "-t", target(name));
   await sleep(400);
-  await tmux("send-keys", "-t", `agent:${name}`, "Enter");
+  await tmux("send-keys", "-t", target(name), "Enter");
 }
 
 async function nextQueued() {
@@ -176,7 +198,14 @@ async function nextQueued() {
   const byWindow = new Map();
   for (const name of files) {
     const file = path.join(QUEUE, name);
-    const task = JSON.parse(await fs.readFile(file, "utf8"));
+    let task;
+    try {
+      task = JSON.parse(await fs.readFile(file, "utf8"));
+    } catch (error) {
+      log("dropping unreadable queue entry", name, String(error));
+      await fs.rename(file, `${file}.bad`).catch(() => {});
+      continue;
+    }
     const session = task.session ?? "main";
     if (!byWindow.has(session)) byWindow.set(session, { ...task, session, file });
   }
@@ -189,7 +218,7 @@ async function advance(name, queued) {
   const task = state.current;
   if (task) {
     if (!task.deliveredAt) {
-      if (await windowReady(name)) {
+      if (await paneIdle(name)) {
         await deliver(name, task);
         task.deliveredAt = now;
       } else if (now - task.takenAt > READY_TIMEOUT_MS) {
@@ -199,13 +228,20 @@ async function advance(name, queued) {
       await finish(state, "failed", { error: "the harness did not accept the message" });
     } else if (now - task.deliveredAt > TASK_TIMEOUT_MS) {
       await finish(state, "failed", { error: "timed out" });
+    } else if (
+      task.promptId &&
+      now - Math.max(state.lastEventAt, task.deliveredAt) > IDLE_GRACE_MS &&
+      (await paneIdle(name))
+    ) {
+      await finish(state, "failed", { error: "the turn ended without a reply (interrupted or an API error)" });
     }
     return;
   }
+  if (state.busy && now - state.lastEventAt > IDLE_GRACE_MS && (await paneIdle(name))) state.busy = false;
   if (!queued || state.busy) return;
   state.current = {
     ...queued,
-    marker: `[agent-host task ${queued.id}`,
+    marker: `${HEADER_PREFIX} ${queued.id}`,
     takenAt: now,
     deliveredAt: 0,
     promptId: null,
@@ -214,7 +250,7 @@ async function advance(name, queued) {
 }
 
 async function knownWindows() {
-  const listed = await tmux("list-windows", "-t", "agent", "-F", "#{window_name}").catch(() => "");
+  const listed = await tmux("list-windows", "-t", "=agent", "-F", "#{window_name}").catch(() => "");
   return listed.split("\n").filter(Boolean);
 }
 
@@ -231,21 +267,24 @@ async function tick() {
     }
   }
   for (const name of names) {
-    const candidate = queued.get(name);
     const state = windowState(name);
-    await advance(name, state.current ? null : candidate);
+    await advance(name, state.current ? null : queued.get(name));
   }
   if (pendingTools.length) await post("/v1/events", { tools: pendingTools.splice(0, pendingTools.length) });
   await flushOutbox();
 }
 
-for (const dir of [QUEUE, EVENTS, OUTBOX]) await fs.mkdir(dir, { recursive: true });
-log("agentd started", HOST);
-for (;;) {
-  try {
-    await tick();
-  } catch (error) {
-    log("tick failed", error instanceof Error ? error.stack : String(error));
+async function main() {
+  for (const dir of [QUEUE, EVENTS, OUTBOX]) await fs.mkdir(dir, { recursive: true });
+  log("agentd started", HOST);
+  for (;;) {
+    try {
+      await tick();
+    } catch (error) {
+      log("tick failed", error instanceof Error ? error.stack : String(error));
+    }
+    await sleep(TICK_MS);
   }
-  await sleep(TICK_MS);
 }
+
+if (process.argv[1] && import.meta.url.endsWith(path.basename(process.argv[1]))) await main();

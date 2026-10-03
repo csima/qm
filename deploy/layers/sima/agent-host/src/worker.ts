@@ -20,6 +20,13 @@ async function route(req: Request, env: Env, ctx: ExecutionContext): Promise<Res
     if (!caller) throw new HttpError(401, "a valid API key is required");
     return api(req, env, ctx, caller, path.slice("/api/v1".length));
   }
+  const origin = req.headers.get("origin");
+  const sameOrigin = origin === new URL(env.PUBLIC_URL).origin;
+  const isSocket = /^\/i\/[^/]+\/ws$/.test(path);
+  if ((path.startsWith("/ui/v1/") || isSocket) && origin !== null && !sameOrigin)
+    throw new HttpError(403, "cross-site requests are not allowed");
+  if (((path.startsWith("/ui/v1/") && req.method !== "GET") || isSocket) && !sameOrigin)
+    throw new HttpError(403, "this request must come from the agent host page");
   const caller = await callerFromAccess(req, env);
   if (path.startsWith("/ui/v1/")) {
     if (!caller) throw new HttpError(401, "sign in through Cloudflare Access");

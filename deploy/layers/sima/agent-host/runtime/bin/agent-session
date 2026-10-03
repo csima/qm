@@ -1,12 +1,12 @@
 #!/bin/bash
 set -euo pipefail
 name="$1"
-[[ "$name" =~ ^[a-z0-9][a-z0-9-]{0,31}$ ]] || { echo "invalid session name" >&2; exit 2; }
+[[ "$name" =~ ^[a-z][a-z0-9-]{0,31}$ ]] || { echo "invalid session name" >&2; exit 2; }
 as_agent() { runuser -u agent -- env HOME=/home/agent XDG_RUNTIME_DIR=/run/agent/xdg "$@"; }
-if as_agent tmux list-windows -t agent -F '#{window_name}' | grep -qx "$name"; then
+if as_agent tmux list-windows -t =agent -F '#{window_name}' | grep -qx "$name"; then
   echo exists
   exit 0
 fi
-as_agent tmux new-window -d -t agent -n "$name" "/usr/local/bin/agent-harness $name"
+as_agent tmux new-window -d -t =agent: -n "$name" "/usr/local/bin/agent-harness $name"
 grep -qx "$name" /run/agent/sessions || echo "$name" >>/run/agent/sessions
 echo created

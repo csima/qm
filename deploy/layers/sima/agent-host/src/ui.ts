@@ -4,6 +4,15 @@ import { can } from "./policy.ts";
 const XTERM = "https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0";
 const FIT = "https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0";
 
+const PAGE_HEADERS = {
+  "content-type": "text/html; charset=utf-8",
+  "cache-control": "no-store",
+  "content-security-policy": "frame-ancestors 'none'",
+  "x-frame-options": "DENY",
+  "referrer-policy": "same-origin",
+  "x-content-type-options": "nosniff",
+};
+
 export const esc = (value: unknown) =>
   String(value ?? "")
     .replaceAll("&", "&amp;")
@@ -40,13 +49,13 @@ export function page(title: string, caller: Caller, body: string, head = ""): Re
 <title>${esc(title)}</title><style>${STYLE}</style>${head}</head><body>
 <header><a href="/">Agent host</a><nav><a href="/keys">API keys</a><span>${esc(caller.email)}</span></nav></header>
 <main>${body}</main></body></html>`;
-  return new Response(html, { headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" } });
+  return new Response(html, { headers: PAGE_HEADERS });
 }
 
 export function unauthorizedPage(): Response {
   return new Response(
     "<!doctype html><title>Sign in</title><p>Sign in through Cloudflare Access to use the agent host.</p>",
-    { status: 401, headers: { "content-type": "text/html; charset=utf-8" } },
+    { status: 401, headers: PAGE_HEADERS },
   );
 }
 

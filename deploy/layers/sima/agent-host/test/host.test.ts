@@ -196,3 +196,16 @@ test("a failing stream aborts the multipart upload", async () => {
   await assert.rejects(putStream(bucket, "k", failing, 4), /boom/);
   assert.deepEqual(calls, ["create", "abort"]);
 });
+
+test("an unknown signing key triggers one refresh of the Access certs", async () => {
+  const { sign, certs } = await signer();
+  const now = Date.parse("2026-10-03T12:00:00Z");
+  const token = await sign({ aud: [AUD], iss: `https://${TEAM}`, exp: now / 1000 + 600, email: "a@b.io" });
+  const calls: boolean[] = [];
+  const rotating = async (_team: string, refresh?: boolean) => {
+    calls.push(Boolean(refresh));
+    return refresh ? certs() : [];
+  };
+  assert.deepEqual(await verifyAccessJwt(token, { team: TEAM, aud: AUD, now, certs: rotating }), { email: "a@b.io" });
+  assert.deepEqual(calls, [false, true]);
+});

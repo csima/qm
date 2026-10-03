@@ -35,17 +35,30 @@ if (!args["dry-run"] && !args["no-push"])
   for (const n of ["CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID"]) if (!process.env[n]) fail(`${n} is not set`);
 
 const work = fs.mkdtempSync(path.join(os.tmpdir(), "agent-build-"));
+process.on("exit", () => fs.rmSync(work, { recursive: true, force: true }));
 let checkout = path.resolve(args.source);
 let commit = null;
 let source = args.source;
 if (/^(https:\/\/|git@)/.test(args.source)) {
   checkout = path.join(work, "src");
   const token = process.env.GITHUB_TOKEN;
-  const url =
+  const auth =
     token && args.source.startsWith("https://github.com/")
-      ? args.source.replace("https://", `https://x-access-token:${token}@`)
-      : args.source;
-  run("git", ["clone", "--quiet", "--depth", "1", ...(args.ref ? ["--branch", args.ref] : []), url, checkout]);
+      ? [
+          "-c",
+          `http.https://github.com/.extraHeader=Authorization: Basic ${Buffer.from(`x-access-token:${token}`).toString("base64")}`,
+        ]
+      : [];
+  run("git", [
+    ...auth,
+    "clone",
+    "--quiet",
+    "--depth",
+    "1",
+    ...(args.ref ? ["--branch", args.ref] : []),
+    args.source,
+    checkout,
+  ]);
 } else if (!fs.existsSync(checkout)) fail(`${checkout} does not exist`);
 const head = spawnSync("git", ["-C", checkout, "rev-parse", "HEAD"], { encoding: "utf8" });
 if (head.status === 0) {
@@ -113,7 +126,7 @@ fs.writeFileSync(
     version,
     image,
     commit,
-    source.replace(/\/\/[^@/]+@/, "//"),
+    source,
     JSON.stringify(manifest),
   ]
     .map(sqlString)
@@ -121,7 +134,6 @@ fs.writeFileSync(
 );
 run("npx", ["--no-install", "wrangler", "d1", "execute", "agent-host", "--remote", "--file", sql], { cwd: HERE });
 console.log(`✔ Recorded ${manifest.name} ${version} → ${image}`);
-fs.rmSync(work, { recursive: true, force: true });
 
 if (!args["no-deploy"]) {
   const res = spawnSync(process.execPath, [path.join(HERE, "scripts", "deploy.mjs")], { stdio: "inherit", cwd: HERE });

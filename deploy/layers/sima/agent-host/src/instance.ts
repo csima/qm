@@ -11,6 +11,11 @@ const SNAPSHOT_EVERY_MS = 5 * 60_000;
 const START_TIMEOUT_MS = 120_000;
 const INACTIVITY_MS = 5 * 60 * 60_000;
 const RECORDING_LIMIT = 20 * 1024 * 1024;
+const MAX_SESSIONS = 8;
+const QUEUED_EXPIRY_MS = 60 * 60_000;
+const RUNNING_EXPIRY_MS = 90 * 60_000;
+const STORAGE_DELETE_BATCH = 128;
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const decoder = new TextDecoder();
 
 type ContainerSize = "lite" | "standard-1" | "standard-2" | "standard-3" | "standard-4";
@@ -88,12 +93,38 @@ export class Instance extends DurableObject<Env> {
     return this.booting;
   }
 
+  private async probe(): Promise<{ boot: string; ready: boolean } | null> {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const res = await this.run(["agent-health", "--repair"]).catch(() => null);
+      if (res?.code === 0) {
+        const fields = new Map(
+          res.stdout
+            .trim()
+            .split(/\s+/)
+            .map((kv) => kv.split("=") as [string, string]),
+        );
+        if (fields.get("agentd") === "restarted") console.warn("agentd was not running and has been restarted");
+        return { boot: fields.get("boot") ?? "", ready: fields.get("tmux") === "up" };
+      }
+      if (!res || res.code === 127) {
+        const legacy = await this.run(["cat", "/run/agent/boot-id"]).catch(() => null);
+        if (legacy?.code === 0) return { boot: legacy.stdout.trim(), ready: true };
+      }
+      await sleep(1_000);
+    }
+    return null;
+  }
+
   private async healthy(): Promise<boolean> {
     if (!this.container.running) return false;
     const bootId = await this.ctx.storage.get<string>("bootId");
     if (!bootId) return false;
-    const res = await this.run(["cat", "/run/agent/boot-id"]).catch(() => null);
-    return res?.code === 0 && res.stdout.trim() === bootId;
+    const health = await this.probe();
+    return health !== null && health.ready && health.boot === bootId;
+  }
+
+  async deployed(agent: string, version: string): Promise<boolean> {
+    return Boolean(this.container.images[imageKey(agent, version)]);
   }
 
   private async startContainer(image: string, size: string): Promise<void> {
@@ -127,6 +158,10 @@ export class Instance extends DurableObject<Env> {
     try {
       const image = this.container.images[imageKey(config.agent, config.version)];
       if (!image) throw new Error(`version ${config.version} of ${config.agent} is not deployed on this host`);
+      if (this.container.running && (await this.ctx.storage.get("bootId")))
+        await this.snapshot(config.id, true).catch((e) =>
+          console.error(`pre-reboot save of ${config.id} failed: ${errText(e)}`),
+        );
       await this.ctx.storage.delete("bootId");
       await this.startContainer(image, config.size);
       const exports = (this.ctx as unknown as { exports: Record<string, (o: { props: unknown }) => Fetcher> }).exports;
@@ -152,7 +187,8 @@ export class Instance extends DurableObject<Env> {
       if (out.trim().split("\n").at(-1) !== "ok") throw new Error(`agent-boot did not finish: ${out.slice(-300)}`);
       await this.ctx.storage.put("bootId", bootId);
       const delivered = [...(await this.ctx.storage.list({ prefix: "q:" })).keys()];
-      if (delivered.length) await this.ctx.storage.delete(delivered);
+      for (let i = 0; i < delivered.length; i += STORAGE_DELETE_BATCH)
+        await this.ctx.storage.delete(delivered.slice(i, i + STORAGE_DELETE_BATCH));
       await setInstanceStatus(this.env, config.id, "running");
       await audit(this.env, {
         actor: `instance:${config.id}`,
@@ -161,11 +197,12 @@ export class Instance extends DurableObject<Env> {
         instance: config.id,
         detail: { version: config.version, bootId },
       });
-      await this.requeue(config.id, bootId);
     } catch (error) {
       await setInstanceStatus(this.env, config.id, "error", errText(error));
       throw error;
     }
+    const bootId = (await this.ctx.storage.get<string>("bootId"))!;
+    await this.requeue(config.id, bootId);
   }
 
   private async restoreState(id: string): Promise<void> {
@@ -188,14 +225,22 @@ export class Instance extends DurableObject<Env> {
     )
       .bind(id)
       .all<QueuedTask>();
-    for (const task of results) await this.deliver(task, bootId);
+    for (const task of results)
+      await this.deliver(task, bootId).catch((e) => console.error(`requeue ${task.id}: ${errText(e)}`));
   }
+
+  private readonly inflight = new Set<string>();
 
   private async deliver(task: QueuedTask, bootId: string): Promise<void> {
     const key = `q:${bootId}:${task.id}`;
-    if (await this.ctx.storage.get(key)) return;
-    await this.ctx.storage.put(key, 1);
-    await this.must(["agent-enqueue"], JSON.stringify(task));
+    if (this.inflight.has(key) || (await this.ctx.storage.get(key))) return;
+    this.inflight.add(key);
+    try {
+      await this.must(["agent-enqueue"], JSON.stringify(task));
+      await this.ctx.storage.put(key, 1);
+    } finally {
+      this.inflight.delete(key);
+    }
   }
 
   async enqueue(task: QueuedTask): Promise<void> {
@@ -212,6 +257,8 @@ export class Instance extends DurableObject<Env> {
   async addSession(name: string): Promise<string[]> {
     if (!SESSION_NAME.test(name)) throw new Error("session names are lowercase letters, digits and dashes");
     const config = await this.config();
+    if (!config.sessions.includes(name) && config.sessions.length >= MAX_SESSIONS)
+      throw new Error(`an instance can have at most ${MAX_SESSIONS} sessions`);
     await this.ensureRunning();
     await this.must(["agent-session", name]);
     if (!config.sessions.includes(name)) {
@@ -221,15 +268,16 @@ export class Instance extends DurableObject<Env> {
     return config.sessions;
   }
 
-  async restart(version?: string): Promise<void> {
+  async prepareRestart(version?: string): Promise<void> {
+    if (this.booting) throw new Error("the instance is already starting");
     const config = await this.config();
+    const target = version ?? config.version;
+    if (!(await this.deployed(config.agent, target)))
+      throw new Error(`version ${target} of ${config.agent} is not deployed on this host`);
     if (await this.healthy()) await this.snapshot(config.id, true);
-    if (version && version !== config.version) {
-      config.version = version;
-      await this.ctx.storage.put("config", config);
-    }
+    config.version = target;
+    await this.ctx.storage.put("config", config);
     await this.ctx.storage.delete("bootId");
-    await this.ensureRunning();
   }
 
   private async snapshot(id: string, force = false): Promise<boolean> {
@@ -255,7 +303,9 @@ export class Instance extends DurableObject<Env> {
     const config = await this.ctx.storage.get<InstanceConfig>("config");
     if (!config) return;
     try {
+      await this.expireStaleTasks(config.id);
       await this.ensureRunning();
+      await this.container.setInactivityTimeout(INACTIVITY_MS);
       const last = (await this.ctx.storage.get<number>("lastSnapshotAt")) ?? 0;
       if (Date.now() - last >= SNAPSHOT_EVERY_MS) await this.snapshot(config.id);
     } catch (error) {
@@ -263,6 +313,18 @@ export class Instance extends DurableObject<Env> {
     } finally {
       await this.ctx.storage.setAlarm(Date.now() + ALARM_MS);
     }
+  }
+
+  private async expireStaleTasks(id: string): Promise<void> {
+    const now = Date.now();
+    await this.env.DB.batch([
+      this.env.DB.prepare(
+        "UPDATE tasks SET status = 'failed', error = 'not started within an hour', finished_at = ? WHERE instance = ? AND status = 'queued' AND created_at < ?",
+      ).bind(now, id, now - QUEUED_EXPIRY_MS),
+      this.env.DB.prepare(
+        "UPDATE tasks SET status = 'failed', error = 'no result within 90 minutes', finished_at = ? WHERE instance = ? AND status = 'running' AND started_at < ?",
+      ).bind(now, id, now - RUNNING_EXPIRY_MS),
+    ]);
   }
 
   async fetch(req: Request): Promise<Response> {
@@ -303,7 +365,7 @@ export class Instance extends DurableObject<Env> {
         ";",
         "select-window",
         "-t",
-        `${view}:${session}`,
+        `${view}:=${session}`,
       ],
       { pty: { cols, rows }, stdin: "pipe" },
     );

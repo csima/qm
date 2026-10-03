@@ -41,10 +41,11 @@ export function adminEmails(env: Pick<Env, "ADMIN_EMAILS">): Set<string> {
   );
 }
 
-type CertFetcher = (team: string) => Promise<JsonWebKey[]>;
+type CertFetcher = (team: string, refresh?: boolean) => Promise<JsonWebKey[]>;
 
-async function fetchCerts(team: string): Promise<JsonWebKey[]> {
-  if (certCache && certCache.team === team && Date.now() - certCache.at < CERT_TTL_MS) return certCache.keys;
+async function fetchCerts(team: string, refresh = false): Promise<JsonWebKey[]> {
+  if (!refresh && certCache && certCache.team === team && Date.now() - certCache.at < CERT_TTL_MS)
+    return certCache.keys;
   const res = await fetch(`https://${team}/cdn-cgi/access/certs`);
   if (!res.ok) throw new Error(`Access certs returned ${res.status}`);
   const body = (await res.json()) as { keys: JsonWebKey[] };
@@ -67,8 +68,9 @@ export async function verifyAccessJwt(
     return null;
   }
   if (header.alg !== "RS256" || !header.kid) return null;
-  const keys = await (opts.certs ?? fetchCerts)(opts.team);
-  const jwk = keys.find((k) => (k as { kid?: string }).kid === header.kid);
+  const certs = opts.certs ?? fetchCerts;
+  const byKid = (keys: JsonWebKey[]) => keys.find((k) => (k as { kid?: string }).kid === header.kid);
+  const jwk = byKid(await certs(opts.team)) ?? byKid(await certs(opts.team, true));
   if (!jwk) return null;
   const key = await crypto.subtle.importKey("jwk", jwk, { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" }, false, [
     "verify",

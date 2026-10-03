@@ -11,7 +11,7 @@ export const VERSIONS_KEPT = 5;
 
 const NAME = /^[a-z][a-z0-9-]{1,30}$/;
 const RESERVED_ENV = /^(AGENT_|XDG_)|^(HOME|PATH|USER|SHELL|TERM)$/;
-const DIGEST_PINNED = /@sha256:[0-9a-f]{64}$/;
+const DIGEST_PINNED = /^[a-z0-9][a-z0-9._\/:-]*@sha256:[0-9a-f]{64}$/;
 
 export function parseManifest(text) {
   const raw = parse(text);

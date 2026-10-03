@@ -31,6 +31,8 @@ const MAX_WAIT_S = 55;
 export const json = (body: unknown, status = 200) => Response.json(body, { status });
 
 async function body(req: Request): Promise<Record<string, unknown>> {
+  if (!/^application\/json(;|$)/i.test(req.headers.get("content-type") ?? ""))
+    throw new HttpError(415, "send the body as application/json");
   const parsed = (await req.json().catch(() => null)) as unknown;
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
     throw new HttpError(400, "body must be a JSON object");
@@ -124,6 +126,11 @@ async function createInstance(env: Env, ctx: ExecutionContext, caller: Caller, i
   const owner = typeof input.owner === "string" ? input.owner.toLowerCase() : caller.email;
   if (caller.via === "admin_token" && typeof input.owner !== "string") throw new HttpError(400, "owner is required");
   if (await getInstance(env, id)) throw new HttpError(409, `instance ${id} already exists`);
+  if (!(await stub(env, id).deployed(agent, version.version)))
+    throw new HttpError(
+      409,
+      `version ${version.version} of ${agent} is not deployed on this host; rebuild or redeploy it`,
+    );
   const now = Date.now();
   await env.DB.prepare(
     "INSERT INTO instances (id, agent, version, owner, sharing, size, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'created', ?, ?)",
@@ -210,6 +217,31 @@ async function mintKey(env: Env, caller: Caller, input: Record<string, unknown>)
   return json({ id, owner, label, key }, 201);
 }
 
+async function revokeKey(env: Env, caller: Caller, id: string) {
+  const row = await env.DB.prepare("SELECT owner, revoked_at FROM api_keys WHERE id = ?")
+    .bind(id)
+    .first<{ owner: string; revoked_at: number | null }>();
+  if (!row || (row.owner !== caller.email && !caller.admin)) throw new HttpError(404, "no such key");
+  if (!row.revoked_at)
+    await env.DB.prepare("UPDATE api_keys SET revoked_at = ? WHERE id = ?").bind(Date.now(), id).run();
+  await audit(env, auditBy(caller, "key.revoke", { detail: { id, owner: row.owner } }));
+  return json({ revoked: id });
+}
+
+async function prepareRestart(env: Env, id: string, version?: string): Promise<void> {
+  await stub(env, id)
+    .prepareRestart(version)
+    .catch((e) => {
+      throw new HttpError(409, (e as Error).message);
+    });
+}
+
+function boot(env: Env, id: string): Promise<void> {
+  return stub(env, id)
+    .ensureRunning()
+    .catch((e) => console.error(`boot ${id}: ${(e as Error).message}`));
+}
+
 export function attachRequest(req: Request, row: InstanceRow, caller: Caller): Request {
   const url = new URL(req.url);
   const target = new URL(`https://instance/attach`);
@@ -240,6 +272,15 @@ export async function api(
   if (parts.length > 3) throw new HttpError(404, "not found");
   if (resource === "agents" && !id && method === "GET") return json({ agents: await listAgents(env) });
   if (resource === "keys" && !id && method === "POST") return mintKey(env, caller, await body(req));
+  if (resource === "keys" && !id && method === "GET") {
+    const { results } = await env.DB.prepare(
+      "SELECT id, owner, label, created_at, revoked_at FROM api_keys WHERE owner = ? ORDER BY created_at DESC",
+    )
+      .bind(caller.email)
+      .all();
+    return json({ keys: results });
+  }
+  if (resource === "keys" && id && !sub && method === "DELETE") return revokeKey(env, caller, id);
   if (resource === "tasks" && id && !sub && method === "GET")
     return waitForTask(env, caller, id, Number(new URL(req.url).searchParams.get("wait") ?? 0));
   if (resource === "instances") {
@@ -263,7 +304,7 @@ export async function api(
     if (sub === "tasks" && method === "POST")
       return createTask(env, ctx, caller, await instanceFor(env, caller, id, "message"), await body(req));
     if (sub === "sessions" && method === "POST") {
-      await instanceFor(env, caller, id, "message");
+      await instanceFor(env, caller, id, "admin");
       const name = String((await body(req)).name ?? "");
       const sessions = await stub(env, id)
         .addSession(name)
@@ -275,12 +316,9 @@ export async function api(
     }
     if (sub === "restart" && method === "POST") {
       await instanceFor(env, caller, id, "admin");
+      await prepareRestart(env, id);
       await audit(env, auditBy(caller, "instance.restart", { instance: id }));
-      ctx.waitUntil(
-        stub(env, id)
-          .restart()
-          .catch((e) => console.error(`restart ${id}: ${(e as Error).message}`)),
-      );
+      ctx.waitUntil(boot(env, id));
       return json({ restarting: true }, 202);
     }
     if (sub === "upgrade" && method === "POST") {
@@ -290,6 +328,7 @@ export async function api(
       if (!target) throw new HttpError(404, "no such version");
       if (target.manifest.harness !== (await getVersion(env, row.agent, row.version))?.manifest.harness)
         throw new HttpError(400, "upgrades cannot change the harness");
+      await prepareRestart(env, id, target.version);
       await env.DB.prepare("UPDATE instances SET version = ?, updated_at = ? WHERE id = ?")
         .bind(target.version, Date.now(), id)
         .run();
@@ -297,11 +336,7 @@ export async function api(
         env,
         auditBy(caller, "instance.upgrade", { instance: id, detail: { from: row.version, to: target.version } }),
       );
-      ctx.waitUntil(
-        stub(env, id)
-          .restart(target.version)
-          .catch((e) => console.error(`upgrade ${id}: ${(e as Error).message}`)),
-      );
+      ctx.waitUntil(boot(env, id));
       return json({ upgrading: true, from: row.version, to: target.version }, 202);
     }
     if (sub === "attach" && method === "GET") {
