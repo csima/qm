@@ -4,7 +4,7 @@ import { parseArgs } from "node:util";
 const HOST = process.env.AGENT_HOST_URL ?? "http://host.internal";
 const USAGE = `usage:
   <command printing a secret> | agent-secret put    hand the secret to the agent that called you; prints a handle
-  agent-secret get <handle>                         print a secret another agent handed you (works once)`;
+  agent-secret get <handle> <file>                  save a secret another agent handed you to <file> (mode 600; works once)`;
 
 const { values, positionals } = parseArgs({
   allowPositionals: true,
@@ -48,9 +48,12 @@ if (values.help) {
   const drop = await post("/v1/secrets", { value, task });
   process.stdout.write(`${drop.handle}\n`);
   process.stderr.write(`agent-secret: only ${drop.for} can read it, once, within 10 minutes\n`);
-} else if (positionals[0] === "get" && positionals.length === 2) {
+} else if (positionals[0] === "get" && positionals.length === 3) {
+  const file = positionals[2];
   const { value } = await post("/v1/secrets/redeem", { handle: positionals[1] });
-  process.stdout.write(value);
+  fs.writeFileSync(file, value, { mode: 0o600 });
+  fs.chmodSync(file, 0o600);
+  process.stdout.write(`${file}\n`);
 } else {
   fail(USAGE, 2);
 }

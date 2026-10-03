@@ -7,8 +7,8 @@ import { can, parseSharing, type Permission } from "./policy.ts";
 import { sealCredentials } from "./secrets.ts";
 import { INACTIVE, audit, auditBy, getInstance, getVersion, instanceIdTaken } from "./store.ts";
 
-export const MAX_OWNED_INSTANCES = 3;
-export const MAX_RUNNING_ONE_OFFS = 2;
+const MAX_OWNED_INSTANCES = 3;
+const MAX_RUNNING_ONE_OFFS = 2;
 
 export function stub(env: Env, id: string) {
   return env.INSTANCE.getByName(id);

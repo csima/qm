@@ -3,7 +3,7 @@ import { HttpError, hex } from "./http.ts";
 import { sha256Hex } from "./auth.ts";
 import { INACTIVE, audit, auditBy, getInstance, getTask, isTerminal, type TaskRow } from "./store.ts";
 
-export const MAX_MESSAGE = 100_000;
+const MAX_MESSAGE = 100_000;
 export const TASK_ID = /^t_[0-9a-f]{20}$/;
 
 export interface TaskInput {

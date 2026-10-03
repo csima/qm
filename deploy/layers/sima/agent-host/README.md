@@ -70,12 +70,14 @@ queues the call. The target sees `via agent:<caller instance>` in the header. Se
 
 ### Handing secrets between agents
 
-An agent never puts a secret in a reply to another agent. The giver pipes it to `agent-secret put`
-while handling the caller's task; the host seals it (AES-GCM, in D1) for the instance that made that
-call and returns a handle `sh_…`, which the giver sends back as its reply. The caller runs
-`agent-secret get <handle>`: the host releases it once, to that instance only, within ten minutes,
-and deletes it (expired handles are swept by the cron). The value never enters either conversation,
-the task log or the audit log; `secret.put` and `secret.redeem` are audited without it.
+An agent never puts a secret in a reply to another agent. The giver pipes it straight from the command
+that produces it (`op read … | agent-secret put`) while handling the caller's task; the host checks the
+call is still allowed, seals the value (AES-GCM, in D1) for the instance that made that call and returns
+a handle `sh_…`, which the giver sends back as its reply. The caller runs `agent-secret get <handle>
+<file>`: the host releases it once, to that instance only, within ten minutes, deletes it, and the CLI
+writes it to a mode-600 file without printing it. At most five secrets can wait per call; the cron
+sweeps expired ones. The value stays out of task rows, the audit log and both conversations, unless an
+agent prints the file; `secret.put` and `secret.redeem` are audited without it.
 
 ## Builds from GitHub
 
@@ -106,9 +108,10 @@ builds single-platform without provenance attestations (Cloudflare rejects attes
 pushes, records the version in D1 and redeploys. Set `GITHUB_TOKEN` for private repos and
 `BUILD_CA_FILE` when the build machine sits behind a TLS-intercepting proxy; the CA is mounted as a
 build secret and never lands in an image layer. The newest five versions per agent, plus any
-version a live instance runs, stay deployed; after each successful deploy the others are deleted from
-the registry (and tags never recorded in D1 once they are a day old), because the account's 50 GB
-registry limit is shared with every other project.
+version a live instance runs, stay deployed. After a successful deploy with no extra arguments,
+recorded versions outside that set (rechecked against live instances) are deleted from the registry,
+because the account's 50 GB registry limit is shared with every other project; so `wrangler rollback`
+to an older host deploy can point at deleted images.
 
 ## API
 
@@ -165,7 +168,7 @@ Access apps: "Agent host" (owner-only) and "Agent host machine paths" (bypass fo
 ## Not yet built
 
 Drift checks, cost reports, Codex. Accepted risks: agents without an `egress` list have open
-internet; secrets typed into messages, or shown to a person in a reply, persist in task results, session logs and state; typing in an attached terminal can collide with queued messages; an agent can forge its
+internet; secrets typed into messages, shown to a person in a reply, or printed by an agent persist in task results, session logs and state; typing in an attached terminal can collide with queued messages; an agent can forge its
 own hook events and name another session's person in a call's audit trail (authorization does not
 depend on it); restricted agents can still reach the internet indirectly through Anthropic's
 server-side web search; the shared-hosting wildcard list is a short fixed list, not the Public Suffix

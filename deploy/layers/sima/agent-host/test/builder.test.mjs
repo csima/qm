@@ -142,8 +142,7 @@ test("header lookalikes are neutralised: zero-width, case, fullwidth, line separ
   assert.equal(sanitizeMessage(family), family);
 });
 
-test("registry pruning removes recorded versions outside the kept set and stale unrecorded tags only", () => {
-  const now = Date.UTC(2026, 9, 3, 18, 0, 0);
+test("registry pruning removes only recorded versions outside the kept set", () => {
   const registry = [
     {
       name: "agent-host-notes",
@@ -161,8 +160,5 @@ test("registry pruning removes recorded versions outside the kept set and stale 
     { agent: "notes", version: "20261003t160000-bbbbbbbb" },
   ];
   const kept = { "notes--20261003t170000-aaaaaaaa": { image: "x" } };
-  assert.deepEqual(imagesToDelete(registry, versions, kept, now), [
-    "agent-host-notes:20261003t160000-bbbbbbbb",
-    "agent-host-notes:20261001t100000-cccccccc",
-  ]);
+  assert.deepEqual(imagesToDelete(registry, versions, kept), ["agent-host-notes:20261003t160000-bbbbbbbb"]);
 });

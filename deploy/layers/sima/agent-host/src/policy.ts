@@ -15,7 +15,7 @@ export function can(caller: Caller, row: Pick<InstanceRow, "owner" | "sharing">,
   return false;
 }
 
-export function influencers(row: Pick<InstanceRow, "owner" | "sharing">): string[] {
+function influencers(row: Pick<InstanceRow, "owner" | "sharing">): string[] {
   const { message, attach, admin } = row.sharing;
   return [...new Set([row.owner, ...message, ...attach, ...admin])];
 }

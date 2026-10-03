@@ -6,7 +6,7 @@ import { INACTIVE, getInstance, getTask, listInstances, listVersions, type TaskR
 import { TASK_ID, pollTask, submitTask } from "./tasks.ts";
 
 export const MAX_DEPTH = 4;
-export const MAX_OPEN_CALLS = 8;
+const MAX_OPEN_CALLS = 8;
 const MAX_WAIT_S = 50;
 
 export interface Principal {
@@ -24,9 +24,9 @@ export function nextChain(chain: string[], self: string, target: string): string
   return next;
 }
 
-export const callVia = (instance: string) => `agent:${instance}`;
+const callVia = (instance: string) => `agent:${instance}`;
 
-export async function principal(env: Env, instance: string, parent: unknown): Promise<Principal> {
+async function principal(env: Env, instance: string, parent: unknown): Promise<Principal> {
   const row = await getInstance(env, instance);
   if (!row || INACTIVE.includes(row.status)) throw new HttpError(404, "this instance is not active");
   if (parent === undefined || parent === null || parent === "") {
@@ -92,7 +92,7 @@ export async function placeCall(env: Env, ctx: ExecutionContext, instance: strin
   return { call: callView(task), actingFor: who.person };
 }
 
-export function callView(task: TaskRow) {
+function callView(task: TaskRow) {
   return {
     id: task.id,
     instance: task.instance,

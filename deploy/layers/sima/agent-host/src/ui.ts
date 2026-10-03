@@ -14,7 +14,7 @@ const PAGE_HEADERS = {
   "x-content-type-options": "nosniff",
 };
 
-export const esc = (value: unknown) =>
+const esc = (value: unknown) =>
   String(value ?? "")
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
@@ -49,7 +49,7 @@ fieldset{border:1px solid var(--line);border-radius:8px;padding:12px;margin:12px
 @media (max-width:640px){header nav span{display:none}.tasks th:first-child,.tasks td:first-child,.instances th:nth-child(n+4),.instances td:nth-child(n+4){display:none}}
 `;
 
-export function page(title: string, caller: Caller, body: string, head = ""): Response {
+function page(title: string, caller: Caller, body: string, head = ""): Response {
   const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${esc(title)}</title><style>${STYLE}</style>${head}</head><body>
 <header><a href="/">Agent host</a><nav>${caller.admin ? `<a href="/builds">Builds</a>` : ""}<a href="/credentials">Credentials</a><a href="/keys">API keys</a><span>${esc(caller.email)}</span></nav></header>

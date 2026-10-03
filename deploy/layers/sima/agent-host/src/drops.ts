@@ -2,11 +2,13 @@ import { sha256Hex } from "./auth.ts";
 import { MAX_CREDENTIAL } from "./credentials.ts";
 import type { Env } from "./env.ts";
 import { HttpError, hex } from "./http.ts";
+import { callAllowed } from "./policy.ts";
 import { openCredentials, sealCredentials } from "./secrets.ts";
 import { INACTIVE, audit, getInstance, getTask, type TaskRow } from "./store.ts";
 import { TASK_ID } from "./tasks.ts";
 
-export const DROP_TTL_MS = 10 * 60_000;
+const DROP_TTL_MS = 10 * 60_000;
+const MAX_DROPS_PER_TASK = 5;
 const HANDLE = /^sh_[0-9a-f]{32}$/;
 
 export function recipientOf(task: Pick<TaskRow, "via" | "status">): string | null {
@@ -27,11 +29,17 @@ export async function putSecret(env: Env, instance: string, body: Record<string,
   if (!recipient) throw new HttpError(403, "only another agent's open call can receive a secret handle");
   const target = await getInstance(env, recipient);
   if (!target || INACTIVE.includes(target.status)) throw new HttpError(404, `${recipient} is not active`);
+  const giver = await getInstance(env, instance);
+  if (!giver || !callAllowed(task.caller, target, giver))
+    throw new HttpError(
+      403,
+      `${recipient} can no longer be handed secrets from here: its sharing changed since the call`,
+    );
   const handle = `sh_${hex(16)}`;
   const id = await sha256Hex(handle);
   const now = Date.now();
-  await env.DB.prepare(
-    "INSERT INTO secret_drops (id, sealed, from_instance, to_instance, task, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+  const inserted = await env.DB.prepare(
+    "INSERT INTO secret_drops (id, sealed, from_instance, to_instance, task, created_at, expires_at) SELECT ?, ?, ?, ?, ?, ?, ? WHERE (SELECT COUNT(*) FROM secret_drops WHERE task = ?) < ?",
   )
     .bind(
       id,
@@ -41,8 +49,12 @@ export async function putSecret(env: Env, instance: string, body: Record<string,
       task.id,
       now,
       now + DROP_TTL_MS,
+      task.id,
+      MAX_DROPS_PER_TASK,
     )
     .run();
+  if (!inserted.meta?.changes)
+    throw new HttpError(429, `at most ${MAX_DROPS_PER_TASK} secrets can be waiting for one call`);
   await audit(env, {
     ...actor(instance),
     action: "secret.put",

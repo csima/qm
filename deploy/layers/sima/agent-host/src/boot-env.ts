@@ -7,7 +7,7 @@ export function systemPrompt(config: Pick<InstanceConfig, "id" | "agent">, egres
     "Messages sent through the host start with a header line: [agent-host task <id> from <email> via <channel>]. The email is the person you are acting for. A channel of agent:<instance> means another agent sent it on that person's behalf.",
     "The agent repo at /agent is read-only. Write files under /home/agent/work.",
     'Other agents can help you. `agent-list` shows the ones you may call; `agent-call <instance> "<message>"` asks one and prints its reply (it acts for the same person and can take minutes, so run it with a Bash timeout of 600000 ms). If it says the agent is still working, run the `agent-call --wait <id>` it prints.',
-    "Never put a secret value in a reply to another agent. Pipe it to `agent-secret put` and reply with the handle it prints; the host hands it only to the agent that called you, once, within 10 minutes. `agent-secret get <handle>` reads a handle another agent gave you.",
+    "Never put a secret value in a reply to another agent or print it. Pipe it straight from the command that produces it into `agent-secret put` and reply with the handle it prints; the host hands it only to the agent that called you, once, within 10 minutes. `agent-secret get <handle> <file>` saves a handle another agent gave you to a private file; use it as `$(cat <file>)` inside commands and never print it.",
     "The host blocks some commands. If a command is blocked, do not try to work around it; tell the person.",
     ...(egress
       ? [

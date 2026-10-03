@@ -73,7 +73,7 @@ async function github(env: Env, path: string, init: RequestInit = {}): Promise<R
   });
 }
 
-export async function headSha(env: Env, source: Pick<SourceRow, "repo" | "ref">): Promise<string> {
+async function headSha(env: Env, source: Pick<SourceRow, "repo" | "ref">): Promise<string> {
   const [, owner, name] = REPO.exec(source.repo)!;
   const res = await github(env, `/repos/${owner}/${name}/commits/${encodeURIComponent(source.ref || "HEAD")}`, {
     headers: { accept: "application/vnd.github.sha" },

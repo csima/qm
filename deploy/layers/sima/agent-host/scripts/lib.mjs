@@ -197,14 +197,7 @@ export function sqlString(value) {
   return value === null || value === undefined ? "NULL" : `'${String(value).replaceAll("'", "''")}'`;
 }
 
-const UNRECORDED_GRACE_MS = 24 * 60 * 60_000;
-
-export function versionTime(tag) {
-  const m = /^(\d{4})(\d{2})(\d{2})t(\d{2})(\d{2})(\d{2})-/.exec(tag);
-  return m ? Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]) : null;
-}
-
-export function imagesToDelete(registry, versions, kept, now = Date.now()) {
+export function imagesToDelete(registry, versions, kept) {
   const recorded = new Set(versions.map((v) => imageKey(v.agent, v.version)));
   const doomed = [];
   for (const { name, tags } of registry) {
@@ -212,9 +205,7 @@ export function imagesToDelete(registry, versions, kept, now = Date.now()) {
     const agent = name.slice("agent-host-".length);
     for (const tag of tags) {
       const key = imageKey(agent, tag);
-      if (kept[key]) continue;
-      const time = versionTime(tag);
-      if (recorded.has(key) || (time !== null && now - time > UNRECORDED_GRACE_MS)) doomed.push(`${name}:${tag}`);
+      if (recorded.has(key) && !kept[key]) doomed.push(`${name}:${tag}`);
     }
   }
   return doomed;

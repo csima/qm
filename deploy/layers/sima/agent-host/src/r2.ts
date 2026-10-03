@@ -1,4 +1,4 @@
-export const PART_SIZE = 8 * 1024 * 1024;
+const PART_SIZE = 8 * 1024 * 1024;
 
 export class PartBuffer {
   private chunks: Uint8Array[] = [];

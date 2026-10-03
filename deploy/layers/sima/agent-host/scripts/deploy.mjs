@@ -19,7 +19,7 @@ const query = (sql) => {
     ["--no-install", "wrangler", "d1", "execute", "agent-host", "--remote", "--json", "--command", sql],
     { cwd: HERE, encoding: "utf8" },
   );
-  if (res.status !== 0) fail(`D1 query failed:\n${res.stderr || res.stdout}`);
+  if (res.status !== 0) throw new Error(`D1 query failed:\n${res.stderr || res.stdout}`);
   return JSON.parse(res.stdout)[0].results;
 };
 
@@ -39,22 +39,26 @@ const res = spawnSync("npx", ["--no-install", "wrangler", "deploy", "--config", 
   cwd: HERE,
   stdio: "inherit",
 });
-if (res.status !== 0 || process.argv.includes("--dry-run")) process.exit(res.status ?? 1);
+if (res.status !== 0 || process.argv.length > 2) process.exit(res.status ?? 1);
 
-const listed = spawnSync(
-  "npx",
-  ["--no-install", "wrangler", "containers", "images", "list", "--json", "--filter", "agent-host"],
-  { cwd: HERE, encoding: "utf8" },
-);
-if (listed.status !== 0) {
-  console.warn(`Could not list registry images, nothing pruned:\n${listed.stderr}`);
-  process.exit(0);
-}
-const doomed = imagesToDelete(JSON.parse(listed.stdout), versions, images);
-for (const image of doomed) {
-  const deleted = spawnSync("npx", ["--no-install", "wrangler", "containers", "images", "delete", image], {
-    cwd: HERE,
-    encoding: "utf8",
-  });
-  console.log(deleted.status === 0 ? `Pruned ${image}` : `Could not prune ${image}: ${deleted.stderr.trim()}`);
+try {
+  const live = query("SELECT agent, version FROM instances WHERE status != 'deleted'");
+  const spared = { ...images, ...imagesToKeep(versions, live) };
+  const listed = spawnSync(
+    "npx",
+    ["--no-install", "wrangler", "containers", "images", "list", "--json", "--filter", "agent-host"],
+    { cwd: HERE, encoding: "utf8" },
+  );
+  if (listed.status !== 0) throw new Error(listed.stderr ?? "could not list registry images");
+  for (const image of imagesToDelete(JSON.parse(listed.stdout), versions, spared)) {
+    const deleted = spawnSync("npx", ["--no-install", "wrangler", "containers", "images", "delete", image], {
+      cwd: HERE,
+      encoding: "utf8",
+    });
+    console.log(
+      deleted.status === 0 ? `Pruned ${image}` : `Could not prune ${image}: ${(deleted.stderr ?? "").trim()}`,
+    );
+  }
+} catch (error) {
+  console.warn(`Deployed, but pruning old images failed: ${error.message}`);
 }
