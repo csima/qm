@@ -5,7 +5,7 @@ import { guardConfig, parseManifest } from "../scripts/lib.mjs";
 import { systemPrompt } from "../src/boot-env.ts";
 import { needsBuild, parseSource } from "../src/builds.ts";
 import { MAX_DEPTH, nextChain } from "../src/delegation.ts";
-import { MODEL_HOSTS, callAllowed, hostAllowed, modelKey, modelRequestAllowed } from "../src/policy.ts";
+import { MODEL_HOSTS, callAllowed, hostAllowed, modelKey, modelRequestBody } from "../src/policy.ts";
 
 const BASE = `mirror.gcr.io/library/debian@sha256:${"a".repeat(64)}`;
 const bash = (command: string) => ({ tool_name: "Bash", tool_input: { command } });
@@ -59,6 +59,10 @@ test("the command guard blocks baseline and agent rules for Bash only", () => {
     "\\rm -rf /",
     "rm -rf ~/*",
     "rm -rf $HOME/*",
+    'rm -rf "$HOME"',
+    'rm -rf "$HOME"/*',
+    'rm -rf "/"',
+    "r\\\nm -rf /",
     "sudo mkfs /dev/vdb",
   ])
     assert.ok(blockedReason(bash(command), rules), command);
@@ -77,6 +81,8 @@ test("the command guard blocks baseline and agent rules for Bash only", () => {
     "git rm -r src/old",
     "npm run rm-cache",
     "rm -rf ./dist",
+    'rm -rf "$HOME/.cache"',
+    "rm -rf ~/work/tmp",
   ])
     assert.equal(blockedReason(bash(command), rules), null, command);
   assert.equal(blockedReason(bash("OP   vault  delete Shared"), rules), "this command deletes a vault");
@@ -157,7 +163,7 @@ test("egress wildcards on shared hosting suffixes are refused", () => {
 
 test("model API requests that make Anthropic fetch other hosts are refused", () => {
   const ok = (body: unknown, path = "/v1/messages", headers = new Headers()) =>
-    modelRequestAllowed("POST", path, headers, typeof body === "string" ? body : JSON.stringify(body));
+    modelRequestBody("POST", path, headers, typeof body === "string" ? body : JSON.stringify(body)) !== null;
   assert.equal(ok({ model: "m", messages: [{ role: "user", content: "hi" }] }), true);
   assert.equal(ok({ tools: [{ name: "Bash", input_schema: {} }, { type: "web_search_20250305" }] }), true);
   assert.equal(ok({ tools: [{ type: "web_fetch_20250910", name: "web_fetch" }] }), false);
@@ -171,8 +177,19 @@ test("model API requests that make Anthropic fetch other hosts are refused", () 
   assert.equal(ok("not json"), false);
   assert.equal(ok("[1]"), false);
   assert.equal(ok({ model: "m" }, "/v1/messages", new Headers({ "content-encoding": "gzip" })), false);
-  assert.equal(modelRequestAllowed("GET", "/v1/models", new Headers(), null), true);
-  assert.equal(modelRequestAllowed("DELETE", "/v1/files/x", new Headers(), null), false);
+  assert.deepEqual(modelRequestBody("GET", "/v1/models", new Headers(), null), { body: null });
+  assert.equal(modelRequestBody("DELETE", "/v1/files/x", new Headers(), null), null);
+  const toolInput = {
+    messages: [
+      { role: "assistant", content: [{ type: "tool_use", input: { mcp_servers: [], source: { type: "url" } } }] },
+    ],
+  };
+  assert.equal(ok(toolInput), true);
+  assert.equal(ok({ tools: [{ name: "x", input_schema: { properties: { type: { type: "web_fetch" } } } }] }), true);
+  assert.deepEqual(
+    modelRequestBody("POST", "/v1/messages", new Headers(), '{"tools":[{"type":"web_fetch_20250910"}],"tools":[]}'),
+    { body: '{"tools":[]}' },
+  );
 });
 
 test("an agent call needs the target to be messageable by everyone who can steer the caller", () => {

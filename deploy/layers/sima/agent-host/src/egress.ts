@@ -1,7 +1,7 @@
 import { WorkerEntrypoint } from "cloudflare:workers";
 import type { Env } from "./env.ts";
 import { sha256Hex } from "./auth.ts";
-import { MODEL_HOSTS, hostAllowed, modelKey, modelRequestAllowed } from "./policy.ts";
+import { MODEL_HOSTS, hostAllowed, modelKey, modelRequestBody } from "./policy.ts";
 import { audit } from "./store.ts";
 
 const HOST_INTERNAL = "host.internal";
@@ -38,10 +38,12 @@ export class EgressProxy extends WorkerEntrypoint<Env> {
   private async modelRequest(req: Request): Promise<Request | null> {
     const key = modelKey(req.headers);
     if (key === null || !this.props.modelKeys.includes(await sha256Hex(key))) return null;
-    const bytes = req.method === "GET" || req.method === "HEAD" ? null : await req.arrayBuffer();
-    const text = bytes === null ? null : new TextDecoder().decode(bytes);
-    if (!modelRequestAllowed(req.method, new URL(req.url).pathname, req.headers, text)) return null;
-    return new Request(req.url, { method: req.method, headers: req.headers, body: bytes, redirect: "manual" });
+    const text = req.method === "GET" || req.method === "HEAD" ? null : await req.text();
+    const checked = modelRequestBody(req.method, new URL(req.url).pathname, req.headers, text);
+    if (!checked) return null;
+    const headers = new Headers(req.headers);
+    headers.delete("content-length");
+    return new Request(req.url, { method: req.method, headers, body: checked.body, redirect: "manual" });
   }
 
   async fetch(req: Request): Promise<Response> {

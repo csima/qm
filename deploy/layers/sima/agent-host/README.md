@@ -59,8 +59,10 @@ people who can steer either side: a call is allowed only if the named person **a
 message, attach to or administer the calling instance** (owner and sharing lists; `*` means anyone) may
 message the target, **and everyone who can steer the target may message the calling instance**. Calls
 can then only connect instances whose steerers could already reach each other directly. A call made
-without a current task acts for the owner and is refused while any task is open on the instance, so
-loop and depth limits cannot be dodged by leaving the parent out. Agents cannot message private
+without a current task acts for the owner and is refused while any task is open on the instance. Loop
+and depth limits follow the parent task the container names; since any session can read another
+session's task id, they bound runaway calls rather than enforce a security boundary (the eight-call
+cap still applies). Agents cannot message private
 sessions. Host-admin rights never apply to calls. The host records the parent task and the chain of instances, refuses loops and
 chains deeper than four, and allows eight open calls per instance, checked in the statement that
 queues the call. The target sees `via agent:<caller instance>` in the header. Sessions named `p-…`
@@ -73,9 +75,10 @@ The host builds it at once and, with `auto`, checks the branch head every five m
 commits. A build is a run of `.github/workflows/agent-build.yml` in `BUILD_REPO`, dispatched on
 `BUILD_WORKFLOW_REF` (GitHub only dispatches workflows present on that ref). The run checks out the
 builder from the repository variable `AGENT_BUILDER_REF` when set, otherwise from the workflow's own
-commit; callers cannot choose it. A commit counts as built once a version records it; a dispatched
-build that produced no version (failed, or dropped by the one-at-a-time build queue) is retried after
-30 minutes. Needed: host secret `GITHUB_BUILD_TOKEN` (fine-grained
+commit; callers cannot choose it. A commit counts as built once a version records it for the same
+repo and directory. The poller starts at most one build per five-minute tick (matching the
+one-at-a-time build queue), retries a commit that produced no version after 30 minutes, and gives up on
+it after three tries; "Build now" always dispatches. Needed: host secret `GITHUB_BUILD_TOKEN` (fine-grained
 token: Actions read/write on `BUILD_REPO`, Contents read on agent repos), and repository secrets
 `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `AGENT_REPOS_TOKEN` (Contents read on agent repos)
 in `BUILD_REPO`.

@@ -433,7 +433,7 @@ export class Instance extends DurableObject<Env> {
     ]);
     if (this.ctx.container?.running) await this.container.destroy().catch(() => undefined);
     await this.ctx.storage.delete("bootId");
-    await this.ctx.storage.deleteAlarm();
+    if (!this.removed) await this.ctx.storage.deleteAlarm();
   }
 
   resume(): Promise<void> {

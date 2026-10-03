@@ -187,8 +187,12 @@ export async function buildNow(env: Env, caller: Caller, id: string) {
 
 export async function pollSources(env: Env): Promise<void> {
   if (!env.GITHUB_BUILD_TOKEN) return;
-  const { results } = await env.DB.prepare("SELECT * FROM sources WHERE auto = 1").all<SourceRow>();
+  const { results } = await env.DB.prepare(
+    "SELECT * FROM sources WHERE auto = 1 ORDER BY COALESCE(last_build_at, 0)",
+  ).all<SourceRow>();
+  let dispatched = false;
   for (const row of results) {
+    if (dispatched) return;
     let sha: string;
     try {
       sha = await headSha(env, row);
@@ -199,6 +203,7 @@ export async function pollSources(env: Env): Promise<void> {
       continue;
     }
     if (!needsBuild(row, sha, await built(env, row, sha), Date.now())) continue;
+    dispatched = true;
     const error = await startBuild(env, row, sha);
     await audit(env, {
       actor: "host",

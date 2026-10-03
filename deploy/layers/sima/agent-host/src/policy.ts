@@ -81,19 +81,27 @@ function fetchesElsewhere(value: unknown, depth = 0): boolean {
   if (typeof node.type === "string" && /^web_fetch/.test(node.type)) return true;
   const source = node.source as { type?: unknown } | undefined;
   if (source && typeof source === "object" && source.type === "url") return true;
-  return Object.values(node).some((v) => fetchesElsewhere(v, depth + 1));
+  return Object.entries(node).some(
+    ([key, v]) => key !== "input" && key !== "input_schema" && fetchesElsewhere(v, depth + 1),
+  );
 }
 
-export function modelRequestAllowed(method: string, path: string, headers: Headers, body: string | null): boolean {
+export function modelRequestBody(
+  method: string,
+  path: string,
+  headers: Headers,
+  body: string | null,
+): { body: string | null } | null {
   const encoding = headers.get("content-encoding");
-  if (encoding && encoding !== "identity") return false;
-  if (method === "GET" || method === "HEAD") return true;
-  if (method !== "POST" || !MODEL_POST_PATHS.has(path) || body === null) return false;
+  if (encoding && encoding !== "identity") return null;
+  if (method === "GET" || method === "HEAD") return { body: null };
+  if (method !== "POST" || !MODEL_POST_PATHS.has(path) || body === null) return null;
   let parsed: unknown;
   try {
     parsed = JSON.parse(body);
   } catch {
-    return false;
+    return null;
   }
-  return Boolean(parsed) && typeof parsed === "object" && !Array.isArray(parsed) && !fetchesElsewhere(parsed);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed) || fetchesElsewhere(parsed)) return null;
+  return { body: JSON.stringify(parsed) };
 }
