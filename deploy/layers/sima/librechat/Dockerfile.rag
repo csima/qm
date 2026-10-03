@@ -1,0 +1,3 @@
+FROM registry.librechat.ai/librechat-ai/librechat-rag-api-dev-lite@sha256:a62ce2221b43a9bb57fa6cb733e7047c80132960272c33d5704028f3071a1251
+COPY rag-prestart.py /app/rag-prestart.py
+CMD ["sh", "-c", "python /app/rag-prestart.py && exec python main.py"]

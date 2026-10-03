@@ -1,8 +1,17 @@
 # LibreChat on Cloudflare (sima)
 
-LibreChat v0.8.8 runs as one Cloudflare Container (`standard-1`) behind a Worker at
-https://librechat.calebsima.com. The image is the published `librechat/librechat`
-image pinned by digest, plus `librechat.yaml`.
+LibreChat v0.8.8 runs behind a Worker at https://librechat.calebsima.com as three
+Cloudflare Containers, each a published image pinned by digest:
+
+| Container   | Image                                        | Size       | Reached by                           |
+| ----------- | -------------------------------------------- | ---------- | ------------------------------------ |
+| `LibreChat` | `librechat/librechat` + `librechat.yaml`     | standard-1 | the Worker (public)                  |
+| `Meili`     | `getmeili/meilisearch`                       | basic      | LibreChat at `http://meili.internal` |
+| `RagApi`    | LibreChat RAG API (lite) + `rag-prestart.py` | standard-1 | LibreChat at `http://rag.internal`   |
+
+The `.internal` hostnames are outbound intercepts on the calling container's class, so only
+that container can reach them. Each container receives only the settings it needs; the RAG
+database password (`RAGSVC_*`) never reaches LibreChat.
 
 - **Database:** MongoDB Atlas (`MONGO_URI` secret). Cloudflare has no MongoDB, and the
   container disk is wiped on restart, so nothing durable lives in the container.
@@ -12,9 +21,18 @@ image pinned by digest, plus `librechat.yaml`.
 - **Access:** Cloudflare Access apps "LibreChat" (owner-only) and "LibreChat machine
   paths" (bypass for `/health`). LibreChat's own email/password accounts sit behind it;
   the first account registered becomes the LibreChat admin.
-- **Off for now:** search (Meilisearch), file search (RAG API), code interpreter, web
-  search. The container sleeps after 2 hours without traffic, so scheduled chats only fire
-  while it is awake.
+- **Conversation search:** Meilisearch with an ephemeral index. LibreChat rebuilds it from
+  MongoDB when LibreChat starts against an empty index, and Meilisearch idles out after
+  LibreChat does, so the index is normally rebuilt on LibreChat's next start. If Meilisearch
+  alone restarts, search can be incomplete until LibreChat restarts.
+- **File search (RAG):** vectors in pgvector, in the `librechat_rag` schema of the
+  PlanetScale Postgres database qm uses; `rag-prestart.py` creates the extension and schema
+  on start. Embeddings come from Workers AI (`@cf/baai/bge-m3`): the RAG API calls
+  `http://embeddings.internal/v1/embeddings`, which the Worker serves through its `AI`
+  binding in OpenAI's response format, so no API key enters a container.
+- **Off for now:** code interpreter and web search (web search needs search, scraper and
+  reranker API keys). LibreChat sleeps after 2 hours without traffic, so scheduled chats
+  only fire while it is awake.
 - **Config changes:** changing a var or secret restarts the container on the next request.
 
 ## Deploy
@@ -27,8 +45,8 @@ npx wrangler deploy --secrets-file secrets.json   # first deploy; later deploys 
 
 `secrets.json` (never committed) holds `MONGO_URI`, `CREDS_KEY` (32-byte hex), `CREDS_IV`
 (16-byte hex), `JWT_SECRET`, `JWT_REFRESH_SECRET`, `ANTHROPIC_API_KEY`,
-`AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`. Keep `CREDS_KEY`/`CREDS_IV` stable: they
+`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `MEILI_MASTER_KEY` and `RAGSVC_DB_PASSWORD`. Keep `CREDS_KEY`/`CREDS_IV` stable: they
 encrypt stored user credentials.
 
-Building the image only pulls and copies, so it needs Docker but no network access during
-the build beyond the base image pull.
+Building the images only pulls and copies files, so it needs Docker but runs no commands
+inside the build.

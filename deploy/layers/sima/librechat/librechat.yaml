@@ -19,7 +19,7 @@ interface:
     groups: true
     roles: true
   webSearch: false
-  fileSearch: false
+  fileSearch: true
   runCode: false
 registration:
   socialLogins: []
